@@ -81,9 +81,9 @@ CONFIG = {
     "wellpass_anteil":      0.95,
     "admin_gebuehr":       15.00,   # Gebühr wenn Check-in vergessen wurde
 
-    "egym_gym_id":         "",                          # ← AUSFÜLLEN
+    "egym_gym_id":         "1042620",                          # ← AUSFÜLLEN
     "egym_einrichtung":    "Padel Circle Memmingen",    # ← PRÜFEN (exakt wie bei EGYM)
-    "wellpass_qr_link":    "",                          # ← AUSFÜLLEN nach QR-Hosting
+    "wellpass_qr_link":    "https://cdn.jsdelivr.net/gh/padelcircle-app/padelcircle-assets/wellpass.jpg",                          # ← AUSFÜLLEN nach QR-Hosting
 
     # ── Wellpass-Erkennung ───────────────────────────────────────────────────
     # Wer einen Wellpass-Rabatt bekam, musste einchecken.
@@ -109,6 +109,7 @@ CONFIG = {
         "Marcel Sidorov",
         "Mattia Mauta",
         "Mattia Niklas Mauta",
+        "Bernd Schelenz",
         # ← ERGÄNZEN
     ],
 }
