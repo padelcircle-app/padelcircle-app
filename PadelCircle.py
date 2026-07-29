@@ -116,26 +116,51 @@ CONFIG = {
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#   🎨  BRANDING
+
+# ══════════════════════════════════════════════════════════════════════════════
+#   🎨  BRANDING  —  identisch zur Website padelcircle.de
 # ══════════════════════════════════════════════════════════════════════════════
 
 C = {
-    "navy":       "#0A1628",
-    "navy_2":     "#14243D",
-    "navy_3":     "#1E3354",
-    "lime":       "#B8E000",
-    "lime_dark":  "#93B300",
-    "lime_glow":  "rgba(184,224,0,.35)",
-    "blue":       "#4A7FC1",
-    "ok":         "#43A047",
-    "warn":       "#F39C12",
-    "err":        "#E74C3C",
-    "bg":         "#F6F8FB",
-    "card":       "#FFFFFF",
-    "text":       "#0A1628",
-    "text_soft":  "#64748B",
-    "border":     "#E4E9F0",
+    # Hintergrund-Ebenen (dunkel, wie auf der Website)
+    "ink0":       "#0B0C10",   # Seitenhintergrund
+    "ink1":       "#111218",   # Karten
+    "ink2":       "#15171F",   # erhöhte Flächen
+    "ink3":       "#1C1F28",   # Eingabefelder, Hover
+
+    # Akzent
+    "volt":       "#DFFF00",   # Signalfarbe
+    "volt_dim":   "#B8D400",
+    "volt_glow":  "rgba(223,255,0,.30)",
+    "flash":      "#FF3131",
+
+    # Blau
+    "blue":       "#1244A8",
+    "blue_soft":  "#2E5BC9",
+    "anthracite": "#373A49",
+
+    # Text
+    "text":       "#F2F3F5",
+    "dim":        "#9BA0AB",
+    "faint":      "#5A606E",
+
+    # Linien
+    "line":       "rgba(255,255,255,.08)",
+    "line_str":   "rgba(255,255,255,.14)",
+
+    # Status
+    "ok":         "#4ADE80",
+    "warn":       "#FBBF24",
+    "err":        "#FF5A5A",
+
+    # Radien
+    "r_sm":       "8px",
+    "r":          "14px",
+    "r_lg":       "22px",
 }
+
+# Logo aus der Website (Padel-Schläger + Swoosh)
+LOGO_SVG = """<svg viewBox="100 220 780 540" xmlns="http://www.w3.org/2000/svg"><path fill="currentColor" d="m861 334c12.77-47.61-30.12-81.79-73.33-85.67-43.21-3.88-90.3 8.51-124.42 34.92-34.13 26.41-53.28 52.94-69.94 92.06-16.67 39.11-23.94 95.8-20.31 139.69 3.64 43.88 23.72 79.82 64.98 97.03 41.25 17.2 94.37 5.29 130.33-15.72 35.95-21.02 62.66-46.41 76.69-85.31-13.48 8-22.68 24.73-39 27-0.54-5.36 4.23-9.04 5-14-28.66 15.16-53.05 41.87-87 45 6.04-9.14 13.86-17.63 20.08-26.92 6.22-9.28 12.81-18.4 19.67-27.33 6.86-8.93 13.47-17.01 22.02-24.98 8.55-7.97 18.16-13.04 28.55-18.45 10.39-5.41 28.02-4.36 36.98 1.38 8.97 5.73 13.84 27.12 22.93 16.53 9.08-10.6 1.14-25.29-7.15-33.31-8.28-8.02-26.62-8.69-38.06-6.9-11.43 1.8-23.39 7.72-32.94 14.06-9.56 6.34-18.39 12.9-26.31 20.69-7.92 7.79-14.61 16.38-22.02 24.98-7.4 8.6-13.83 17.36-20.5 26.5-6.67 9.14-13.29 16.78-23.55 22.45-10.27 5.66-27.9 6.3-38.45 0.05-10.56-6.24-16.89-12.96-23.5-23.5-6.6-10.55-9.55-23.49-10.42-36.58-0.87-13.09-0.59-31.97 1.68-44.66 2.26-12.69 5.03-23.78 13.24-33.76 8.21-9.98 21.67-10.44 32.73-14.27 11.05-3.84 22.94-7.23 32.79-13.21 9.85-5.98 19.24-11.26 27.31-19.69 8.07-8.43 14.47-16.66 20-27 5.52-10.35 9.21-20.34 17.17-29.83 7.96-9.5 23.98-9.02 28.82 3.68 4.85 12.7 0.39 27.22-4.76 38.38-5.16 11.15-10.98 18.71-17.31 28.69 8.8-0.41 13.95-9.28 22-12 3.23 12.26-5.13 23.71-5 36 21.3-12.92 41.23-34.56 51-57 6.74 1.95 11.94 7.08 15.08 13.92 3.14 6.85 6.41 12.99 7.93 21.07 1.52 8.08 3.62 15.8 3.99 25.01 0.37 9.21 2.81 17.24 1 28-1.81 10.76 6.15 16.24 7.67 4.67 1.52-11.57 3.39-15.51 3.33-25.67-0.06-10.16 0.5-19.74-0.22-28.78-0.72-9.04-3.54-15.42-5.8-23.2-2.27-7.77-5.31-13.22-9.23-19.77-3.92-6.56-8.23-9.33-13.75-14.25zm-101-29c-14.81 43.31-56.02 80.34-102 86 19.82-40.38 58.12-75.89 102-86z"/><path fill="currentColor" d="m437 545c37.94-11.05 69.71-34.63 96.23-65.77 26.52-31.14 48.96-75.98 32.08-117.53-16.89-41.56-64.51-58.56-107.31-54.7-42.8 3.86-85.33 15.53-120 41 17.12-4.88 33.96-11.11 51-16-29.76 14.87-59.14 28.52-85.25 50.75-26.11 22.24-51.76 54.03-43.75 90.25 16.99-26.31 43.27-42.59 68.25-59.75 24.99-17.15 58.86-31.4 86.53-41.47 27.66-10.08 83.17-21.3 93.89 14.55 10.72 35.85-20.3 61.02-40.97 84.37-20.67 23.35-50.6 38.4-78.7 48.3 1.42-9.73 5.78-19.32 8.22-28.78 2.45-9.46 6.86-18.29 9.45-27.55 2.6-9.25 6.32-18.74 9.4-27.6 3.08-8.86 8.18-20.68 3.93-28.07-3.69 10.93-8.34 24.28-18 31-0.14-7.45 0.78-15.23-2-22-9.97 7.85-12.33 21.43-18.23 32.77-5.9 11.35-10.75 22.28-15.32 34.28-4.57 12-9.9 22.68-14.22 35.22-4.32 12.55-19.63 13.4-31.23 15.5-11.59 2.09-28.71 3.55-43 4 7.35 24.04 41.49 20.32 62 20-8.16 31.15-16.98 62.12-26 93-20.25 4.37-45.09 11.42-66 11-20.91-0.42-48.26 3.36-60.69-15.3-12.44-18.67 13.99-37.04 18.69-52.7-17.89 11.95-43.79 39.31-29 62 1.45 1.9 5.16 5.59 7 7 21.63 14.1 51.21 13 77 13 2.09-0.2 5.23-1 8-1 14.07 0.23 27.24-3.11 41-4-0.08 6.35-4.18 11.6-4 18 8.29 1.7 9.2-19.24 17.92-14.92 8.72 4.33 13.09-1.7 22.08-4.08 1.83 18.87 10.47 1.58 12.68-7.32 2.2-8.91 18.31-9.72 26.3-13.7 7.98-3.99 20.01-7.18 28.33-11.67 8.31-4.5 17.47-8.57 26-13 8.52-4.44 17.54-9.13 25.46-14.53 7.92-5.4 17.09-9.51 24.48-15.52 7.39-6.01 15.37-11.47 22.5-17.5 7.13-6.02 14.39-12.09 19.25-19.75-51.41 34.64-108.19 61.08-167 79 3.5-14.59 7.42-31.96 12.07-45.93 4.66-13.96 4.12-33.54 18.91-38.09 14.78-4.56 28.72-9.59 42.33-15.67 13.6-6.09 24.03-12.81 35.69-21.31 1.64-1.94 3.89-3.45 6-5-0.65 3.93-5.53 5.23-8 8-9.69 8.32-19 17.08-29 25z"/><path fill="currentColor" d="m208 534c-3.48 4.69-9.75 9.75-14 14-34.32 29.33-70.94 76.55-43.23 122.23 27.71 45.68 93.9 49.98 139.24 40.38 45.33-9.6 91.51-29.73 132.22-50.78 40.71-21.05 74.83-43.37 109.77-73.23 7.34-6.27 14.68-13.61 21-21 3.4-3.98 6.34-8.53 10-12 4.63 15.8 10.8 31.64 21 45 0.75 1.68 2.43 3.04 4 4-0.84 1.29-1.92 2.83-3 4-45.42 38.81-88.34 68.58-143.22 92.78-54.89 24.19-124.2 49.22-186.78 49.22-8.67 0-17.33 0-26 0-47.22 0-116-26.13-116-83 0-2.33-0.04-4.67 0-7 0.48-27.51 16.76-54.21 35.25-73.75 18.48-19.54 37.7-37.27 61.75-47.25 0.76 2.19-1.3 3.32-2 5z"/><path fill="currentColor" d="m314 757c116.34-7.9 235.89-42.71 317-132-10.84-2.93-19.72-10.67-28.92-17.08-9.2-6.41-15.81 9.56-24 15.16-8.19 5.6-16.49 12.94-25.63 18.62-9.14 5.68-18.39 11.59-28 17-9.61 5.41-18.88 10.98-29.16 15.84-10.27 4.87-21.16 9.54-31.84 14.16-10.69 4.61-21.81 7.94-33 12-11.19 4.05-21.99 8.08-34 10.98-12.01 2.9-23.59 6.37-36.22 8.79-12.63 2.42-25.08 4.66-38.33 6.67-13.25 2.01-27.75 1.99-41.67 3.33-13.92 1.34-30.43-2.67-44-1-1.38-2.14-4.81-0.48-7-1 1 1.36 3.36 1.62 5 2 17.12 3.98 36.07 6 54 6 2.04 0.2 5.23 1 8 1 11.67 0 23.33 0 35 0 2.77 0 5.91-0.8 8-1z"/><path fill="currentColor" d="m670 636c-12.92-0.26-26.12-7.69-33.25 2.75-7.12 10.45-15.2 14.3-23 23-7.79 8.7-16.94 13.1-25.67 20.33-8.72 7.23-19.4 10.87-28.85 17.15-9.46 6.27-19.52 10.28-30 15-10.48 4.72-21.08 9.85-32.16 13.84-11.08 4-22.57 8.29-34.06 11.94-11.49 3.65-24.02 6.81-35.78 10.21-11.77 3.4-24.25 5.95-36.23 8.78-1.9-0.23-3.95 0.57-5 2 5.64 0.72 12.07-0.52 17-1 4.33 0 8.67 0.12 13 0 2.19-0.06 4.42-0.75 6-1 100.95-12.49 201.5-48.63 276-122-7 -0.1-14 0.14-21 0-1.7-0.16-4.59-0.95-7-1z"/></svg>"""
 
 LOADING = {
     "laden": [
@@ -158,7 +183,6 @@ LOADING = {
         "😏 Never out.",
     ],
 }
-
 
 # ── Abgeleitet ────────────────────────────────────────────────────────────────
 
@@ -643,13 +667,11 @@ def login() -> bool:
         elif eingabe:
             st.session_state["auth_fehler"] = True
 
-    st.markdown("""
+    st.markdown(f"""
     <div class="pc-login">
-      <div class="pc-login-logo">
-        <span>PC</span>
-      </div>
+      <div class="mark">{LOGO_SVG}</div>
       <h1>PADEL CIRCLE</h1>
-      <div class="pc-login-sub">Command Center</div>
+      <div class="sub">Command Center</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -663,7 +685,7 @@ def login() -> bool:
         st.caption("Nach dem Login steht ein Token in der URL — "
                    "als Lesezeichen speichern und du bleibst 30 Tage angemeldet.")
 
-    st.markdown('<div class="pc-claim-line">ONCE IN &nbsp;·&nbsp; NEVER OUT</div>',
+    st.markdown('<div class="pc-claim">ONCE IN &nbsp;·&nbsp; NEVER OUT</div>',
                 unsafe_allow_html=True)
     return False
 
@@ -1213,210 +1235,350 @@ def winback_liste(mindest_buchungen: int = 3, tage_weg: int = 21) -> pd.DataFram
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#   🎨  DESIGN-SYSTEM  +  ANIMATIONEN
+
+# ══════════════════════════════════════════════════════════════════════════════
+#   🎨  DESIGN-SYSTEM  —  Look der Website padelcircle.de
 # ══════════════════════════════════════════════════════════════════════════════
 
 def css_laden():
     st.markdown(f"""
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
-      @keyframes pcFadeUp {{
-        from {{ opacity:0; transform:translateY(10px); }}
-        to   {{ opacity:1; transform:translateY(0); }}
-      }}
-      @keyframes pcPulse {{
-        0%,100% {{ box-shadow:0 0 0 0 {C['lime_glow']}; }}
-        50%     {{ box-shadow:0 0 0 7px rgba(184,224,0,0); }}
-      }}
-      @keyframes pcSweep {{
-        0%   {{ background-position:-180% 0; }}
-        100% {{ background-position:180% 0; }}
-      }}
-      @keyframes pcRing {{
-        from {{ stroke-dashoffset: 314; }}
-      }}
-      @keyframes pcPop {{
-        0%   {{ transform:scale(.9); opacity:0; }}
-        60%  {{ transform:scale(1.03); }}
-        100% {{ transform:scale(1); opacity:1; }}
-      }}
-      @keyframes pcGlow {{
-        0%,100% {{ opacity:.5; }}
-        50%     {{ opacity:1; }}
+      :root {{
+        --ink0:{C['ink0']}; --ink1:{C['ink1']}; --ink2:{C['ink2']}; --ink3:{C['ink3']};
+        --volt:{C['volt']}; --blue:{C['blue']};
+        --text:{C['text']}; --dim:{C['dim']}; --faint:{C['faint']};
+        --line:{C['line']}; --line-str:{C['line_str']};
+        --r:{C['r']}; --r-lg:{C['r_lg']}; --r-sm:{C['r_sm']};
       }}
 
-      .stApp {{ background:{C['bg']}; }}
-      #MainMenu, footer, header {{ visibility:hidden; }}
-      .block-container {{ padding-top:2rem; }}
+      @keyframes pcUp   {{ from{{opacity:0;transform:translateY(12px)}} to{{opacity:1;transform:none}} }}
+      @keyframes pcPop  {{ 0%{{opacity:0;transform:scale(.94)}} 60%{{transform:scale(1.02)}} 100%{{opacity:1;transform:scale(1)}} }}
+      @keyframes pcPulse{{ 0%,100%{{box-shadow:0 0 0 0 {C['volt_glow']}}} 50%{{box-shadow:0 0 0 9px rgba(223,255,0,0)}} }}
+      @keyframes pcSweep{{ 0%{{background-position:-200% 0}} 100%{{background-position:200% 0}} }}
+      @keyframes pcRing {{ from{{stroke-dashoffset:314}} }}
+      @keyframes pcFloat{{ 0%,100%{{transform:translateY(0)}} 50%{{transform:translateY(-5px)}} }}
 
-      /* ── Login ───────────────────────────────────────────────── */
-      .pc-login {{ text-align:center; margin:3.5rem 0 1.5rem;
-                   animation:pcFadeUp .5s ease both; }}
-      .pc-login-logo {{
-        display:inline-flex; align-items:center; justify-content:center;
-        width:92px; height:92px; border-radius:50%;
-        background:{C['navy']}; border:3px solid {C['lime']};
-        animation:pcPulse 2.6s ease-in-out infinite;
+      /* ═══ GRUNDLAGE ═══ */
+      html, body, .stApp, [data-testid="stAppViewContainer"],
+      [data-testid="stHeader"], .main, .block-container {{
+        background: var(--ink0) !important;
+        color: var(--text) !important;
+        font-family: 'Montserrat', -apple-system, BlinkMacSystemFont, sans-serif !important;
       }}
-      .pc-login-logo span {{ color:#fff; font-size:31px; font-weight:700;
-                            letter-spacing:1px; }}
-      .pc-login h1 {{ color:{C['navy']}; margin:1.1rem 0 .15rem;
-                      font-size:2rem; letter-spacing:4px; font-weight:600; }}
-      .pc-login-sub {{ color:{C['text_soft']}; font-size:.85rem;
-                       letter-spacing:2px; text-transform:uppercase; }}
+      .block-container {{ padding-top:2.2rem; padding-bottom:3rem; max-width:1240px; }}
+      #MainMenu, footer, [data-testid="stToolbar"], [data-testid="stDecoration"] {{ display:none !important; }}
 
-      .pc-claim-line {{
-        text-align:center; margin:2.5rem 0 1rem;
-        font-size:10px; letter-spacing:4px; color:{C['text_soft']};
-        animation:pcGlow 3.5s ease-in-out infinite;
+      h1,h2,h3,h4,h5,h6, p, span, div, label, li, td, th {{
+        color: var(--text);
+        font-family:'Montserrat',sans-serif !important;
+        letter-spacing:-.005em;
+      }}
+      .stMarkdown p, .stMarkdown li {{ color: var(--text); line-height:1.6; }}
+      [data-testid="stCaptionContainer"], .stCaption, small {{ color: var(--dim) !important; }}
+      hr {{ border-color: var(--line) !important; }}
+      a {{ color: var(--volt) !important; }}
+
+      /* ═══ LOGIN ═══ */
+      .pc-login {{ text-align:center; margin:3rem 0 1.4rem; animation:pcUp .55s ease both; }}
+      .pc-login .mark {{
+        width:132px; height:auto; color:var(--volt);
+        animation:pcFloat 4s ease-in-out infinite;
+      }}
+      .pc-login h1 {{
+        margin:1.3rem 0 .2rem; font-size:2.1rem; font-weight:800;
+        letter-spacing:.16em; color:var(--text);
+      }}
+      .pc-login .sub {{
+        color:var(--dim); font-size:.8rem; letter-spacing:.22em;
+        text-transform:uppercase; font-weight:500;
+      }}
+      .pc-claim {{
+        text-align:center; margin:2.6rem 0 1rem; font-size:10px;
+        letter-spacing:.42em; color:var(--faint); font-weight:600;
       }}
 
-      /* ── Header ──────────────────────────────────────────────── */
+      /* ═══ HEADER ═══ */
       .pc-head {{
-        background:{C['navy']}; border-radius:16px;
-        padding:1.5rem 1.8rem; margin-bottom:1.3rem;
-        position:relative; overflow:hidden;
-        animation:pcFadeUp .45s ease both;
+        background:linear-gradient(135deg,var(--ink1) 0%,var(--ink2) 100%);
+        border:1px solid var(--line); border-radius:var(--r-lg);
+        padding:1.5rem 1.8rem; margin-bottom:1.4rem;
+        position:relative; overflow:hidden; animation:pcUp .45s ease both;
       }}
       .pc-head::after {{
-        content:''; position:absolute; left:0; right:0; bottom:0; height:3px;
-        background:linear-gradient(90deg,{C['lime']} 0%,{C['lime']} 35%,
-                   rgba(184,224,0,.15) 60%,{C['lime']} 100%);
-        background-size:200% 100%;
-        animation:pcSweep 5s linear infinite;
+        content:''; position:absolute; left:0; right:0; bottom:0; height:2px;
+        background:linear-gradient(90deg,var(--volt),rgba(223,255,0,.1),var(--volt));
+        background-size:200% 100%; animation:pcSweep 6s linear infinite;
       }}
-      .pc-head h1 {{ color:#fff; margin:0; font-size:1.55rem;
-                     font-weight:600; letter-spacing:.5px; }}
-      .pc-head .sub {{ color:{C['lime']}; font-size:.75rem;
-                       letter-spacing:2.5px; margin-top:.35rem;
-                       text-transform:uppercase; }}
-
-      /* ── Karten & Kennzahlen ────────────────────────────────── */
-      .pc-card {{
-        background:{C['card']}; border:1px solid {C['border']};
-        border-radius:12px; padding:1rem 1.2rem; margin-bottom:.75rem;
-        animation:pcFadeUp .4s ease both;
+      .pc-head .row {{ display:flex; align-items:center; gap:14px; }}
+      .pc-head .mark {{ width:46px; height:auto; color:var(--volt); flex-shrink:0; }}
+      .pc-head h1 {{ margin:0; font-size:1.5rem; font-weight:700; letter-spacing:-.01em; }}
+      .pc-head .sub {{
+        color:var(--volt); font-size:.68rem; letter-spacing:.2em;
+        margin-top:.3rem; text-transform:uppercase; font-weight:600;
       }}
 
+      /* ═══ KENNZAHLEN ═══ */
       .pc-kpi {{
-        background:{C['card']}; border:1px solid {C['border']};
-        border-left:3px solid {C['lime']}; border-radius:11px;
-        padding:.9rem 1.1rem; height:100%;
-        transition:transform .16s ease, box-shadow .16s ease;
-        animation:pcPop .4s ease both;
+        background:var(--ink1); border:1px solid var(--line);
+        border-radius:var(--r); padding:1rem 1.15rem; height:100%;
+        transition:border-color .18s ease, transform .18s ease;
+        animation:pcPop .45s ease both;
       }}
-      .pc-kpi:hover {{ transform:translateY(-2px);
-                       box-shadow:0 6px 18px rgba(10,22,40,.09); }}
-      .pc-kpi .l {{ color:{C['text_soft']}; font-size:.7rem;
-                    text-transform:uppercase; letter-spacing:1.1px; }}
-      .pc-kpi .v {{ color:{C['navy']}; font-size:1.5rem;
-                    font-weight:650; margin-top:.2rem; line-height:1.15; }}
-      .pc-kpi .h {{ color:{C['text_soft']}; font-size:.73rem; margin-top:.15rem; }}
-      .pc-kpi .d {{ font-size:.73rem; margin-top:.2rem; font-weight:600; }}
+      .pc-kpi:hover {{ border-color:var(--line-str); transform:translateY(-2px); }}
+      .pc-kpi .l {{
+        color:var(--dim); font-size:.66rem; text-transform:uppercase;
+        letter-spacing:.13em; font-weight:600;
+      }}
+      .pc-kpi .v {{
+        color:var(--text); font-size:1.6rem; font-weight:700;
+        margin-top:.35rem; line-height:1.1; letter-spacing:-.02em;
+      }}
+      .pc-kpi .h {{ color:var(--faint); font-size:.73rem; margin-top:.3rem; }}
+      .pc-kpi .d {{ font-size:.73rem; margin-top:.3rem; font-weight:700; }}
       .pc-kpi .d.up   {{ color:{C['ok']}; }}
       .pc-kpi .d.down {{ color:{C['err']}; }}
 
-      /* ── Hinweisboxen ───────────────────────────────────────── */
-      .pc-box {{ border-radius:10px; padding:.8rem 1.05rem; margin:.55rem 0;
-                 font-size:.88rem; line-height:1.55;
-                 animation:pcFadeUp .35s ease both; }}
-      .pc-box.info  {{ background:#EFF5FF; border-left:3px solid {C['blue']}; color:#1B3A5F; }}
-      .pc-box.ok    {{ background:#F0F9EA; border-left:3px solid {C['ok']};   color:#1B5E20; }}
-      .pc-box.warn  {{ background:#FFF7E6; border-left:3px solid {C['warn']}; color:#7A4A00; }}
-      .pc-box.err   {{ background:#FDEFEE; border-left:3px solid {C['err']};  color:#8B1F1F; }}
+      /* ═══ KARTEN ═══ */
+      .pc-card {{
+        background:var(--ink1); border:1px solid var(--line);
+        border-radius:var(--r); padding:1rem 1.2rem; margin-bottom:.7rem;
+        animation:pcUp .4s ease both;
+      }}
 
-      /* ── Modul-Kacheln ──────────────────────────────────────── */
+      /* ═══ HINWEISE ═══ */
+      .pc-box {{
+        border-radius:var(--r); padding:.9rem 1.15rem; margin:.6rem 0;
+        font-size:.87rem; line-height:1.62; border:1px solid;
+        animation:pcUp .4s ease both;
+      }}
+      .pc-box.info {{ background:rgba(46,91,201,.10); border-color:rgba(46,91,201,.4); color:#CBD9F5; }}
+      .pc-box.ok   {{ background:rgba(74,222,128,.09); border-color:rgba(74,222,128,.35); color:#B4F5CD; }}
+      .pc-box.warn {{ background:rgba(251,191,36,.09); border-color:rgba(251,191,36,.35); color:#FCE7A8; }}
+      .pc-box.err  {{ background:rgba(255,90,90,.09);  border-color:rgba(255,90,90,.35);  color:#FFC9C9; }}
+      .pc-box b {{ color:var(--volt); }}
+
+      /* ═══ MODUL-KACHELN ═══ */
       .pc-tile {{
-        background:{C['navy']}; border:1px solid rgba(184,224,0,.28);
-        border-radius:14px; padding:1.1rem 1.2rem 1.25rem;
-        min-height:132px; position:relative;
-        transition:transform .18s ease, border-color .18s ease,
-                   box-shadow .18s ease;
-        animation:pcPop .45s ease both;
+        background:linear-gradient(150deg,var(--ink1) 0%,var(--ink2) 100%);
+        border:1px solid var(--line); border-radius:var(--r-lg);
+        padding:1.15rem 1.25rem 1.3rem; min-height:142px; position:relative;
+        transition:border-color .2s ease, transform .2s ease, box-shadow .2s ease;
+        animation:pcPop .5s ease both;
       }}
-      .pc-tile:hover {{ transform:translateY(-3px);
-                        border-color:{C['lime']};
-                        box-shadow:0 10px 26px rgba(10,22,40,.22); }}
-      .pc-tile.soon {{ border-style:dashed; border-color:rgba(255,255,255,.18);
-                       opacity:.5; }}
-      .pc-tile.soon:hover {{ transform:none; box-shadow:none; }}
-      .pc-tile .ic {{ font-size:1.45rem; }}
-      .pc-tile .ti {{ color:#fff; font-size:.98rem; font-weight:600;
-                      margin-top:.6rem; }}
-      .pc-tile .de {{ color:rgba(255,255,255,.52); font-size:.78rem;
-                      margin-top:.2rem; line-height:1.45; }}
+      .pc-tile:hover {{
+        border-color:var(--volt); transform:translateY(-4px);
+        box-shadow:0 14px 34px rgba(0,0,0,.5);
+      }}
+      .pc-tile.soon {{ border-style:dashed; opacity:.42; }}
+      .pc-tile.soon:hover {{ transform:none; box-shadow:none; border-color:var(--line); }}
+      .pc-tile .ic {{ font-size:1.5rem; }}
+      .pc-tile .ti {{ color:var(--text); font-size:1rem; font-weight:700; margin-top:.65rem; }}
+      .pc-tile .de {{ color:var(--dim); font-size:.78rem; margin-top:.28rem; line-height:1.5; }}
       .pc-tile .bg {{
-        position:absolute; top:1rem; right:1.1rem;
-        background:{C['lime']}; color:{C['navy']};
-        font-size:.63rem; font-weight:700; padding:.16rem .52rem;
-        border-radius:10px; letter-spacing:.4px;
+        position:absolute; top:1rem; right:1.1rem; background:var(--volt);
+        color:#0A0A0A; font-size:.62rem; font-weight:800; padding:.2rem .6rem;
+        border-radius:999px; letter-spacing:.06em; text-transform:uppercase;
       }}
-      .pc-tile .bg.alert {{ animation:pcPulse 2s ease-in-out infinite; }}
-      .pc-tile .bg.muted {{ background:rgba(255,255,255,.11);
-                            color:rgba(255,255,255,.55); }}
+      .pc-tile .bg.alert {{ animation:pcPulse 2.2s ease-in-out infinite; }}
+      .pc-tile .bg.muted {{ background:rgba(255,255,255,.1); color:var(--dim); }}
 
-      /* ── Fortschrittsring ───────────────────────────────────── */
-      .pc-ring-wrap {{ display:flex; align-items:center; gap:1.2rem;
-                       background:{C['card']}; border:1px solid {C['border']};
-                       border-radius:12px; padding:1.1rem 1.3rem;
-                       animation:pcFadeUp .4s ease both; }}
-      .pc-ring circle.bar {{ animation:pcRing 1.1s ease-out both; }}
+      /* ═══ RING ═══ */
+      .pc-ring-wrap {{
+        display:flex; align-items:center; gap:1.3rem; background:var(--ink1);
+        border:1px solid var(--line); border-radius:var(--r);
+        padding:1.15rem 1.35rem; animation:pcUp .45s ease both;
+      }}
+      .pc-ring circle.bar {{ animation:pcRing 1.2s cubic-bezier(.2,.8,.3,1) both; }}
 
-      /* ── Streak-Banner ──────────────────────────────────────── */
+      /* ═══ SERIE ═══ */
       .pc-streak {{
-        background:linear-gradient(100deg,{C['navy']} 0%,{C['navy_3']} 100%);
-        border-radius:12px; padding:1rem 1.3rem; color:#fff;
-        display:flex; align-items:center; justify-content:space-between;
-        animation:pcFadeUp .4s ease both;
+        background:linear-gradient(105deg,var(--blue) 0%,#0A2A6B 100%);
+        border:1px solid rgba(46,91,201,.5); border-radius:var(--r);
+        padding:1.05rem 1.35rem; display:flex; align-items:center;
+        justify-content:space-between; animation:pcUp .45s ease both;
       }}
-      .pc-streak .n {{ font-size:2rem; font-weight:700; color:{C['lime']};
-                       line-height:1; }}
-      .pc-streak .t {{ font-size:.8rem; color:rgba(255,255,255,.65);
-                       letter-spacing:.4px; }}
+      .pc-streak .t {{ font-size:.66rem; color:rgba(255,255,255,.65);
+                       letter-spacing:.18em; text-transform:uppercase; font-weight:600; }}
+      .pc-streak .n {{ font-size:2.2rem; font-weight:800; color:var(--volt); line-height:1; }}
 
-      /* ── Spieler-Zeile ──────────────────────────────────────── */
+      /* ═══ ZEILEN ═══ */
       .pc-row {{
-        background:{C['card']}; border:1px solid {C['border']};
-        border-radius:10px; padding:.7rem 1rem; margin-bottom:.45rem;
-        display:flex; align-items:center; justify-content:space-between;
-        transition:border-color .15s ease;
+        background:var(--ink1); border:1px solid var(--line); border-radius:var(--r-sm);
+        padding:.72rem 1rem; margin-bottom:.4rem; display:flex;
+        align-items:center; justify-content:space-between;
+        transition:border-color .16s ease;
       }}
-      .pc-row:hover {{ border-color:{C['lime']}; }}
-      .pc-row .nm {{ font-weight:600; color:{C['navy']}; }}
-      .pc-row .mt {{ color:{C['text_soft']}; font-size:.8rem; }}
-
+      .pc-row:hover {{ border-color:var(--line-str); }}
+      .pc-row .nm {{ font-weight:600; color:var(--text); }}
+      .pc-row .mt {{ color:var(--dim); font-size:.8rem; }}
       .pc-medal {{ font-size:1.05rem; margin-right:.4rem; }}
 
-      /* ── Rang-Abzeichen ─────────────────────────────────────── */
       .pc-chip {{
-        display:inline-block; padding:.14rem .55rem; border-radius:20px;
-        font-size:.68rem; font-weight:600; letter-spacing:.3px;
+        display:inline-block; padding:.16rem .6rem; border-radius:999px;
+        font-size:.67rem; font-weight:700; letter-spacing:.03em;
       }}
-      .pc-chip.lime {{ background:{C['lime']}; color:{C['navy']}; }}
-      .pc-chip.soft {{ background:#EEF2F7; color:{C['text_soft']}; }}
-      .pc-chip.warn {{ background:#FFF0D6; color:#7A4A00; }}
-      .pc-chip.err  {{ background:#FDE2E0; color:#8B1F1F; }}
+      .pc-chip.lime {{ background:var(--volt); color:#0A0A0A; }}
+      .pc-chip.soft {{ background:rgba(255,255,255,.08); color:var(--dim); }}
+      .pc-chip.warn {{ background:rgba(251,191,36,.2); color:{C['warn']}; }}
+      .pc-chip.err  {{ background:rgba(255,90,90,.2); color:{C['err']}; }}
 
-      /* ── Buttons ────────────────────────────────────────────── */
-      div.stButton > button {{ border-radius:8px; font-weight:500;
-                               transition:transform .12s ease; }}
+      /* ═══ BUTTONS ═══ */
+      div.stButton > button, div.stDownloadButton > button {{
+        border-radius:999px !important; font-weight:600 !important;
+        font-size:.85rem !important; padding:.5rem 1.15rem !important;
+        font-family:'Montserrat',sans-serif !important;
+        background:transparent !important; color:var(--text) !important;
+        border:1px solid var(--line-str) !important;
+        transition:all .16s ease !important;
+      }}
+      div.stButton > button:hover, div.stDownloadButton > button:hover {{
+        border-color:var(--volt) !important; color:var(--volt) !important;
+        background:rgba(223,255,0,.06) !important;
+      }}
+      div.stButton > button[kind="primary"], div.stDownloadButton > button[kind="primary"] {{
+        background:var(--volt) !important; color:#0A0A0A !important;
+        border-color:var(--volt) !important; font-weight:700 !important;
+      }}
+      div.stButton > button[kind="primary"]:hover, div.stDownloadButton > button[kind="primary"]:hover {{
+        background:#EFFF4D !important; color:#0A0A0A !important;
+      }}
+      div.stButton > button:disabled {{
+        opacity:.32 !important; color:var(--faint) !important;
+        border-color:var(--line) !important; background:transparent !important;
+      }}
       div.stButton > button:active {{ transform:scale(.98); }}
-      div.stButton > button[kind="primary"] {{
-        background:{C['navy']}; border:1px solid {C['navy']};
+
+      /* ═══ EINGABEFELDER ═══ */
+      .stTextInput input, .stNumberInput input, .stTextArea textarea,
+      .stDateInput input, .stTimeInput input {{
+        background:var(--ink3) !important; color:var(--text) !important;
+        border:1px solid var(--line-str) !important; border-radius:var(--r-sm) !important;
+        font-family:'Montserrat',sans-serif !important;
       }}
-      div.stButton > button[kind="primary"]:hover {{
-        background:{C['navy_2']}; border-color:{C['lime']};
+      .stTextInput input:focus, .stNumberInput input:focus, .stTextArea textarea:focus {{
+        border-color:var(--volt) !important; box-shadow:0 0 0 2px rgba(223,255,0,.14) !important;
+      }}
+      .stTextInput input::placeholder, .stTextArea textarea::placeholder {{ color:var(--faint) !important; }}
+      [data-testid="stWidgetLabel"] label, [data-testid="stWidgetLabel"] p {{
+        color:var(--dim) !important; font-size:.78rem !important;
+        font-weight:600 !important; letter-spacing:.02em;
+      }}
+      [data-testid="stNumberInputStepUp"], [data-testid="stNumberInputStepDown"] {{
+        background:var(--ink3) !important; color:var(--text) !important;
+        border-color:var(--line-str) !important;
+      }}
+      [data-testid="stNumberInputStepUp"]:hover, [data-testid="stNumberInputStepDown"]:hover {{
+        background:var(--volt) !important; color:#0A0A0A !important;
       }}
 
-      /* ── Tabs ───────────────────────────────────────────────── */
-      .stTabs [data-baseweb="tab-list"] {{ gap:.25rem; }}
-      .stTabs [data-baseweb="tab"] {{ border-radius:8px 8px 0 0;
-                                      padding:.4rem 1rem; }}
+      /* Auswahlfelder */
+      .stSelectbox div[data-baseweb="select"] > div,
+      .stMultiSelect div[data-baseweb="select"] > div {{
+        background:var(--ink3) !important; border-color:var(--line-str) !important;
+        border-radius:var(--r-sm) !important; color:var(--text) !important;
+      }}
+      div[data-baseweb="popover"] li, div[data-baseweb="menu"] li {{
+        background:var(--ink2) !important; color:var(--text) !important;
+      }}
+      div[data-baseweb="popover"] li:hover, div[data-baseweb="menu"] li:hover {{
+        background:var(--ink3) !important; color:var(--volt) !important;
+      }}
+      div[data-baseweb="popover"] > div {{ background:var(--ink2) !important; }}
+
+      /* Radio + Checkbox */
+      .stRadio label, .stCheckbox label {{ color:var(--text) !important; }}
+      .stRadio [role="radiogroup"] label span {{ color:var(--text) !important; }}
+
+      /* Schieberegler */
+      .stSlider [data-baseweb="slider"] div[role="slider"] {{ background:var(--volt) !important; }}
+      .stSlider [data-testid="stTickBar"] {{ color:var(--faint) !important; }}
+      .stSlider [data-baseweb="slider"] > div > div {{ background:var(--volt) !important; }}
+
+      /* Datei-Upload */
+      [data-testid="stFileUploader"] section {{
+        background:var(--ink1) !important; border:1.5px dashed var(--line-str) !important;
+        border-radius:var(--r) !important;
+      }}
+      [data-testid="stFileUploader"] section:hover {{ border-color:var(--volt) !important; }}
+      [data-testid="stFileUploader"] section small,
+      [data-testid="stFileUploader"] section span {{ color:var(--dim) !important; }}
+      [data-testid="stFileUploader"] button {{
+        background:transparent !important; color:var(--text) !important;
+        border:1px solid var(--line-str) !important; border-radius:999px !important;
+      }}
+      [data-testid="stFileUploaderFile"] {{ background:var(--ink2) !important; }}
+
+      /* ═══ TABS ═══ */
+      .stTabs [data-baseweb="tab-list"] {{
+        gap:.3rem; border-bottom:1px solid var(--line);
+        background:transparent;
+      }}
+      .stTabs [data-baseweb="tab"] {{
+        border-radius:var(--r-sm) var(--r-sm) 0 0; padding:.5rem 1.1rem;
+        color:var(--dim) !important; font-weight:600; font-size:.85rem;
+        background:transparent;
+      }}
+      .stTabs [data-baseweb="tab"]:hover {{ color:var(--text) !important; }}
       .stTabs [aria-selected="true"] {{
-        background:{C['navy']} !important; color:#fff !important;
+        background:var(--ink2) !important; color:var(--volt) !important;
+      }}
+      .stTabs [data-baseweb="tab-highlight"] {{ background:var(--volt) !important; }}
+      .stTabs [data-baseweb="tab-border"] {{ background:var(--line) !important; }}
+
+      /* ═══ AUSKLAPPER ═══ */
+      [data-testid="stExpander"] {{
+        background:var(--ink1) !important; border:1px solid var(--line) !important;
+        border-radius:var(--r) !important;
+      }}
+      [data-testid="stExpander"] summary {{ color:var(--text) !important; font-weight:600; }}
+      [data-testid="stExpander"] summary:hover {{ color:var(--volt) !important; }}
+      [data-testid="stExpander"] svg {{ fill:var(--dim) !important; }}
+
+      /* ═══ TABELLEN ═══ */
+      [data-testid="stDataFrame"], [data-testid="stTable"] {{
+        background:var(--ink1) !important; border:1px solid var(--line) !important;
+        border-radius:var(--r) !important;
+      }}
+      [data-testid="stDataFrame"] * {{ color:var(--text) !important; }}
+
+      /* ═══ CODE ═══ */
+      .stCode, pre, code {{
+        background:var(--ink2) !important; color:var(--text) !important;
+        border:1px solid var(--line) !important; border-radius:var(--r-sm) !important;
+      }}
+      .stCode pre {{ border:none !important; }}
+
+      /* ═══ SEITENLEISTE ═══ */
+      section[data-testid="stSidebar"] {{
+        background:var(--ink1) !important; border-right:1px solid var(--line);
+      }}
+      section[data-testid="stSidebar"] * {{ color:var(--text); }}
+      section[data-testid="stSidebar"] [data-testid="stCaptionContainer"] {{ color:var(--faint) !important; }}
+      section[data-testid="stSidebar"] div.stButton > button {{
+        text-align:left !important; justify-content:flex-start !important;
+        border-radius:var(--r-sm) !important; border-color:transparent !important;
+        font-weight:500 !important;
+      }}
+      section[data-testid="stSidebar"] div.stButton > button:hover {{
+        background:var(--ink3) !important; border-color:var(--line-str) !important;
       }}
 
-      /* ── Sidebar ────────────────────────────────────────────── */
-      section[data-testid="stSidebar"] {{ background:{C['card']}; }}
+      /* ═══ MELDUNGEN ═══ */
+      [data-testid="stAlert"] {{ border-radius:var(--r) !important; }}
+      .stSuccess {{ background:rgba(74,222,128,.11) !important; color:#B4F5CD !important; }}
+      .stError   {{ background:rgba(255,90,90,.11) !important;  color:#FFC9C9 !important; }}
+      .stWarning {{ background:rgba(251,191,36,.11) !important; color:#FCE7A8 !important; }}
+      .stInfo    {{ background:rgba(46,91,201,.11) !important;  color:#CBD9F5 !important; }}
+
+      /* ═══ FORTSCHRITT & SPINNER ═══ */
+      .stProgress > div > div > div > div {{ background:var(--volt) !important; }}
+      .stSpinner > div {{ border-top-color:var(--volt) !important; }}
+
+      /* ═══ DIAGRAMME ═══ */
+      .js-plotly-plot .plotly {{ background:transparent !important; }}
     </style>
     """, unsafe_allow_html=True)
 
@@ -1424,20 +1586,23 @@ def css_laden():
 def head(titel: str, unter: str = ""):
     st.markdown(f"""
     <div class="pc-head">
-      <h1>{titel}</h1>
-      <div class="sub">{unter or CONFIG['claim']}</div>
+      <div class="row">
+        <div class="mark">{LOGO_SVG}</div>
+        <div>
+          <h1>{titel}</h1>
+          <div class="sub">{unter or CONFIG['claim']}</div>
+        </div>
+      </div>
     </div>""", unsafe_allow_html=True)
 
 
 def kpi(label: str, wert: str, hinweis: str = "", delta: float = None,
         delta_text: str = ""):
-    """Kennzahl-Kachel. delta = Veränderung in % gegenüber Vorperiode."""
     d_html = ""
     if delta is not None:
         richtung = "up" if delta >= 0 else "down"
         pfeil = "▲" if delta >= 0 else "▼"
-        d_html = (f'<div class="d {richtung}">{pfeil} {abs(delta):.0f}% '
-                  f'{delta_text}</div>')
+        d_html = f'<div class="d {richtung}">{pfeil} {abs(delta):.0f}% {delta_text}</div>'
     st.markdown(f"""
     <div class="pc-kpi">
       <div class="l">{label}</div>
@@ -1453,28 +1618,27 @@ def box(text: str, art: str = "info"):
 
 def fortschritts_ring(prozent_wert: float, mitte_text: str,
                       titel: str, unter: str = ""):
-    """Animierter SVG-Ring — z.B. für den Monatsziel-Fortschritt."""
     p = max(0.0, min(float(prozent_wert), 100.0))
     umfang = 314.0
     offset = umfang - (p / 100.0 * umfang)
-    farbe = C["lime"] if p >= 100 else (C["blue"] if p >= 60 else C["warn"])
-
+    farbe = C["volt"] if p >= 100 else (C["blue_soft"] if p >= 60 else C["warn"])
     st.markdown(f"""
     <div class="pc-ring-wrap">
-      <svg class="pc-ring" width="108" height="108" viewBox="0 0 120 120">
+      <svg class="pc-ring" width="110" height="110" viewBox="0 0 120 120">
         <circle cx="60" cy="60" r="50" fill="none"
-                stroke="{C['border']}" stroke-width="10"/>
+                stroke="{C['line_str']}" stroke-width="9"/>
         <circle class="bar" cx="60" cy="60" r="50" fill="none"
-                stroke="{farbe}" stroke-width="10" stroke-linecap="round"
+                stroke="{farbe}" stroke-width="9" stroke-linecap="round"
                 stroke-dasharray="{umfang}" stroke-dashoffset="{offset}"
                 transform="rotate(-90 60 60)"/>
-        <text x="60" y="66" text-anchor="middle"
-              font-size="21" font-weight="650" fill="{C['navy']}">{mitte_text}</text>
+        <text x="60" y="67" text-anchor="middle" font-size="22"
+              font-weight="700" fill="{C['text']}"
+              font-family="Montserrat,sans-serif">{mitte_text}</text>
       </svg>
       <div>
-        <div style="font-weight:600;color:{C['navy']};font-size:1.02rem;">{titel}</div>
-        <div style="color:{C['text_soft']};font-size:.83rem;margin-top:.25rem;
-                    line-height:1.5;">{unter}</div>
+        <div style="font-weight:700;color:{C['text']};font-size:1.02rem;">{titel}</div>
+        <div style="color:{C['dim']};font-size:.83rem;margin-top:.3rem;
+                    line-height:1.55;">{unter}</div>
       </div>
     </div>""", unsafe_allow_html=True)
 
@@ -1486,8 +1650,8 @@ def streak_banner(tage: int):
     st.markdown(f"""
     <div class="pc-streak">
       <div>
-        <div class="t">SAUBERE SERIE</div>
-        <div style="font-size:.92rem;margin-top:.2rem;">
+        <div class="t">Saubere Serie</div>
+        <div style="font-size:.92rem;margin-top:.3rem;color:#fff;">
           {tage} {wort} in Folge ohne vergessenen Check-in
         </div>
       </div>
@@ -1500,7 +1664,7 @@ def chip(text: str, art: str = "soft") -> str:
 
 
 def claim_line():
-    st.markdown('<div class="pc-claim-line">ONCE IN &nbsp;·&nbsp; NEVER OUT</div>',
+    st.markdown('<div class="pc-claim">ONCE IN &nbsp;·&nbsp; NEVER OUT</div>',
                 unsafe_allow_html=True)
 
 
@@ -1516,20 +1680,19 @@ def offene_config() -> list:
 def plotly_layout(fig, hoehe=340, titel_y="€"):
     fig.update_layout(
         height=hoehe,
-        margin=dict(l=8, r=8, t=28, b=8),
-        plot_bgcolor="white", paper_bgcolor="white",
-        legend=dict(orientation="h", y=1.14, x=0,
-                    bgcolor="rgba(0,0,0,0)"),
+        margin=dict(l=8, r=8, t=30, b=8),
+        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+        legend=dict(orientation="h", y=1.16, x=0, bgcolor="rgba(0,0,0,0)",
+                    font=dict(color=C["dim"], size=11)),
         yaxis_title=titel_y,
-        font=dict(color=C["text"], size=12),
-        hoverlabel=dict(bgcolor=C["navy"], font_color="white"),
+        font=dict(color=C["dim"], size=11, family="Montserrat"),
+        hoverlabel=dict(bgcolor=C["ink3"], font_color=C["text"],
+                        bordercolor=C["volt"]),
     )
-    fig.update_xaxes(showgrid=False)
-    fig.update_yaxes(gridcolor=C["border"], zerolinecolor=C["border"])
+    fig.update_xaxes(showgrid=False, color=C["dim"], linecolor=C["line"])
+    fig.update_yaxes(gridcolor=C["line"], zerolinecolor=C["line"], color=C["dim"])
     return fig
 
-
-# ══════════════════════════════════════════════════════════════════════════════
 #   📦  MODUL · DATEN-ZENTRALE
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1868,7 +2031,7 @@ def _dash_tag():
     datum = tage[st.session_state.tag_idx]
     with c2:
         st.markdown(f"<div style='text-align:center;padding-top:.4rem;"
-                    f"font-weight:600;color:{C['navy']};'>{datum_lang(datum)}</div>",
+                    f"font-weight:600;color:{C['text']};'>{datum_lang(datum)}</div>",
                     unsafe_allow_html=True)
 
     st.markdown("")
@@ -1959,8 +2122,8 @@ def _dash_tag():
 
             fig = go.Figure(go.Bar(
                 x=[f"{s}:00" for s in alle_std], y=werte,
-                marker_color=[C["lime"] if v == max(werte) and v > 0
-                              else C["navy"] for v in werte],
+                marker_color=[C["volt"] if v == max(werte) and v > 0
+                              else C["blue_soft"] for v in werte],
                 hovertemplate="%{x}<br>%{y} Buchungen<extra></extra>",
             ))
             st.plotly_chart(plotly_layout(fig, 250, "Buchungen"),
@@ -2031,9 +2194,9 @@ def _dash_monat():
     st.markdown("**Umsatz pro Tag**")
     fig = go.Figure()
     fig.add_trace(go.Bar(x=df["tag"], y=df["Playtomic"], name="Playtomic",
-                         marker_color=C["navy"]))
+                         marker_color=C["blue_soft"]))
     fig.add_trace(go.Bar(x=df["tag"], y=df["Wellpass"], name="Wellpass",
-                         marker_color=C["lime"]))
+                         marker_color=C["volt"]))
     fig.update_layout(barmode="stack")
     st.plotly_chart(plotly_layout(fig, 320), use_container_width=True)
 
@@ -2089,7 +2252,7 @@ def _dash_auslastung():
         z=z,
         x=[f"{s}:00" for s in stunden],
         y=WOCHENTAGE_KURZ,
-        colorscale=[[0, "#F2F6FA"], [0.35, "#A8D400"], [1, C["navy"]]],
+        colorscale=[[0, C["ink2"]], [0.45, C["blue"]], [1, C["volt"]]],
         hovertemplate="%{y} %{x}<br>%{z} Buchungen<extra></extra>",
         showscale=False,
     ))
@@ -2609,12 +2772,12 @@ def modul_whatsapp():
               <div style="display:flex;justify-content:space-between;
                           align-items:baseline;">
                 <div>
-                  <span style="font-weight:600;color:{C['navy']};">{name}</span>
-                  <span style="color:{C['text_soft']};font-size:.85rem;">
+                  <span style="font-weight:600;color:{C['text']};">{name}</span>
+                  <span style="color:{C['dim']};font-size:.85rem;">
                     &nbsp;· {datum_kurz(datum)}{' · ' + zeit + ' Uhr' if zeit else ''}
                   </span>
                 </div>
-                <div style="color:{C['text_soft']};font-size:.78rem;">
+                <div style="color:{C['dim']};font-size:.78rem;">
                   {'📤 ' + gesendet.strftime('%d.%m. %H:%M') if gesendet else ''}
                 </div>
               </div>
@@ -2929,16 +3092,16 @@ def modul_matching():
               <div style="display:flex;justify-content:space-between;
                           align-items:center;">
                 <div>
-                  <span style="color:{C['text_soft']};font-size:.78rem;">
+                  <span style="color:{C['dim']};font-size:.78rem;">
                     Playtomic</span><br>
-                  <span style="font-weight:600;color:{C['navy']};">
+                  <span style="font-weight:600;color:{C['text']};">
                     {v['buchung']}</span>
                 </div>
-                <div style="font-size:1.3rem;color:{C['lime']};">↔</div>
+                <div style="font-size:1.3rem;color:{C['volt']};">↔</div>
                 <div style="text-align:right;">
-                  <span style="color:{C['text_soft']};font-size:.78rem;">
+                  <span style="color:{C['dim']};font-size:.78rem;">
                     Wellpass</span><br>
-                  <span style="font-weight:600;color:{C['navy']};">
+                  <span style="font-weight:600;color:{C['text']};">
                     {v['checkin']}</span>
                 </div>
                 <div>{chip(f"{v['score']:.0f}%", sicherheit)}</div>
@@ -3293,15 +3456,10 @@ def main():
     # ── Sidebar ─────────────────────────────────────────────────────────
     with st.sidebar:
         st.markdown(f"""
-        <div style="text-align:center;padding:.8rem 0 1.3rem;">
-          <div style="display:inline-flex;align-items:center;
-                      justify-content:center;width:52px;height:52px;
-                      border-radius:50%;background:{C['navy']};
-                      border:2px solid {C['lime']};">
-            <span style="color:#fff;font-size:17px;font-weight:700;">PC</span>
-          </div>
-          <div style="margin-top:.55rem;font-size:.7rem;letter-spacing:2px;
-                      color:{C['text_soft']};">COMMAND CENTER</div>
+        <div style="text-align:center;padding:1rem 0 1.4rem;">
+          <div style="width:72px;margin:0 auto;color:{C['volt']};">{LOGO_SVG}</div>
+          <div style="margin-top:.7rem;font-size:.62rem;letter-spacing:.2em;
+                      color:{C['dim']};font-weight:600;">COMMAND CENTER</div>
         </div>""", unsafe_allow_html=True)
 
         if st.button("🏠 Übersicht", use_container_width=True):
