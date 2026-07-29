@@ -1,0 +1,7 @@
+streamlit>=1.30
+pandas>=2.0
+rapidfuzz>=3.0
+gspread>=5.12
+google-auth>=2.23
+plotly>=5.18
+twilio>=8.10
