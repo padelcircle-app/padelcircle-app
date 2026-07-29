@@ -1,0 +1,19 @@
+# ═══════════════════════════════════════════════════════════════════
+#  Padel Circle · Streamlit-Theme
+#  Legt das Aussehen fest, damit es nicht zwischen Hell und Dunkel
+#  springt. Die Farben entsprechen padelcircle.de.
+# ═══════════════════════════════════════════════════════════════════
+
+[theme]
+base                = "dark"
+primaryColor        = "#DFFF00"   # Volt — Akzentfarbe
+backgroundColor     = "#0B0C10"   # Seitenhintergrund
+secondaryBackgroundColor = "#15171F"   # Karten, Seitenleiste
+textColor           = "#F2F3F5"
+font                = "sans serif"
+
+[client]
+toolbarMode = "minimal"
+
+[server]
+maxUploadSize = 50
