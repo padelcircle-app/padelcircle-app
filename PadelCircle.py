@@ -85,7 +85,7 @@ CONFIG = {
     "wellpass_anteil":      0.95,
     "admin_gebuehr":       15.00,   # Gebühr wenn Check-in vergessen wurde
     # Wie viele Tage nach dem Spiel darf ein Check-in nachgeholt werden?
-    "nachhol_fenster_tage": 5,
+    "nachhol_fenster_tage": 40,
 
     "egym_gym_id":         "1042620",                          # ← AUSFÜLLEN
     "egym_einrichtung":    "Padel Circle Memmingen",    # ← PRÜFEN (exakt wie bei EGYM)
