@@ -2,7 +2,7 @@
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║                                                                              ║
 ║   PADEL CIRCLE  ·  COMMAND CENTER                                            ║
-║   Once in. Never out. (Test)                                                 ║
+║   Once in. Never out.                                                        ║
 ║                                                                              ║
 ║   Padel Circle GmbH · Wasserwerkweg 59 · 87700 Memmingen                     ║
 ║                                                                              ║
