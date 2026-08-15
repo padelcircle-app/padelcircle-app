@@ -298,52 +298,37 @@ WOCHENTAGE_KURZ = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
 
 # ── Warum ein Fall erledigt ist ───────────────────────────────────────────────
 #
-#   Die vier Fälle sind wirtschaftlich völlig verschieden. "Nicht gespielt"
-#   ist ausdrücklich KEIN Verlust — da bestand nie ein Anspruch.
+#   Bewusst einfach: zwei Gründe, die man selbst auswählt — Bezahlt oder
+#   Gesperrt. Keine Bilanz-Rechnung dahinter, nur zum Nachvollziehen und
+#   Zählen (z.B. wie oft jemand schon gesperrt wurde). "Nachgeholt" setzt
+#   nicht der Nutzer, sondern die Nachholungs-Zuordnung automatisch, wenn
+#   ein späterer Check-in einen alten Fall erklärt.
 #
 ERLEDIGT_GRUENDE = {
-    "nicht_gespielt": {
-        "label":   "Nicht gespielt",
-        "kurz":    "Nicht gespielt",
-        "icon":    "🚪",
-        "art":     "kein_fall",
-        "wert":    0.0,
-        "hilfe":   "Kam gar nicht rein, konnte deshalb nicht einchecken. "
-                   "Kein Anspruch, kein Verlust.",
+    "bezahlt": {
+        "label": "Bezahlt",
+        "kurz":  "Bezahlt",
+        "icon":  "💶",
+        "hilfe": "Hat die Bearbeitungsgebühr bezahlt (PayPal, Überweisung, bar).",
     },
-    "paypal": {
-        "label":   "Bezahlt (PayPal / Überweisung)",
-        "kurz":    "Bezahlt",
-        "icon":    "💶",
-        "art":     "einnahme",
-        "wert":    ADMIN_GEBUEHR,
-        "betrag_frei": True,
-        "hilfe":   "Betrag eintragen — mal die volle Bearbeitungsgebühr, "
-                   "mal nur der normale Anteil.",
+    "gesperrt": {
+        "label": "Gesperrt",
+        "kurz":  "Gesperrt",
+        "icon":  "🔒",
+        "hilfe": "Wellpass-Zugang gesperrt.",
     },
     "nachgeholt": {
-        "label":   "Check-in nachgeholt",
-        "kurz":    "Nachgeholt",
-        "icon":    "🔄",
-        "art":     "einnahme",
-        "wert":    WELLPASS_WERT,
-        "hilfe":   "EGYM vergütet nachträglich.",
-    },
-    "kulanz": {
-        "label":   "Kulanz / abgeschrieben",
-        "kurz":    "Kulanz",
-        "icon":    "🤝",
-        "art":     "verlust",
-        "wert":    -WELLPASS_WERT,
-        "betrag_frei": True,
-        "hilfe":   "Du lässt es durchgehen — echter Verlust.",
+        "label": "Check-in nachgeholt",
+        "kurz":  "Nachgeholt",
+        "icon":  "🔄",
+        "hilfe": "EGYM vergütet nachträglich — wird automatisch gesetzt, "
+                 "wenn ein späterer Check-in zugeordnet wird.",
     },
 }
 
 GRUND_UNBEKANNT = {
     "label": "Ohne Grund erfasst", "kurz": "Ohne Grund", "icon": "❔",
-    "art": "unbekannt", "wert": 0.0,
-    "hilfe": "Vor der Grund-Erfassung als erledigt markiert.",
+    "hilfe": "Als erledigt markiert, ohne einen Grund auszuwählen.",
 }
 
 
@@ -2374,6 +2359,62 @@ def alle_offenen_fehler(tage: list) -> pd.DataFrame:
     return pd.concat(teile, ignore_index=True)
 
 
+def offene_uebersicht() -> pd.DataFrame:
+    """
+    Alle offenen Fälle über alle Tage, pro Person zusammengefasst.
+
+    Für den Überblick, wenn mehrere Tage auf einmal nachgearbeitet
+    werden — im Tag-für-Tag-Blick sieht man sonst nie, dass dieselbe
+    Person schon zum zweiten oder dritten Mal auftaucht.
+    """
+    tage = verfuegbare_tage()
+    if not tage:
+        return pd.DataFrame()
+    alle = alle_offenen_fehler(tage)
+    if alle.empty:
+        return pd.DataFrame()
+
+    zeilen = []
+    for nn, gruppe in alle.groupby("Name_norm"):
+        tage_sortiert = sorted(gruppe["Datum"].astype(str))
+        zeilen.append({
+            "Name": gruppe["Name"].iloc[-1],
+            "Name_norm": nn,
+            "Anzahl offen": len(gruppe),
+            "Ältester offener Fall": datum_kurz(tage_sortiert[0]),
+            "Tage": ", ".join(datum_kurz(t) for t in tage_sortiert),
+        })
+    df = pd.DataFrame(zeilen)
+    return df.sort_values(["Anzahl offen", "Name"], ascending=[False, True])
+
+
+def gesperrt_historie() -> pd.DataFrame:
+    """
+    Wie oft wurde wer mit dem Grund „Gesperrt" erledigt.
+
+    Zeigt Wiederholungstäter: taucht jemand hier zwei- oder dreimal auf,
+    fehlen entsprechend viele Check-ins.
+    """
+    df = erledigte_faelle()
+    if df.empty:
+        return pd.DataFrame()
+    g = df[df["grund"] == "gesperrt"]
+    if g.empty:
+        return pd.DataFrame()
+
+    zeilen = []
+    for nn, teil in g.groupby("name_norm"):
+        tage_sortiert = sorted(teil["datum"].astype(str))
+        zeilen.append({
+            "Name": teil["Name"].iloc[-1],
+            "Name_norm": nn,
+            "Anzahl gesperrt": len(teil),
+            "Tage": ", ".join(datum_kurz(t) for t in tage_sortiert),
+        })
+    df = pd.DataFrame(zeilen)
+    return df.sort_values(["Anzahl gesperrt", "Name"], ascending=[False, True])
+
+
 def als_behoben_markieren(name_norm: str, datum: str,
                           grund: str = "", notiz: str = "", betrag=None):
     """
@@ -2401,6 +2442,28 @@ def als_behoben_markieren(name_norm: str, datum: str,
         "offene_checkins", "offene_checkins_zeitraum", "nachhol_kandidaten",
         "nachholung_quelle")
         if geloest else ("offene_fehler", "offene_je_tag"))
+
+
+def _erledigt_knopf(name_norm: str, datum: str, key: str):
+    """
+    Kompakter Erledigt-Knopf: Bezahlt oder Gesperrt.
+
+    Ein Klick öffnet ein kleines Popover statt sofort zu schliessen —
+    damit der Grund nie verloren geht (vorher gab es keine Auswahl,
+    jeder Fall landete als „Ohne Grund erfasst").
+    """
+    with st.popover("Erledigt", use_container_width=True):
+        st.caption("Wie wurde der Fall geklärt?")
+        if st.button("💶 Bezahlt", key=f"{key}_bezahlt",
+                     use_container_width=True):
+            als_behoben_markieren(name_norm, datum, grund="bezahlt")
+            st.toast("Als bezahlt markiert.")
+            st.rerun()
+        if st.button("🔒 Gesperrt", key=f"{key}_gesperrt",
+                     use_container_width=True):
+            als_behoben_markieren(name_norm, datum, grund="gesperrt")
+            st.toast("Als gesperrt markiert.")
+            st.rerun()
 
 
 def zuordnung_zu_fall_loesen(name_norm: str, datum: str) -> bool:
@@ -2473,7 +2536,7 @@ def erledigte_faelle() -> pd.DataFrame:
     df[["name_norm", "datum"]] = pd.DataFrame(
         [zerlegen(k) for k in df["key"]], index=df.index)
 
-    # Grund + wirtschaftliche Wirkung
+    # Grund — nur zum Anzeigen/Zählen, keine Bilanz dahinter
     if "grund" not in df.columns:
         df["grund"] = ""
     if "notiz" not in df.columns:
@@ -2482,26 +2545,6 @@ def erledigte_faelle() -> pd.DataFrame:
     df["notiz"] = df["notiz"].fillna("").astype(str)
     df["grund_label"] = df["grund"].map(lambda g: grund_info(g)["label"])
     df["grund_kurz"] = df["grund"].map(lambda g: grund_info(g)["kurz"])
-    df["grund_art"] = df["grund"].map(lambda g: grund_info(g)["art"])
-
-    # Eingetragener Betrag schlägt den Standardwert des Grundes.
-    # Das Vorzeichen kommt aus der Art, nicht aus der Eingabe.
-    if "betrag" not in df.columns:
-        df["betrag"] = ""
-
-    def _wert(reihe):
-        info = grund_info(reihe["grund"])
-        roh = str(reihe.get("betrag", "") or "").strip()
-        if roh == "":
-            return info["wert"]
-        hoehe = abs(parse_betrag(roh))
-        if info["art"] == "verlust":
-            return -hoehe
-        if info["art"] == "einnahme":
-            return hoehe
-        return info["wert"]
-
-    df["grund_wert"] = df.apply(_wert, axis=1)
 
     # Anzeigenamen aus den Buchungen holen
     b = loadsheet("buchungen")
@@ -2514,56 +2557,6 @@ def erledigte_faelle() -> pd.DataFrame:
 
     df["_ts"] = pd.to_datetime(df.get("timestamp"), errors="coerce")
     return df.sort_values("_ts", ascending=False)
-
-
-def erledigt_bilanz(monat: str = None) -> dict:
-    """
-    Was ist aus den erledigten Fällen geworden?
-
-    Getrennt ausgewiesen, weil sich die vier Gründe wirtschaftlich
-    komplett unterscheiden. "Nicht gespielt" zählt ausdrücklich NICHT
-    als Verlust — da bestand nie ein Anspruch.
-    """
-    leer = {"anzahl": 0, "eingenommen": 0.0, "verlust": 0.0, "netto": 0.0,
-            "kein_fall": 0, "ohne_grund": 0, "je_grund": {}, "df": pd.DataFrame()}
-
-    df = erledigte_faelle()
-    if df.empty:
-        return leer
-
-    if monat:
-        df = df[df["datum"].astype(str).str.startswith(str(monat))]
-    if df.empty:
-        return leer
-
-    je_grund = {}
-    for schluessel in list(ERLEDIGT_GRUENDE.keys()) + [""]:
-        teil = df[df["grund"] == schluessel]
-        if teil.empty:
-            continue
-        info = grund_info(schluessel)
-        je_grund[schluessel or "ohne_grund"] = {
-            "anzahl": int(len(teil)),
-            "wert": round(float(teil["grund_wert"].sum()), 2),
-            "label": info["label"],
-            "kurz": info["kurz"],
-            "icon": info["icon"],
-            "art": info["art"],
-        }
-
-    eingenommen = sum(v["wert"] for v in je_grund.values() if v["art"] == "einnahme")
-    verlust = -sum(v["wert"] for v in je_grund.values() if v["art"] == "verlust")
-
-    return {
-        "anzahl":      int(len(df)),
-        "eingenommen": round(eingenommen, 2),
-        "verlust":     round(verlust, 2),
-        "netto":       round(eingenommen - verlust, 2),
-        "kein_fall":   je_grund.get("nicht_gespielt", {}).get("anzahl", 0),
-        "ohne_grund":  je_grund.get("ohne_grund", {}).get("anzahl", 0),
-        "je_grund":    je_grund,
-        "df":          df,
-    }
 
 
 def checkin_bewertung(checkins_tag: pd.DataFrame) -> dict:
@@ -2738,6 +2731,32 @@ def checkins_ohne_buchung(datum_str: str) -> pd.DataFrame:
     if tag.empty or "Gespielt" not in tag.columns:
         return pd.DataFrame()
     return tag[tag["Gespielt"].astype(str) == "Nein"].copy()
+
+
+def zu_viele_checkins_uebersicht() -> pd.DataFrame:
+    """
+    Alle Check-ins ohne passende Buchung, über alle Tage — pro Person
+    zusammengefasst. Wer hier öfter auftaucht, checkt regelmässig ein,
+    ohne dass eine Buchung dazu gefunden wird.
+    """
+    c = loadsheet("checkins")
+    if c.empty or "Gespielt" not in c.columns or "analysis_date" not in c.columns:
+        return pd.DataFrame()
+    ueber = c[c["Gespielt"].astype(str) == "Nein"].copy()
+    if ueber.empty:
+        return pd.DataFrame()
+
+    zeilen = []
+    for nn, teil in ueber.groupby("Name_norm"):
+        tage_sortiert = sorted(teil["analysis_date"].astype(str))
+        zeilen.append({
+            "Name": teil["Name"].iloc[-1] if "Name" in teil.columns else nn,
+            "Name_norm": nn,
+            "Zu viele Check-ins": len(teil),
+            "Tage": ", ".join(datum_kurz(t) for t in tage_sortiert),
+        })
+    df = pd.DataFrame(zeilen)
+    return df.sort_values(["Zu viele Check-ins", "Name"], ascending=[False, True])
 
 
 def sauber_serie(tage: list) -> int:
@@ -4642,11 +4661,8 @@ def _dash_tag():
                 nr = telefon_fuer(str(r["Name"]))
                 st.caption(f"📱 {nr}" if nr else "keine Nummer hinterlegt")
             with c3:
-                if st.button("Erledigt", key=f"dt_ok_{r['Name_norm']}_{r['Datum']}",
-                             use_container_width=True):
-                    als_behoben_markieren(str(r["Name_norm"]), str(r["Datum"]))
-                    st.toast("Erledigt.")
-                    st.rerun()
+                _erledigt_knopf(str(r["Name_norm"]), str(r["Datum"]),
+                                key=f"dt_ok_{r['Name_norm']}_{r['Datum']}")
 
     # ── Erledigte Fälle dieses Tages ────────────────────────────────────
     erledigt_alle = erledigte_faelle()
@@ -4659,7 +4675,10 @@ def _dash_tag():
                 for i, (_, e) in enumerate(erledigt_tag.iterrows()):
                     u1, u2 = st.columns([3, 1.2])
                     with u1:
-                        st.markdown(f"**{e['Name']}**")
+                        info = grund_info(e.get("grund", ""))
+                        label = f"{info['icon']} {info['kurz']}"
+                        st.markdown(f"**{e['Name']}**  {chip(label, 'soft')}",
+                                    unsafe_allow_html=True)
                         wann = (e["_ts"].strftime("%d.%m. %H:%M")
                                 if pd.notna(e.get("_ts")) else "")
                         notiz = str(e.get("notiz", "") or "").strip()
@@ -6534,11 +6553,7 @@ def _wa_fall(r, i: int, datum: str):
                     st.toast("✅")
                     st.rerun()
     with c3:
-        if st.button("Erledigt", key=f"wa_e_{datum}_{i}",
-                     use_container_width=True):
-            als_behoben_markieren(nn, datum)
-            st.toast("Erledigt.")
-            st.rerun()
+        _erledigt_knopf(nn, datum, key=f"wa_e_{datum}_{i}")
 
     with st.expander("Nachricht ansehen"):
         st.code(zweitbuchung_nachricht(name, datum_kurz(datum), zeit,
@@ -6551,13 +6566,27 @@ def _wa_fall(r, i: int, datum: str):
 
 def _wa_tagesarbeit():
     """Ein Tag, alle Fälle — mit den überzähligen Check-ins daneben."""
-    tage = verfuegbare_tage()
-    if not tage:
+    tage_alle = verfuegbare_tage()
+    if not tage_alle:
         box("Noch keine Daten. Starte in der Daten-Zentrale.", "warn")
         return
 
-    # Erst die eindeutigen Fälle wegräumen, dann der Rest von Hand
-    _wa_auto_block(tage)
+    # Erst die eindeutigen Fälle wegräumen, dann der Rest von Hand —
+    # auf ALLEN Tagen, unabhängig vom Filter unten.
+    _wa_auto_block(tage_alle)
+
+    # Alle Tageszähler in EINEM Durchlauf statt einer pro Dropdown-Eintrag
+    zaehler = offene_je_tag()
+
+    nur_offene = st.checkbox(
+        "Nur Tage mit offenen Fällen anzeigen", key="wa_nur_offene_tage",
+        help="Blendet Tage aus, die schon sauber sind — für den "
+             "Überblick beim Nacharbeiten mehrerer Tage.")
+    tage = [t for t in tage_alle if zaehler.get(str(t), 0) > 0] \
+        if nur_offene else tage_alle
+    if not tage:
+        box("✅ Alle Tage sind sauber — keine offenen Fälle.", "ok")
+        return
 
     # Auswahl läuft direkt über den Widget-Wert — siehe Kommentar im
     # Dashboard. Mit einem separaten Index blieb das Datum stehen.
@@ -6566,9 +6595,6 @@ def _wa_tagesarbeit():
         st.session_state.wa_tag_wahl = tage[0]
 
     idx = tage.index(st.session_state.wa_tag_wahl)
-
-    # Alle Tageszähler in EINEM Durchlauf statt einer pro Dropdown-Eintrag
-    zaehler = offene_je_tag()
 
     # Der Schlüssel enthält die Zählerstände und den gewählten Tag.
     # Ändert sich einer von beiden, baut Streamlit das Feld neu auf.
@@ -6797,6 +6823,69 @@ def _wa_pruefen():
                "zusammengeführt.")
 
 
+def _wa_uebersicht():
+    """
+    Der Überblick über alle Tage — nicht Tag für Tag, sondern pro Person.
+
+    Gedacht für den Nachhol-Fall: wenn viele Tage auf einmal
+    durchgearbeitet werden, geht in der Tag-für-Tag-Ansicht unter, dass
+    dieselbe Person schon zum zweiten oder dritten Mal fehlt.
+    """
+    box("Zusammengefasst über alle Tage — für den Überblick, wenn du "
+        "gerade mehrere Tage auf einmal nachholst.", "info")
+
+    # ── Offene Fälle pro Person ─────────────────────────────────────────
+    st.markdown("##### Offene Fälle pro Person")
+    offen = offene_uebersicht()
+    if offen.empty:
+        box("✅ Keine offenen Fälle.", "ok")
+    else:
+        st.caption(f"{offen['Anzahl offen'].sum()} offene Fälle · "
+                   f"{len(offen)} Personen")
+        st.dataframe(
+            offen[["Name", "Anzahl offen", "Ältester offener Fall", "Tage"]],
+            use_container_width=True, hide_index=True,
+            height=min(500, 60 + 35 * len(offen)))
+
+    st.markdown("")
+    st.markdown("---")
+
+    # ── Gesperrt-Historie ────────────────────────────────────────────────
+    st.markdown("##### Gesperrt-Historie")
+    st.caption("Wer mehrfach auftaucht, dem fehlen entsprechend viele "
+               "Check-ins.")
+    gesperrt = gesperrt_historie()
+    if gesperrt.empty:
+        box('Noch niemand als „Gesperrt" erledigt markiert.', "info")
+    else:
+        wiederholt = int((gesperrt["Anzahl gesperrt"] > 1).sum())
+        if wiederholt:
+            box(f"⚠️ <b>{wiederholt} Personen</b> wurden mehrfach gesperrt.",
+                "warn")
+        st.dataframe(
+            gesperrt[["Name", "Anzahl gesperrt", "Tage"]],
+            use_container_width=True, hide_index=True,
+            height=min(500, 60 + 35 * len(gesperrt)))
+
+    st.markdown("")
+    st.markdown("---")
+
+    # ── Zu viele Check-ins ───────────────────────────────────────────────
+    st.markdown("##### Zu viele Check-ins")
+    st.caption("Check-ins, zu denen keine passende Buchung gefunden wurde — "
+               "über alle Tage zusammengefasst.")
+    zuviel = zu_viele_checkins_uebersicht()
+    if zuviel.empty:
+        box("✅ Keine überzähligen Check-ins.", "ok")
+    else:
+        st.caption(f"{zuviel['Zu viele Check-ins'].sum()} überzählige "
+                   f"Check-ins · {len(zuviel)} Personen")
+        st.dataframe(
+            zuviel[["Name", "Zu viele Check-ins", "Tage"]],
+            use_container_width=True, hide_index=True,
+            height=min(500, 60 + 35 * len(zuviel)))
+
+
 def modul_whatsapp():
     head("WhatsApp Reminder", "Tag für Tag abarbeiten")
 
@@ -6807,8 +6896,8 @@ def modul_whatsapp():
         box("Der Wellpass-QR-Link fehlt — die Nachrichten gehen ohne QR raus.",
             "info")
 
-    t1, t2, t3, t4 = st.tabs(["📅 Tagesarbeit", "🔍 Zuordnung prüfen",
-                              "✅ Erledigt", "📜 Protokoll"])
+    t1, t2, t3, t4, t5 = st.tabs(["📅 Tagesarbeit", "🔍 Zuordnung prüfen",
+                                  "✅ Erledigt", "📊 Übersicht", "📜 Protokoll"])
 
     with t1:
         _wa_tagesarbeit()
@@ -6829,7 +6918,10 @@ def modul_whatsapp():
             for i, (_, r) in enumerate(erledigt.head(60).iterrows()):
                 e1, e2, e3 = st.columns([2.4, 1.4, 1.2])
                 with e1:
-                    st.markdown(f"**{r['Name']}**")
+                    info = grund_info(r.get("grund", ""))
+                    label = f"{info['icon']} {info['kurz']}"
+                    st.markdown(f"**{r['Name']}**  {chip(label, 'soft')}",
+                                unsafe_allow_html=True)
                     # Bei Nachholungen zeigen, welcher Check-in den Fall
                     # geschlossen hat — damit nachvollziehbar bleibt,
                     # dass jeder Check-in nur einmal verwendet wurde.
@@ -6853,8 +6945,12 @@ def modul_whatsapp():
                         st.toast("Fall ist wieder offen.")
                         st.rerun()
 
-    # ── Protokoll ───────────────────────────────────────────────────────
+    # ── Übersicht ───────────────────────────────────────────────────────
     with t4:
+        _wa_uebersicht()
+
+    # ── Protokoll ───────────────────────────────────────────────────────
+    with t5:
         log = loadsheet("whatsapp_log", SHEET_SPALTEN["whatsapp_log"])
         if log.empty:
             box("Noch nichts versendet.", "info")
