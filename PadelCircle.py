@@ -3689,16 +3689,24 @@ def neu_berechnen(tage=None) -> bool:
         st.error("❌ Für diesen Zeitraum sind keine Check-ins gespeichert.")
         return False
 
-    # Betroffene Tage aus dem Bestand nehmen, damit die neuen Zeilen
-    # nicht neben den alten stehen
-    betroffen = sorted({str(x)[:10] for x in roh_b["booking_start_date"]})
-    for blatt in ("buchungen", "checkins"):
-        df = loadsheet(blatt)
-        if df.empty or "analysis_date" not in df.columns:
-            continue
-        rest = df[~df["analysis_date"].astype(str).isin(betroffen)]
-        savesheet(rest, blatt)
-
+    # WICHTIG: Hier wird bewusst NICHT vorab gelöscht.
+    #
+    # Früher wurden die betroffenen Tage zuerst aus „buchungen“ und
+    # „checkins“ entfernt (bei „Alle Tage“ blieb dabei buchstäblich
+    # nichts übrig — das ganze Blatt wurde geleert) und erst danach neu
+    # befüllt. Schlug irgendetwas dazwischen fehl — ein Google-Limit,
+    # ein Verbindungsabbruch, irgendein Fehler in der Berechnung —, blieb
+    # das Blatt leer. Genau das hat die Daten einmal komplett gelöscht.
+    #
+    # _analysieren() schreibt seine Zeilen über append_rows(...,
+    # aktualisieren=True) — das ersetzt vorhandene Zeilen mit
+    # übereinstimmendem Schlüssel (Tag+Name+Zeit+Court) UND behält den
+    # Rest, in einem einzigen Schreibvorgang. Kein Zwischenzustand, in
+    # dem das Blatt leer wäre. Einziger Kompromiss: fällt eine Buchung
+    # durch die Neuberechnung ganz weg (kein neuer Treffer mit demselben
+    # Schlüssel), bleibt ihre alte Zeile stehen, statt gelöscht zu
+    # werden — das lässt sich bei Bedarf über „Einzelne Tage entfernen“
+    # nachträglich bereinigen. Deutlich harmloser als ein leeres Blatt.
     zahlungen = _zahlungs_index(loadsheet("playtomic_raw"))
     erfolg = _analysieren(roh_b, roh_c, None, zahlungen_index=zahlungen)
     if erfolg:
