@@ -3464,8 +3464,22 @@ def _wellpass_traeger(teilnehmer, start, pro_platz, n_wellpass, zahlungen,
              if nn not in TEAM_NORM and not ist_platzhalter(urspr)]
     if n_wellpass <= 0 or not namen:
         return set()
-    if not zahlungen or n_wellpass >= len(namen):
+    if not zahlungen:
         return set(namen)
+
+    # Wer für diesen Tag überhaupt eine eigene Zahlungszeile hat — nur
+    # für die ist der Rabatt aus den Zahlungen heraus belegbar. Ohne
+    # jeden Beleg (auch nicht über die Zahlung eines Paar-Partners
+    # erklärt) darf niemand als Rabattträger gelten — sonst wird z.B.
+    # ein Vereinsname wie „FC Nürnberg" oder ein Gast, dessen Sitzplatz
+    # jemand anderes komplett mitbezahlt hat, fälschlich zum
+    # Wellpass-Verdächtigen.
+    #
+    # Vorher galt bei n_wellpass >= Teilnehmerzahl automatisch „sind
+    # sowieso alle Träger" — ganz ohne Belegprüfung. Das traf echte
+    # Vereins-/Platzhalterbuchungen genauso wie Mitspieler, deren Platz
+    # ein anderer bezahlt hat.
+    namen_mit_beleg = {nn for nn in namen if zahlungen.get((nn, start)) is not None}
 
     checkin_namen = checkin_namen or set()
     # Wer irgendwann einmal eingecheckt hat, ist nachweislich
@@ -3582,7 +3596,11 @@ def _wellpass_traeger(teilnehmer, start, pro_platz, n_wellpass, zahlungen,
         if bestes is None or len(rest) < len(bestes):
             bestes = rest
 
-    return bestes or set(namen)
+    # Bleibt es nach allen Abzug-Kandidaten unklar, wird nur noch
+    # jemand mit eigenem Zahlungsbeleg als Träger geführt — alles
+    # andere wäre eine Vermutung ohne Nachweis.
+    ergebnis = bestes if bestes is not None else set(namen)
+    return ergebnis & namen_mit_beleg
 
 def _als_rohbuchungen(tage=None) -> pd.DataFrame:
     """
