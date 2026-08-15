@@ -8167,6 +8167,13 @@ def main():
     st.session_state.setdefault("modul", None)
     st.session_state.setdefault("name_mapping_cache", None)
 
+    # Die Google-Limit-Warnung soll nur einmal PRO SEITENAUFBAU
+    # unterdrückt werden (siehe loadsheet()), nicht für den Rest der
+    # ganzen Sitzung — sonst verschluckt ein einziger kurzer Ausrutscher
+    # jede spätere Fehlermeldung, und leere Daten sehen dann wie "gibt's
+    # nicht" statt wie "Google gerade nicht erreichbar" aus.
+    st.session_state["_limit_gemeldet"] = False
+
     # ── Seitenleiste ────────────────────────────────────────────────────
     aktiv = st.session_state.modul
 
