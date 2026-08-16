@@ -2733,16 +2733,21 @@ def checkins_ohne_buchung(datum_str: str) -> pd.DataFrame:
     return tag[tag["Gespielt"].astype(str) == "Nein"].copy()
 
 
+def alle_checkins_ohne_buchung() -> pd.DataFrame:
+    """Alle überzähligen Check-ins, roh und ungruppiert — über alle Tage."""
+    c = loadsheet("checkins")
+    if c.empty or "Gespielt" not in c.columns or "analysis_date" not in c.columns:
+        return pd.DataFrame()
+    return c[c["Gespielt"].astype(str) == "Nein"].copy()
+
+
 def zu_viele_checkins_uebersicht() -> pd.DataFrame:
     """
     Alle Check-ins ohne passende Buchung, über alle Tage — pro Person
     zusammengefasst. Wer hier öfter auftaucht, checkt regelmässig ein,
     ohne dass eine Buchung dazu gefunden wird.
     """
-    c = loadsheet("checkins")
-    if c.empty or "Gespielt" not in c.columns or "analysis_date" not in c.columns:
-        return pd.DataFrame()
-    ueber = c[c["Gespielt"].astype(str) == "Nein"].copy()
+    ueber = alle_checkins_ohne_buchung()
     if ueber.empty:
         return pd.DataFrame()
 
@@ -6870,20 +6875,125 @@ def _wa_uebersicht():
     st.markdown("")
     st.markdown("---")
 
-    # ── Zu viele Check-ins ───────────────────────────────────────────────
-    st.markdown("##### Zu viele Check-ins")
-    st.caption("Check-ins, zu denen keine passende Buchung gefunden wurde — "
-               "über alle Tage zusammengefasst.")
-    zuviel = zu_viele_checkins_uebersicht()
-    if zuviel.empty:
-        box("✅ Keine überzähligen Check-ins.", "ok")
+    # ── Zu viele Check-ins ↔ Offene Fälle zuordnen ──────────────────────
+    st.markdown("##### Zu viele Check-ins ↔ Offene Fälle")
+    st.caption("Links die Check-ins ohne passende Buchung, rechts die "
+               "offenen Fälle daneben — zum Vergleichen und Zuordnen, "
+               "über alle Tage statt immer nur einen.")
+
+    ueber_roh = alle_checkins_ohne_buchung()
+    tage_alle = verfuegbare_tage()
+    offen_roh = alle_offenen_fehler(tage_alle) if tage_alle else pd.DataFrame()
+
+    if ueber_roh.empty and offen_roh.empty:
+        box("✅ Keine überzähligen Check-ins und keine offenen Fälle.", "ok")
     else:
-        st.caption(f"{zuviel['Zu viele Check-ins'].sum()} überzählige "
-                   f"Check-ins · {len(zuviel)} Personen")
-        st.dataframe(
-            zuviel[["Name", "Zu viele Check-ins", "Tage"]],
-            use_container_width=True, hide_index=True,
-            height=min(500, 60 + 35 * len(zuviel)))
+        links, rechts = st.columns([3, 2], gap="medium")
+
+        # Zuordnungsziele: alle aktuell offenen Fälle, über alle Tage
+        ziel_daten = []
+        for _, f in offen_roh.iterrows():
+            label = f"{f['Name']}  ·  {datum_kurz(str(f['Datum']))}"
+            ziel_daten.append((label, str(f["Name_norm"]), str(f["Datum"]),
+                               email_fuer(str(f["Name"]))))
+
+        with rechts:
+            st.markdown("**Offene Fälle**")
+            if offen_roh.empty:
+                box("✅ Keine offenen Fälle.", "ok")
+            else:
+                st.caption(f"{len(offen_roh)} offen")
+                zeig = offen_roh[["Name", "Datum", "Service_Zeit"]].copy()
+                zeig["Datum"] = zeig["Datum"].astype(str).map(datum_kurz)
+                zeig.columns = ["Name", "Tag", "Zeit"]
+                st.dataframe(zeig, use_container_width=True, hide_index=True,
+                             height=min(560, 60 + 35 * len(zeig)))
+
+        with links:
+            st.markdown("**Zu viele Check-ins**")
+            if ueber_roh.empty:
+                box("✅ Keine überzähligen Check-ins.", "ok")
+            else:
+                st.caption(f"{len(ueber_roh)} überzählig")
+
+                # Für jeden überzähligen Check-in den besten offenen Fall
+                # vorschlagen — dieselbe Namens-/E-Mail-Ähnlichkeit wie in
+                # der Tagesarbeit, nur über den gesamten offenen Bestand
+                # statt nur ein Zeitfenster um einen Tag.
+                ueber = ueber_roh.copy()
+                raenge, beste = [], []
+                for _, r in ueber.iterrows():
+                    ci_norm = str(r["Name_norm"])
+                    ci_name = str(r["Name"])
+                    bester_label, bester = None, 0.0
+                    for label, ziel_norm, _zd, ziel_mail in ziel_daten:
+                        sc = fuzz.token_set_ratio(ziel_norm, ci_norm)
+                        if ziel_mail:
+                            sc = max(sc, email_aehnlichkeit(ziel_mail, ci_name))
+                        if sc >= bester:
+                            bester_label, bester = label, sc
+                    raenge.append(bester)
+                    beste.append(bester_label)
+                ueber["_rang"] = raenge
+                ueber["_bester"] = beste
+                ueber = ueber.sort_values("_rang", ascending=False)
+
+                nur_passend = False
+                if ziel_daten and len(ueber) > 12:
+                    nur_passend = st.toggle("Nur passende zeigen", value=True,
+                                            key="ueb_nur_passend")
+                anzeige = (ueber[ueber["_rang"] >= 70]
+                          if nur_passend else ueber)
+                if anzeige.empty:
+                    box("Keine passenden Check-ins gefunden.", "info")
+                if len(anzeige) > 40:
+                    st.caption(f"Zeige die 40 relevantesten von "
+                               f"{len(anzeige)}.")
+
+                for i, (_, r) in enumerate(anzeige.head(40).iterrows()):
+                    ci_datum = str(r["analysis_date"])
+                    ci_name = str(r["Name"])
+                    ci_norm = str(r["Name_norm"])
+                    ci_zeit = str(r.get("Checkin_Zeit", "")).strip()
+
+                    st.markdown(f"**{ci_name}** · {datum_kurz(ci_datum)}"
+                               + (f" · {ci_zeit}" if ci_zeit else ""))
+                    erklaerung = checkin_erklaerung(ci_norm, ci_datum)
+                    if erklaerung.get("text"):
+                        st.caption(f"↳ {erklaerung['text']}")
+
+                    bester_label = r.get("_bester")
+                    bester_score = float(r.get("_rang", 0))
+                    if bester_label and bester_score >= 80:
+                        ziel_norm, ziel_datum = next(
+                            (zn, zd) for lbl, zn, zd, _m in ziel_daten
+                            if lbl == bester_label)
+                        if st.button(f"✓ Nachholung für {bester_label} "
+                                    f"({bester_score:.0f}%)",
+                                    key=f"ueb_q_{i}", type="primary",
+                                    use_container_width=True):
+                            if nachholung_speichern(ci_datum, ci_norm,
+                                                    ziel_datum, ziel_norm):
+                                st.toast("Zugeordnet.")
+                                st.rerun()
+
+                    if ziel_daten:
+                        with st.expander("Anderem Fall zuordnen"):
+                            optionen = ["—"] + [lbl for lbl, *_r in ziel_daten]
+                            wahl = st.selectbox(
+                                "Fall", optionen, key=f"ueb_sel_{i}",
+                                label_visibility="collapsed")
+                            if wahl != "—" and st.button(
+                                    "Zuordnen", key=f"ueb_zu_{i}",
+                                    use_container_width=True):
+                                ziel_norm, ziel_datum = next(
+                                    (zn, zd) for lbl, zn, zd, _m in ziel_daten
+                                    if lbl == wahl)
+                                if nachholung_speichern(ci_datum, ci_norm,
+                                                        ziel_datum, ziel_norm):
+                                    st.toast("Zugeordnet.")
+                                    st.rerun()
+                    st.markdown("")
 
 
 def modul_whatsapp():
