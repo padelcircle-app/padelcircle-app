@@ -3220,6 +3220,39 @@ def css_laden():
  .stSpinner > div {{ border-top-color:var(--volt) !important; }}
  /* ═══ DIAGRAMME ═══ */
  .js-plotly-plot .plotly {{ background:transparent !important; }}
+ /* ═══ HANDY ═══
+    Keine Funktion verschwindet — Streamlit stapelt Spalten unter dieser
+    Breite ohnehin schon automatisch untereinander. Hier geht's nur um
+    Feintuning: weniger verschwendeter Platz, grössere Tippflächen. */
+ @media (max-width: 640px) {{
+  .block-container {{ padding-top:1.1rem; padding-left:.8rem; padding-right:.8rem; padding-bottom:2rem; }}
+  .pc-head {{ padding:1.1rem 1.2rem; margin-bottom:1rem; }}
+  .pc-head h1 {{ font-size:1.15rem; }}
+  .pc-head .mark {{ width:36px; }}
+  .pc-kpi {{ padding:.85rem .95rem; }}
+  .pc-kpi .v {{ font-size:1.35rem; }}
+  .pc-card {{ padding:.85rem 1rem; }}
+  .pc-box {{ padding:.75rem .9rem; font-size:.85rem; }}
+  .pc-tile {{ min-height:auto; padding:1rem 1.1rem 1.15rem; }}
+  .pc-streak {{ padding:.9rem 1.1rem; }}
+  .pc-streak .n {{ font-size:1.8rem; }}
+  .pc-zahl {{ font-size:1.9rem; }}
+  /* Buttons: Reihen aus mehreren Spalten (z.B. Senden/Nachfassen/
+     Erledigt) werden von Streamlit automatisch untereinander gestapelt —
+     jeder Button wird dadurch volle Breite. Hier nur die Tippfläche
+     grosszügiger machen, nicht die Optik ändern. */
+  div.stButton > button, div.stDownloadButton > button {{
+   padding:.62rem 1.15rem !important; font-size:.88rem !important;
+   min-height:2.6rem;
+  }}
+  .stTabs [data-baseweb="tab"] {{ padding:.45rem .7rem; font-size:.78rem; }}
+  [data-testid="stWidgetLabel"] label, [data-testid="stWidgetLabel"] p {{
+   font-size:.82rem !important;
+  }}
+  h1 {{ font-size:1.4rem !important; }}
+  h2 {{ font-size:1.2rem !important; }}
+  h3, h4 {{ font-size:1.05rem !important; }}
+ }}
 </style>
 """, unsafe_allow_html=True)
 
