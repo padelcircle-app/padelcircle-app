@@ -2123,6 +2123,96 @@ def auslastung_matrix(monat: str = None) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=900, show_spinner=False)
+def auslastung_vorschlaege() -> list:
+    """
+    Konkrete Handlungsvorschläge statt nur einer Heatmap zum Anschauen.
+
+    Drei Muster, jedes mit eigener Handlungsempfehlung:
+      • Rückläufige Slots — letzte 4 Wochen deutlich schwächer als die
+        4 Wochen davor. Früh erkennbar, bevor ein Slot ganz ausstirbt.
+      • Tote Prime-Time-Slots — ab 16 Uhr oder am Wochenende seit
+        Beginn der Daten ohne eine einzige Buchung.
+      • Dauerhaft volle Nebenzeit-Slots — ausserhalb der Prime Time
+        durchgehend unter den stärksten 10 % aller Slots. Kandidat für
+        einen höheren Preis, statt Nachfrage zu verschenken.
+
+    → [{"art": …, "text": …, "wochentag": …, "stunde": …}, …]
+    """
+    df = _rohdaten_aufbereitet()
+    if df.empty:
+        return []
+    df = df[df["_buchung"]]
+    if df.empty:
+        return []
+
+    heute = date.today()
+    vorschlaege = []
+
+    # ── Rückläufige Slots: letzte 4 Wochen vs. die 4 Wochen davor ───────
+    letzte_4w = df[df["_datum"] >= heute - timedelta(days=28)]
+    davor_4w = df[(df["_datum"] < heute - timedelta(days=28)) &
+                  (df["_datum"] >= heute - timedelta(days=56))]
+    if not letzte_4w.empty and not davor_4w.empty:
+        m_neu = (letzte_4w.groupby(["_wochentag", "_stunde"]).size())
+        m_alt = (davor_4w.groupby(["_wochentag", "_stunde"]).size())
+        for schluessel, alt_anzahl in m_alt.items():
+            if alt_anzahl < 3:
+                continue  # zu wenig Basis für einen verlässlichen Vergleich
+            neu_anzahl = int(m_neu.get(schluessel, 0))
+            rueckgang = prozent(alt_anzahl - neu_anzahl, alt_anzahl)
+            if rueckgang >= 40:
+                wt, std = schluessel
+                vorschlaege.append({
+                    "art": "rueckgang",
+                    "wochentag": int(wt), "stunde": int(std),
+                    "text": (f"{WOCHENTAGE_DE[int(wt)]} {int(std)}:00 Uhr — "
+                             f"{rueckgang:.0f}% weniger Buchungen als in den "
+                             f"4 Wochen davor ({int(alt_anzahl)} → {neu_anzahl}). "
+                             "Läuft der Slot einer festen Gruppe hinterher, die "
+                             "gerade ausbleibt?"),
+                })
+
+    # ── Tote Prime-Time-Slots ─────────────────────────────────────────────
+    gesamt = df.groupby(["_wochentag", "_stunde"]).size()
+    wochen_erfasst = max(1, (df["_datum"].max() - df["_datum"].min()).days // 7)
+    for wt in range(7):
+        for std in range(CONFIG["oeffnung_von"], CONFIG["oeffnung_bis"]):
+            prime = std >= 16 or wt >= 5
+            if not prime:
+                continue
+            if gesamt.get((wt, std), 0) > 0:
+                continue
+            vorschlaege.append({
+                "art": "leer",
+                "wochentag": wt, "stunde": std,
+                "text": (f"{WOCHENTAGE_DE[wt]} {std}:00 Uhr — seit "
+                         f"{wochen_erfasst} Wochen keine einzige Buchung, "
+                         "obwohl Prime-Time-Preis gilt. Kurs, Event oder "
+                         "befristete Aktion könnte den Slot beleben."),
+            })
+
+    # ── Dauerhaft volle Nebenzeit-Slots — Preis-Kandidaten ──────────────
+    if not gesamt.empty:
+        schwelle = gesamt.quantile(0.9)
+        for (wt, std), anzahl in gesamt.items():
+            prime = std >= 16 or wt >= 5
+            if prime or anzahl < schwelle or anzahl < 4:
+                continue
+            vorschlaege.append({
+                "art": "stark",
+                "wochentag": int(wt), "stunde": int(std),
+                "text": (f"{WOCHENTAGE_DE[int(wt)]} {int(std)}:00 Uhr — "
+                         f"{int(anzahl)} Buchungen trotz Nebenzeit-Preis, "
+                         "unter den gefragtesten Slots insgesamt. Nachfrage "
+                         "da für einen höheren Preis oder mehr Kapazität."),
+            })
+
+    reihenfolge = {"rueckgang": 0, "leer": 1, "stark": 2}
+    vorschlaege.sort(key=lambda v: reihenfolge.get(v["art"], 9))
+    return vorschlaege
+
+
+@st.cache_data(ttl=900, show_spinner=False)
 def spieler_statistik() -> pd.DataFrame:
     """Pro Spieler: Buchungen, Umsatz, Vergessen, erster/letzter Besuch."""
     b = loadsheet("buchungen")
@@ -2817,6 +2907,92 @@ def winback_liste(mindest_buchungen: int = 3, tage_weg: int = 21) -> pd.DataFram
                (stat["tage_her"] >= tage_weg) &
                (stat["tage_her"] < 900)]
     return weg.sort_values(["buchungen", "tage_her"], ascending=[False, True])
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def spieler_rhythmus() -> pd.DataFrame:
+    """
+    Pro Spieler der eigene Spielrhythmus — üblicher Abstand zwischen
+    zwei Besuchen, verglichen mit der aktuellen Pause.
+
+    Die normale Rückholung nimmt für alle denselben Tage-Schwellwert.
+    Das übersieht Vielspieler: wer sonst alle 3 Tage kommt und jetzt
+    10 Tage weg ist, ist längst auffällig — ein fester 21-Tage-Schwellwert
+    sieht das erst viel später. Das Risiko-Verhältnis (aktuelle Pause ÷
+    üblicher Abstand) macht das früh sichtbar, unabhängig vom
+    persönlichen Rhythmus.
+
+    → Name, Besuche, üblicher Abstand, aktuelle Pause, Risiko-Verhältnis
+    """
+    b = loadsheet("buchungen")
+    if b.empty or "Name" not in b.columns or "analysis_date" not in b.columns:
+        return pd.DataFrame()
+
+    df = b.copy()
+    if "Name_norm" in df.columns:
+        df = df[~df["Name_norm"].astype(str).isin(TEAM_NORM)]
+    df["_datum"] = df["analysis_date"].map(parse_date_safe)
+    df = df[df["_datum"].notna()]
+    if df.empty:
+        return pd.DataFrame()
+
+    heute = date.today()
+    zeilen = []
+    for name, gruppe in df.groupby("Name"):
+        tage = sorted(gruppe["_datum"].unique())
+        if len(tage) < 3:
+            continue  # zu wenig Besuche für einen verlässlichen Rhythmus
+        abstaende = [(tage[i + 1] - tage[i]).days for i in range(len(tage) - 1)]
+        avg_abstand = sum(abstaende) / len(abstaende)
+        if avg_abstand <= 0:
+            continue
+        pause = (heute - tage[-1]).days
+        zeilen.append({
+            "Name": name,
+            "Besuche": len(tage),
+            "Ø Abstand": round(avg_abstand, 1),
+            "Aktuelle Pause": pause,
+            "Risiko": round(pause / avg_abstand, 2),
+            "Letzter Besuch": str(tage[-1]),
+        })
+    if not zeilen:
+        return pd.DataFrame()
+    return pd.DataFrame(zeilen).sort_values("Risiko", ascending=False)
+
+
+def spieler_segmente() -> pd.DataFrame:
+    """
+    Grobe Einteilung aller Kunden in Segmente — für den Überblick, nicht
+    für Wissenschaft. Basis sind Buchungsanzahl und Tage seit dem
+    letzten Besuch aus spieler_statistik().
+
+      • Neu          — höchstens 2 Buchungen, seit ≤30 Tagen zum ersten Mal da
+      • Stammspieler — 5+ Buchungen, war in den letzten 21 Tagen da
+      • Rückläufig   — 5+ Buchungen, aber länger als 21 Tage nicht mehr da
+      • Verloren     — länger als 60 Tage nicht mehr da
+      • Gelegenheit  — der Rest
+    """
+    stat = spieler_statistik()
+    if stat.empty:
+        return pd.DataFrame()
+    kunden = stat[~stat["team"]].copy()
+    if kunden.empty:
+        return kunden
+
+    def _segment(r):
+        if r["tage_her"] > 60:
+            return "Verloren"
+        if r["buchungen"] <= 2 and r["tage_her"] <= 30:
+            return "Neu"
+        if r["buchungen"] >= 5:
+            return "Stammspieler" if r["tage_her"] <= 21 else "Rückläufig"
+        return "Gelegenheit"
+
+    kunden["Segment"] = kunden.apply(_segment, axis=1)
+    kunden["Wellpass-Anteil"] = kunden.apply(
+        lambda r: prozent(r["wellpass_pflichtig"], r["buchungen"])
+        if r["buchungen"] else 0.0, axis=1)
+    return kunden
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -4929,6 +5105,41 @@ def _dash_auslastung():
                             f"<span class='mt'>leer</span></div>",
                             unsafe_allow_html=True)
 
+    # ── Handlungsvorschläge ──────────────────────────────────────────────
+    #
+    # Unabhängig vom Monatsfilter oben — Trend und "seit Beginn der
+    # Daten" beziehen sich immer auf den ganzen erfassten Zeitraum,
+    # sonst verschwindet der Rückgang, sobald man einen einzelnen
+    # Monat auswählt.
+    st.markdown("")
+    st.markdown("---")
+    st.markdown("##### 📋 Handlungsvorschläge")
+
+    vorschlaege = auslastung_vorschlaege()
+    if not vorschlaege:
+        box("Noch zu wenig Daten für verlässliche Vorschläge — braucht "
+            "mindestens ein paar Wochen Verlauf.", "info")
+    else:
+        art_info = {
+            "rueckgang": ("⚠️", "warn", "Rückläufig"),
+            "leer":      ("👀", "info", "Tote Prime-Time"),
+            "stark":     ("💡", "ok",   "Preis-Kandidat"),
+        }
+        anzahl_je_art = {}
+        for v in vorschlaege:
+            anzahl_je_art[v["art"]] = anzahl_je_art.get(v["art"], 0) + 1
+
+        zusammenfassung = " · ".join(
+            f"{art_info[art][0]} {n} {art_info[art][2]}"
+            for art, n in anzahl_je_art.items() if art in art_info)
+        st.caption(zusammenfassung)
+
+        for v in vorschlaege[:15]:
+            icon, farbe, _label = art_info.get(v["art"], ("•", "info", ""))
+            box(f"{icon} {v['text']}", farbe)
+        if len(vorschlaege) > 15:
+            st.caption(f"… und {len(vorschlaege) - 15} weitere.")
+
 
 @st.cache_data(ttl=900, show_spinner=False)
 def anspruch_bilanz(monat: str) -> pd.DataFrame:
@@ -5613,13 +5824,106 @@ def _winback():
 
 def modul_spieler():
     head("Spieler & Community", "Rangliste · Vielspieler · Rückholung")
-    t1, t2, t3 = st.tabs(["🏆 Rangliste", "⭐ Vielspieler", "🔄 Rückholung"])
+    t1, t2, t3, t4 = st.tabs(["🏆 Rangliste", "⭐ Vielspieler", "🔄 Rückholung",
+                              "🔎 Analysen"])
     with t1:
         _spieler_rangliste()
     with t2:
         _vielspieler()
     with t3:
         _winback()
+    with t4:
+        _spieler_analysen()
+
+
+def _spieler_analysen():
+    """Segmente, Abwanderungsrisiko, Wellpass-Mix — für Schlüsse, nicht nur Zahlen."""
+    segmente = spieler_segmente()
+    if segmente.empty:
+        box("Noch keine Spielerdaten.", "info")
+        return
+
+    # ── Segment-Übersicht ────────────────────────────────────────────────
+    st.markdown("##### Segmente")
+    st.caption("Grobe Einteilung nach Buchungsanzahl und letztem Besuch — "
+               "für den schnellen Überblick, nicht für die Wissenschaft.")
+
+    reihenfolge = ["Stammspieler", "Rückläufig", "Gelegenheit", "Neu", "Verloren"]
+    zaehler = segmente["Segment"].value_counts().to_dict()
+    spalten = st.columns(len(reihenfolge))
+    for col, seg in zip(spalten, reihenfolge):
+        with col:
+            kpi(seg, str(zaehler.get(seg, 0)))
+
+    st.markdown("")
+    st.markdown("---")
+
+    # ── Abwanderungsrisiko ───────────────────────────────────────────────
+    st.markdown("##### Abwanderungsrisiko")
+    box("Vergleicht die aktuelle Pause jedes Spielers mit seinem eigenen "
+        "üblichen Abstand zwischen zwei Besuchen — nicht mit einem festen "
+        "Tage-Wert für alle. Ein Vielspieler, der sonst alle 3 Tage kommt "
+        "und jetzt 10 Tage weg ist, wird hier sichtbar, lange bevor er in "
+        "die normale Rückholung fallen würde.", "info")
+
+    rhythmus = spieler_rhythmus()
+    if rhythmus.empty:
+        box("Noch zu wenig wiederholte Besuche für eine Rhythmus-Analyse "
+            "(mindestens 3 Besuche pro Spieler nötig).", "info")
+    else:
+        schwelle = st.slider(
+            "Risiko-Schwelle (aktuelle Pause ÷ üblicher Abstand)",
+            1.0, 5.0, 1.5, step=0.1,
+            help="1.5 heisst: schon 50% länger weg als sonst üblich.")
+        risiko = rhythmus[rhythmus["Risiko"] >= schwelle]
+
+        if risiko.empty:
+            box("✅ Niemand über der Schwelle — alle Vielspieler in ihrem "
+                "gewohnten Rhythmus.", "ok")
+        else:
+            st.caption(f"{len(risiko)} von {len(rhythmus)} Spielern mit "
+                       "wiederkehrendem Besuch über der Schwelle.")
+            for _, r in risiko.head(30).iterrows():
+                einstufung = ("err" if r["Risiko"] >= 2.5
+                             else "warn" if r["Risiko"] >= 1.8 else "soft")
+                risiko_chip = chip(f"{r['Risiko']:.1f}×", einstufung)
+                st.markdown(
+                    f"<div class='pc-row'><div><span class='nm'>{r['Name']}</span>"
+                    f"<span class='mt'>&nbsp;· sonst alle {r['Ø Abstand']:.0f} Tage, "
+                    f"jetzt {int(r['Aktuelle Pause'])} Tage weg</span></div>"
+                    f"<div>{risiko_chip}</div></div>",
+                    unsafe_allow_html=True)
+
+    st.markdown("")
+    st.markdown("---")
+
+    # ── Wellpass-Mix ─────────────────────────────────────────────────────
+    st.markdown("##### Wellpass-Mix")
+    st.caption("Wie viel Prozent der Buchungen jedes Spielers mit "
+               "Wellpass-Rabatt liefen. Nahe 100% heisst: fast reiner "
+               "Wellpass-Kunde. Nahe 0%: zahlt praktisch immer voll.")
+
+    relevante = segmente[segmente["buchungen"] >= 3].copy()
+    if relevante.empty:
+        box("Noch zu wenig Buchungen pro Spieler für den Wellpass-Mix.", "info")
+    else:
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("**Fast reine Wellpass-Nutzer**")
+            for _, r in (relevante.sort_values("Wellpass-Anteil", ascending=False)
+                        .head(8).iterrows()):
+                st.markdown(f"<div class='pc-row'><span class='nm'>{r['Name']}</span>"
+                            f"<span class='mt'>{r['Wellpass-Anteil']:.0f}% "
+                            f"({int(r['buchungen'])} Buchungen)</span></div>",
+                            unsafe_allow_html=True)
+        with c2:
+            st.markdown("**Zahlen praktisch immer voll**")
+            for _, r in (relevante.sort_values("Wellpass-Anteil", ascending=True)
+                        .head(8).iterrows()):
+                st.markdown(f"<div class='pc-row'><span class='nm'>{r['Name']}</span>"
+                            f"<span class='mt'>{r['Wellpass-Anteil']:.0f}% "
+                            f"({int(r['buchungen'])} Buchungen)</span></div>",
+                            unsafe_allow_html=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
