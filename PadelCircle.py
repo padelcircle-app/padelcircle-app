@@ -4028,6 +4028,46 @@ def _event_rabatte(zahlungen: dict) -> tuple:
     return vollpreis, rabatte, len(set(werte)) > 1
 
 
+def _event_altzeilen_entfernen(eintraege: list) -> int:
+    """
+    Beim erneuten Import eines Events die alten Court-Einzelzeilen
+    wegräumen.
+
+    Ein Event wird jetzt als eine Zeile je Teilnehmer gespeichert, mit
+    allen belegten Courts zusammen im Feld `Court`. Früher — und in
+    jedem Altbestand — stand dort ein einzelner Court, und die Zeile
+    gab es fünfmal.
+
+    Der Fachschlüssel des Imports enthält den Court. Die alten Zeilen
+    sehen dadurch aus wie andere Buchungen und werden beim Aktualisieren
+    nicht ersetzt, sondern bleiben neben den neuen stehen: derselbe
+    Spieltag zweimal, einmal richtig und einmal falsch.
+
+    Entfernt wird eng begrenzt — nur Zeilen mit demselben Tag, derselben
+    Startzeit und genau einem der Courts, die dieses Event belegt hat.
+    Eine normale Buchung zur selben Zeit auf einem anderen Court bleibt
+    unangetastet.
+
+    → Anzahl entfernter Zeilen
+    """
+    if not eintraege:
+        return 0
+    b = loadsheet("buchungen")
+    noetig = {"analysis_date", "Service_Zeit", "Court"}
+    if b.empty or not noetig <= set(b.columns):
+        return 0
+
+    ziel = {(str(t), str(z), str(c)) for t, z, c in eintraege}
+    schluessel = list(zip(b["analysis_date"].astype(str),
+                          b["Service_Zeit"].astype(str),
+                          b["Court"].astype(str)))
+    behalten = [k not in ziel for k in schluessel]
+    entfernt = len(b) - sum(behalten)
+    if entfernt:
+        savesheet(b[pd.Series(behalten, index=b.index)], "buchungen")
+    return entfernt
+
+
 def _events_zusammenfassen(b: pd.DataFrame) -> pd.DataFrame:
     """
     Die Court-Zeilen eines Events zu einer Veranstaltung zusammenfassen.
@@ -4532,6 +4572,9 @@ def _analysieren(bdf, cdf, pdf=None, zahlungen_index=None) -> bool:
     c_tag = dict(tuple(c.groupby("Checkin_Datum")))
 
     buchungen_out, checkins_out, kunden_out = [], [], []
+    # Welche Court-Einzelzeilen ein Event ersetzt — siehe
+    # _event_altzeilen_entfernen.
+    event_altzeilen = []
 
     for i, tag in enumerate(alle_tage):
         balken.progress((i + 1) / len(alle_tage))
@@ -4641,6 +4684,10 @@ def _analysieren(bdf, cdf, pdf=None, zahlungen_index=None) -> bool:
                 # es muss also nichts aus einer Summe zurückgerechnet
                 # werden.
                 ev_titel_txt = str(row.get("_ev_titel", "") or "Event")
+                for einzel in str(row["_court"]).split(", "):
+                    if einzel.strip():
+                        event_altzeilen.append(
+                            (str(tag), str(row["_zeit"]), einzel.strip()))
                 ende = (row["_ende"] if pd.notna(row["_ende"])
                         else row["_start"] + timedelta(minutes=float(row["_min"])))
                 # Der Zahlungs-Zeitstempel eines Events ist dessen Ende,
@@ -4799,6 +4846,10 @@ def _analysieren(bdf, cdf, pdf=None, zahlungen_index=None) -> bool:
 
     # aktualisieren=True: ein erneut hochgeladener Tag überschreibt die
     # alte Auswertung, statt als Dublette übersprungen zu werden.
+    # Erst die überholten Court-Einzelzeilen des Events wegräumen, dann
+    # schreiben — sonst stünde derselbe Spieltag doppelt in der Tabelle.
+    _event_altzeilen_entfernen(event_altzeilen)
+
     neu_b = append_rows(pd.DataFrame(buchungen_out), "buchungen",
                         ["analysis_date", "Name_norm", "Service_Zeit", "Court"],
                         aktualisieren=True)
