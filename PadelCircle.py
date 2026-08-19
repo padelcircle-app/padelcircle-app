@@ -1067,7 +1067,7 @@ ABGELEITETE_CACHES = ("tages_kennzahlen", "verfuegbare_tage", "monats_kennzahlen
                       "buchungsnamen_am_tag", "abzug_pruefen", "verguetung_wert",
                       "checkins_von_am", "rabattierte_buchungen_am", "checkins_roh_und_verguetet",
                       "playtomic_spieler", "spieltage_von", "mapping_konflikte",
-                      "offene_freigaben")
+                      "offene_freigaben", "anspruch_verdacht")
 
 
 def _cache_funktion_leeren(name: str):
@@ -2990,6 +2990,34 @@ def zuordnung_vorschlag(name: str, datum_str: str, mail: str = None,
             for k, v in sortiert if v[0] >= 50]
 
 
+def _rabattierte_namen_am(datum: str) -> list:
+    """Alle Namen, die an diesem Tag mit Rabatt gespielt haben."""
+    df = loadsheet("buchungen")
+    if df.empty or "analysis_date" not in df.columns:
+        return []
+    tag = df[df["analysis_date"].astype(str) == str(datum)]
+    if tag.empty or "Relevant" not in tag.columns:
+        return []
+    tag = tag[tag["Relevant"].astype(str) == "Ja"]
+    return [str(x) for x in tag["Name_norm"]] if not tag.empty else []
+
+
+def _teilmengen_name(a: str, b: str) -> bool:
+    """
+    Ist ein Name die Kurzform des anderen?
+
+    Playtomic führt manche Spieler nur mit dem Vornamen — „Bryan",
+    während die Check-in-Liste „Bryan Victor Biber" kennt. Für den
+    Nachnamen-Vergleich ist so ein Name unbrauchbar: Ein einzelnes Wort
+    hat keinen Nachnamen, die Prüfung läuft ins Leere.
+    """
+    ta = {t for t in _vergleichsform(a).split() if len(t) >= 3}
+    tb = {t for t in _vergleichsform(b).split() if len(t) >= 3}
+    if not ta or not tb or ta == tb:
+        return False
+    return ta < tb or tb < ta
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def eigener_anspruch(name_norm: str, datum: str) -> int:
     """
@@ -3000,16 +3028,78 @@ def eigener_anspruch(name_norm: str, datum: str) -> int:
     hat, braucht diesen Check-in für sich — er kann keinen älteren
     Fall mehr schliessen.
 
+    Der Check-in-Name muss dabei nicht der Buchungsname sein. Playtomic
+    kennt „Bryan", die Check-in-Liste „Bryan Victor Biber". Wer nur
+    exakt nachschlägt, findet die eigene Buchung nicht, hält den
+    Check-in für frei und lässt ihn einen älteren Fall schliessen —
+    obwohl er an seinem eigenen Tag gebraucht wird. Genau so ging ein
+    Check-in vom Event-Tag an einen zwei Wochen älteren Fall.
+
+    Deshalb zählen drei Wege:
+      • der Name selbst,
+      • jeder Buchungsname, der über den Namensabgleich auf diesen
+        Check-in-Namen zeigt,
+      • Namen desselben Tages, deren Nachname eindeutig passt — nach
+        denselben Regeln, nach denen die App sonst eine Nachholung
+        zuordnet.
+
+    Der dritte Weg ist Absicht: Ein Name, der gut genug ist, um einen
+    Fall zu schliessen, ist auch gut genug, um einen Check-in zu
+    schützen. Alles andere wäre eine Asymmetrie zu Lasten der Kasse.
+
     → Anzahl der eigenen rabattierten Buchungen an diesem Tag
     """
-    df = loadsheet("buchungen")
-    if df.empty or "analysis_date" not in df.columns:
+    ziel = str(name_norm)
+    namen = _rabattierte_namen_am(datum)
+    if not namen:
         return 0
-    tag = df[(df["analysis_date"].astype(str) == str(datum)) &
-             (df["Name_norm"].astype(str) == str(name_norm))]
-    if tag.empty or "Relevant" not in tag.columns:
-        return 0
-    return int((tag["Relevant"].astype(str) == "Ja").sum())
+
+    erlaubt = {ziel}
+    for buchung_name, zuordnung in mapping_laden().items():
+        gname = str(zuordnung["checkin_name"] if isinstance(zuordnung, dict)
+                    else zuordnung)
+        if gname == ziel:
+            erlaubt.add(str(buchung_name))
+
+    treffer = sum(1 for n in namen if n in erlaubt)
+    if treffer:
+        return treffer
+
+    abgelehnt = rejected_matches_laden()
+    such_vor, such_nach = _namensteile(ziel)
+    for kand in set(namen):
+        if (kand, ziel) in abgelehnt or (ziel, kand) in abgelehnt:
+            continue
+        kand_vor, kand_nach = _namensteile(kand)
+        if (such_nach and kand_nach
+                and _teil_aehnlich(such_nach, kand_nach) >= 85
+                and _teil_aehnlich(such_vor, kand_vor) >= 55):
+            return sum(1 for n in namen if n == kand)
+    return 0
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def anspruch_verdacht(name_norm: str, datum: str) -> list:
+    """
+    Namen, die an diesem Tag mit Rabatt gespielt haben und die Kurzform
+    dieses Check-in-Namens sein könnten.
+
+    Bewusst kein harter Riegel wie `eigener_anspruch`: „Daniel" könnte
+    Daniel Litz sein oder Daniel Kohlmus. Ein Blockieren wäre geraten
+    und würde eine berechtigte Nachholung verschlucken. Angezeigt wird
+    es trotzdem — entscheiden soll ein Mensch, nicht die Ähnlichkeit.
+    """
+    ziel = str(name_norm)
+    if eigener_anspruch(ziel, datum):
+        return []
+    abgelehnt = rejected_matches_laden()
+    verdacht = []
+    for kand in set(_rabattierte_namen_am(datum)):
+        if (kand, ziel) in abgelehnt or (ziel, kand) in abgelehnt:
+            continue
+        if _teilmengen_name(ziel, kand):
+            verdacht.append(kand)
+    return sorted(verdacht)
 
 
 def nachhol_warnung(name_norm: str, checkin_datum: str) -> str:
@@ -3019,6 +3109,14 @@ def nachhol_warnung(name_norm: str, checkin_datum: str) -> str:
                 "EGYM vergütet pro Person und Tag nur einmal — dieser "
                 "Check-in gehört zu diesem Tag und kann den älteren Fall "
                 "nicht schliessen.")
+    verdacht = anspruch_verdacht(name_norm, checkin_datum)
+    if verdacht:
+        namen = ", ".join(f"<b>{v}</b>" for v in verdacht[:3])
+        return ("⚠️ An diesem Tag hat {namen} mit Rabatt gespielt — "
+                "möglicherweise dieselbe Person unter dem kürzeren "
+                "Playtomic-Namen. Dann gehört der Check-in zu jenem Tag "
+                "und darf diesen Fall nicht schliessen. Vorher im "
+                "Name-Abgleich klären.").replace("{namen}", namen)
     return ""
 
 
@@ -7720,6 +7818,9 @@ def _sperre_zuordnen(nn: str, name: str, i: int):
     for k, (anzeige, kand_norm, ci_datum, score, tage_danach) in enumerate(kandidaten[:8]):
         st.markdown(f"**{anzeige}** · {datum_kurz(ci_datum)} "
                     f"({tage_danach} Tage später) · {score:.0f}%")
+        warnung = nachhol_warnung(kand_norm, ci_datum)
+        if warnung:
+            box(warnung, "warn")
         if st.button("Diesen zuordnen", key=f"sp_zu_{i}_{k}",
                      use_container_width=True):
             if sperre_nachholung_zuordnen(nn, name, ziel, ci_datum, kand_norm):
