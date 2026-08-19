@@ -109,6 +109,10 @@ CONFIG = {
     "admin_gebuehr":       15.00,   # Gebühr wenn Check-in vergessen wurde
     # Wie viele Tage nach dem Spiel darf ein Check-in nachgeholt werden?
     "nachhol_fenster_tage": 5,
+    # Für gesperrte Spieler gilt ein weiteres Fenster: Wer gesperrt ist,
+    # meldet sich oft erst Wochen später — mit fünf Tagen fände man den
+    # nachgeholten Check-in nie.
+    "sperre_nachhol_fenster_tage": 90,
     # Wie weit zurück werden überzählige Check-ins angezeigt?
     "ueberzaehlig_rueckblick_tage": 40,
 
@@ -569,6 +573,8 @@ SHEET_SPALTEN = {
     "nachmeldungen":    ["name", "email", "geburtstag", "checkin_datum", "status", "timestamp"],
     "checkin_zuordnung": ["checkin_key", "fall_key", "checkin_datum",
                           "checkin_name", "fall_datum", "fall_name", "timestamp"],
+    "freigaben":        ["name_norm", "name", "ausgeloest_am", "letzte_sperre",
+                         "bestaetigt", "timestamp"],
     "auth_tokens":      ["token", "created", "expires"],
     "settings":         ["key", "value"],
 }
@@ -1060,7 +1066,8 @@ ABGELEITETE_CACHES = ("tages_kennzahlen", "verfuegbare_tage", "monats_kennzahlen
                       "redundante_korrekturen",
                       "buchungsnamen_am_tag", "abzug_pruefen", "verguetung_wert",
                       "checkins_von_am", "rabattierte_buchungen_am", "checkins_roh_und_verguetet",
-                      "playtomic_spieler", "spieltage_von", "mapping_konflikte")
+                      "playtomic_spieler", "spieltage_von", "mapping_konflikte",
+                      "offene_freigaben")
 
 
 def _cache_funktion_leeren(name: str):
@@ -1445,6 +1452,70 @@ def court_plaetze(court_name: str) -> int:
     return 2 if ist_single_court(court_name) else 4
 
 
+# ── Events ───────────────────────────────────────────────────────────────────
+#
+# Ein Event ist keine teure Buchung, sondern eine andere Art Zeile.
+# Playtomic markiert es hart, es muss also nichts geraten werden:
+#
+#   booking_type   OPEN_PLAY        statt REGULAR_BOOKING / OPEN_MATCH
+#   activity_id    gesetzt          Kennung der Veranstaltung
+#   activity_name  "…Mexicano"      Anzeigename
+#   Product SKU    "Tournament registration"   in den Zahlungen
+#
+# Drei Dinge sind anders als bei einer Buchung, und jedes davon hat die
+# alte Rechnung verdorben:
+#   • Das Event steht einmal pro belegtem Court in der Datei — fünf
+#     identische Zeilen sind EINE Veranstaltung.
+#   • `price` ist der Gesamtumsatz des Events, nicht der Court-Preis.
+#   • Der Preis pro Kopf ist frei gesetzt und hat mit dem Stundentarif
+#     nichts zu tun. Der Wellpass-Rabatt ebenso wenig.
+
+EVENT_MAX_PLAETZE = 20
+
+
+def event_kennung(row) -> str:
+    """
+    Die Event-Kennung einer Buchungszeile — "" bei normaler Buchung.
+
+    Verlangt werden beide Signale: eine gesetzte Aktivitäts-Kennung UND
+    ein passender `booking_type`. Eine normale Buchung soll unter keinen
+    Umständen als Event durchgehen — lieber ein Event übersehen als die
+    Preislogik einer echten Buchung aushebeln.
+    """
+    kennung = ""
+    for spalte in ("activity_id", "tournament_id"):
+        wert = row.get(spalte)
+        if wert is None:
+            continue
+        wert = str(wert).strip()
+        if wert and wert.lower() not in ("nan", "none", "nat", "<na>"):
+            kennung = wert
+            break
+    if not kennung:
+        return ""
+    art = str(row.get("booking_type", "") or "").strip().upper()
+    if art and art not in ("OPEN_PLAY", "TOURNAMENT"):
+        return ""
+    return kennung
+
+
+def event_titel(row) -> str:
+    """Anzeigename des Events."""
+    for spalte in ("activity_name", "course_name", "tournament_name"):
+        wert = row.get(spalte)
+        if wert is None:
+            continue
+        wert = str(wert).strip()
+        if wert and wert.lower() not in ("nan", "none"):
+            return wert
+    return "Event"
+
+
+def _zeilen_plaetze(row) -> int:
+    """Wie viele Teilnehmerspalten diese Zeile haben kann."""
+    return EVENT_MAX_PLAETZE if str(row.get("_event", "") or "") else 4
+
+
 def wellpass_abzug_saetze() -> list:
     """Ab wann Playtomic wie viel abzieht. Aufsteigend nach Datum."""
     roh = einstellung("wellpass_abzug_saetze", CONFIG["wellpass_abzug_saetze"])
@@ -1538,10 +1609,18 @@ def wellpass_anzahl(liste: float, bezahlt: float, plaetze: int,
     return 0
 
 
-def _teilnehmer_liste(row) -> list:
-    """[(Name, E-Mail), …] einer Buchung."""
+def _teilnehmer_liste(row, max_plaetze: int = 4) -> list:
+    """
+    [(Name, E-Mail), …] einer Buchung.
+
+    Eine normale Buchung hat höchstens vier Plätze. Ein Event füllt
+    dagegen `participant_name_1` bis `participant_name_20`. Bei fest
+    verdrahteten vier Plätzen waren dort 16 von 20 Teilnehmern für die
+    gesamte Auswertung unsichtbar — sie tauchten weder als Spieler noch
+    als möglicher Wellpass-Fall auf.
+    """
     out = []
-    for i in (1, 2, 3, 4):
+    for i in range(1, int(max_plaetze) + 1):
         name = row.get(f"participant_name_{i}")
         if pd.isna(name) or not str(name).strip():
             continue
@@ -2505,6 +2584,135 @@ def gesperrt_historie() -> pd.DataFrame:
     return df.sort_values(["Anzahl gesperrt", "Name"], ascending=[False, True])
 
 
+# ── Sperren auflösen ─────────────────────────────────────────────────────────
+#
+# Eine Sperre ist kein eigener Zustand, sondern die Summe der Fälle, die
+# mit dem Grund „Gesperrt" geschlossen wurden. Wer zweimal gesperrt
+# wurde, hat zwei solche Fälle — ihm fehlen zwei Check-ins.
+#
+# Holt jemand einen Check-in nach, wird der von Hand genau einem dieser
+# Fälle zugeordnet. Der Fall wechselt damit auf „Nachgeholt" und zählt
+# nicht mehr als Sperre: aus 2× gesperrt wird 1×.
+#
+# Das passiert bewusst NIE automatisch. Ein Check-in hat Geldwirkung und
+# eine Sperre hat Folgen für einen Menschen — beides darf keine
+# Namensähnlichkeit im Hintergrund entscheiden. Die App schlägt nur vor,
+# zugeordnet wird per Klick.
+#
+# Erreicht jemand dabei null offene Sperren, ist die Sperre selbst noch
+# nicht aufgehoben: Der Wellpass-Zugang hängt bei EGYM, nicht in dieser
+# App. Deshalb entsteht in dem Moment eine Freigabe-Aufgabe, die so
+# lange sichtbar bleibt, bis sie ausdrücklich bestätigt wird.
+
+
+def gesperrt_faelle(name_norm: str) -> pd.DataFrame:
+    """
+    Die noch offenen Sperren einer Person — je Zeile ein Spieltag,
+    der mit „Gesperrt" geschlossen wurde. Neueste zuerst.
+    """
+    df = erledigte_faelle()
+    if df.empty:
+        return pd.DataFrame()
+    treffer = df[(df["grund"] == "gesperrt")
+                 & (df["name_norm"].astype(str) == str(name_norm))]
+    if treffer.empty:
+        return pd.DataFrame()
+    return treffer.sort_values("datum", ascending=False)
+
+
+def sperre_nachholung_zuordnen(name_norm: str, name: str, fall_datum: str,
+                               checkin_datum: str, checkin_name: str) -> bool:
+    """
+    Einen nachgeholten Check-in einer bestehenden Sperre zuordnen.
+
+    Der Fall wechselt von „Gesperrt" auf „Nachgeholt", die Zahl der
+    offenen Sperren sinkt um eins. Fällt sie damit auf null, entsteht
+    eine Freigabe-Aufgabe — die App kann den Wellpass-Zugang nicht
+    selbst wieder öffnen, also muss sie daran erinnern.
+
+    → True, wenn zugeordnet wurde
+    """
+    vorher = len(gesperrt_faelle(name_norm))
+    if not nachholung_speichern(checkin_datum, checkin_name,
+                                fall_datum, name_norm):
+        return False
+
+    # nachholung_speichern hat "corrections" bereits geleert — die Zahl
+    # der offenen Sperren ist damit frisch.
+    nachher = len(gesperrt_faelle(name_norm))
+    if vorher > 0 and nachher == 0:
+        freigabe_anlegen(name_norm, name, fall_datum)
+    return True
+
+
+def freigabe_anlegen(name_norm: str, name: str, letzte_sperre: str):
+    """Eine offene Freigabe-Aufgabe vormerken."""
+    sheet_zeile_setzen("freigaben", {
+        "name_norm": str(name_norm),
+        "name": str(name),
+        "ausgeloest_am": date.today().isoformat(),
+        "letzte_sperre": str(letzte_sperre),
+        "bestaetigt": "",
+        "timestamp": datetime.now().isoformat(),
+    }, schluessel_spalte="name_norm")
+    cache_leeren("freigaben", funktionen=("offene_freigaben",))
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def offene_freigaben() -> pd.DataFrame:
+    """
+    Wer ist rechnerisch wieder frei, wurde aber noch nicht freigegeben?
+
+    Doppelt abgesichert: Es zählt nur, wer keine offene Sperre mehr hat.
+    Wurde jemand nach dem Nachholen erneut gesperrt, verschwindet die
+    Aufgabe von selbst — sonst würde die App zur Freigabe eines gerade
+    frisch gesperrten Spielers auffordern.
+    """
+    df = loadsheet("freigaben", SHEET_SPALTEN["freigaben"])
+    if df.empty or "name_norm" not in df.columns:
+        return pd.DataFrame()
+    offen = df[~df.get("bestaetigt", pd.Series([""] * len(df))).map(is_true)]
+    if offen.empty:
+        return pd.DataFrame()
+
+    historie = gesperrt_historie()
+    noch_gesperrt = (set(historie["Name_norm"].astype(str))
+                     if not historie.empty else set())
+    offen = offen[~offen["name_norm"].astype(str).isin(noch_gesperrt)]
+    return offen.sort_values("timestamp", ascending=False)
+
+
+def freigabe_bestaetigen(name_norm: str):
+    """Die Freigabe ist erledigt — der Zugang wurde wieder geöffnet."""
+    df = loadsheet("freigaben", SHEET_SPALTEN["freigaben"])
+    if df.empty or "name_norm" not in df.columns:
+        return
+    treffer = df[df["name_norm"].astype(str) == str(name_norm)]
+    if treffer.empty:
+        return
+    zeile = treffer.iloc[-1].to_dict()
+    zeile["bestaetigt"] = "Ja"
+    zeile["timestamp"] = datetime.now().isoformat()
+    sheet_zeile_setzen("freigaben", zeile, schluessel_spalte="name_norm")
+    cache_leeren("freigaben", funktionen=("offene_freigaben",))
+
+
+def freigabe_verwerfen(name_norm: str):
+    """
+    Eine Freigabe-Aufgabe entfernen.
+
+    Wird gebraucht, wenn jemand erneut gesperrt wird, bevor die alte
+    Freigabe bestätigt war — die Aufgabe ist dann gegenstandslos.
+    """
+    df = loadsheet("freigaben", SHEET_SPALTEN["freigaben"])
+    if df.empty or "name_norm" not in df.columns:
+        return
+    rest = df[df["name_norm"].astype(str) != str(name_norm)]
+    if len(rest) != len(df):
+        savesheet(rest, "freigaben")
+        cache_leeren("freigaben", funktionen=("offene_freigaben",))
+
+
 def als_behoben_markieren(name_norm: str, datum: str,
                           grund: str = "", notiz: str = "", betrag=None):
     """
@@ -2519,6 +2727,11 @@ def als_behoben_markieren(name_norm: str, datum: str,
     geloest = False
     if grund and str(grund) != "nachgeholt":
         geloest = zuordnung_zu_fall_loesen(name_norm, datum)
+
+    # Wer erneut gesperrt wird, ist nicht mehr freizugeben — eine noch
+    # offene Freigabe-Aufgabe von vorher wäre jetzt falsch.
+    if str(grund) == "gesperrt":
+        freigabe_verwerfen(name_norm)
 
     sheet_zeile_setzen("corrections", {
         "key": f"{name_norm}_{datum}", "date": datum, "behoben": True,
@@ -3638,6 +3851,124 @@ def _zahlungs_index(pdf: pd.DataFrame) -> dict:
     return out
 
 
+def _event_zahlungs_index(pdf: pd.DataFrame) -> dict:
+    """
+    Was jeder Teilnehmer für ein Event bezahlt hat.
+
+    → {datum: {name_norm: {"betrag": …, "dt": …}}}
+
+    Event-Zahlungen stehen unter einer eigenen SKU („Tournament
+    registration"). Der normale Zahlungs-Index lässt nur Buchungen und
+    Open Matches durch und hat sie deshalb komplett verworfen — für ein
+    Event gab es bislang keinen einzigen Zahlungsbeleg, obwohl dort der
+    Preis pro Kopf sauber einzeln drinsteht.
+
+    Zweiter Unterschied: Bei einer normalen Buchung ist `Service date`
+    der Beginn, bei einem Event das Ende. Ein Abgleich über den exakten
+    Zeitstempel geht deshalb ins Leere. Gruppiert wird hier nach Tag,
+    die Uhrzeit bleibt für die Zuordnung zum Zeitfenster erhalten.
+
+    Erstattungen werden verrechnet: Wer storniert hat, war nicht dabei
+    und darf die Preisstufen des Events nicht verfälschen.
+    """
+    if pdf.empty or "Service date" not in pdf.columns:
+        return {}
+    if "Product SKU" not in pdf.columns or "User name" not in pdf.columns:
+        return {}
+    df = pdf[pdf["Product SKU"].astype(str)
+             .str.contains("tournament|event|activity", case=False, na=False)].copy()
+    if df.empty:
+        return {}
+    df["_dt"] = df["Service date"].map(parse_datetime_safe)
+    df["_nn"] = df["User name"].map(normalize_name)
+    df["_bt"] = df["Total"].map(parse_betrag)
+    df = df[df["_dt"].notna()]
+    df = df[df["_nn"].astype(str).str.len() > 0]
+    if df.empty:
+        return {}
+
+    out = {}
+    df["_tag"] = df["_dt"].map(lambda d: d.date())
+    for (nn, tag), gruppe in df.groupby(["_nn", "_tag"]):
+        netto = round(float(gruppe["_bt"].sum()), 2)
+        if netto <= 0:
+            continue          # storniert oder vollständig erstattet
+        out.setdefault(tag, {})[str(nn)] = {
+            "betrag": netto,
+            "dt": max(gruppe["_dt"]),
+        }
+    return out
+
+
+def _event_rabatte(zahlungen: dict) -> tuple:
+    """
+    Aus den gezahlten Beträgen eines Events ableiten, wer rabattiert hat.
+
+    → (vollpreis, {name_norm: rabatt}, sicher)
+
+    Weder der Eventpreis noch der Wellpass-Rabatt stehen irgendwo in den
+    Rohdaten. Beides ist pro Event frei gesetzt — mal 8 €, mal 10 €, mal
+    15 € Nachlass auf einen jedes Mal anderen Grundpreis. Der
+    Standardabzug von 12 € greift hier nicht, und ein fester Schwellwert
+    wäre auch keine Lösung: Er müsste den Rabatt schon kennen, den er
+    finden soll, und würde bei einem Event mit 5 € Nachlass schweigen.
+
+    Deshalb kommt der Maßstab aus dem Event selbst. Der höchste gezahlte
+    Betrag ist der Vollpreis, jeder Betrag darunter ist rabattiert. Das
+    ist unabhängig von der Höhe des Rabatts und vom Preis des Events.
+
+    `sicher` ist False, wenn alle denselben Betrag gezahlt haben. Dann
+    fehlt der Vollzahler als Vergleich — entweder hatte niemand Wellpass
+    oder ausnahmslos alle. Dieser Fall wird angezeigt, nicht geraten.
+    """
+    werte = [d["betrag"] for d in zahlungen.values() if d["betrag"] > 0]
+    if not werte:
+        return 0.0, {}, False
+    vollpreis = max(werte)
+    rabatte = {nn: round(vollpreis - d["betrag"], 2)
+               for nn, d in zahlungen.items() if d["betrag"] > 0}
+    return vollpreis, rabatte, len(set(werte)) > 1
+
+
+def _events_zusammenfassen(b: pd.DataFrame) -> pd.DataFrame:
+    """
+    Die Court-Zeilen eines Events zu einer Veranstaltung zusammenfassen.
+
+    Playtomic schreibt ein Event einmal pro belegtem Court. Der Mexicano
+    vom 16.08. steht deshalb fünfmal in der Datei — fünf Zeilen mit
+    identischem Preis und identischer Teilnehmerliste. Das ist eine
+    Veranstaltung, kein fünffaches Spiel: Ohne Zusammenfassung landet
+    jeder Teilnehmer fünfmal in der Auswertung und jeder vergessene
+    Check-in fünfmal in den offenen Fällen.
+
+    Die Courts gehen dabei nicht verloren. Wie viele Plätze wie lange
+    belegt waren, bleibt in `_ev_courts` erhalten — sonst fehlte dem
+    Event später seine Auslastung, obwohl es die halbe Halle blockiert.
+    """
+    b = b.copy()
+    b["_ev_courts"] = 0
+    b["_ev_titel"] = ""
+    if "_event" not in b.columns:
+        b["_event"] = ""
+        return b
+
+    ist_ev = b["_event"].astype(str) != ""
+    if not ist_ev.any():
+        return b
+
+    behalten = set()
+    for _, gruppe in b[ist_ev].groupby(["_datum", "_event"], sort=False):
+        courts = sorted({str(x) for x in gruppe["_court"]})
+        erster = gruppe.index[0]
+        b.at[erster, "_ev_courts"] = len(courts)
+        b.at[erster, "_ev_titel"] = event_titel(gruppe.iloc[0])
+        b.at[erster, "_court"] = ", ".join(courts)
+        behalten.add(erster)
+
+    weg = [i for i in b.index[ist_ev] if i not in behalten]
+    return b.drop(index=weg)
+
+
 def _zerlege_zahlung(betrag: float, voll: float, rabattiert: float,
                      max_plaetze: int) -> tuple:
     """
@@ -3867,6 +4198,8 @@ def _als_rohbuchungen(tage=None) -> pd.DataFrame:
             liste_alt = parse_betrag(erste.get("Listenpreis"))
             dauer = round(liste_alt / satz * 60) if satz else 90
 
+        ist_event = str(erste.get("Event", "")) == "Ja"
+
         eintrag = {
             "booking_start_date": f"{tag}T{zeit}",
             "price": f"{parse_betrag(erste.get('Bezahlt'))} EUR",
@@ -3874,12 +4207,35 @@ def _als_rohbuchungen(tage=None) -> pd.DataFrame:
             "duration (minutes)": int(dauer),
             "is_canceled": "false",
         }
+
+        # Ein Event muss vollständig zurückgebaut werden, sonst frisst
+        # das Neuberechnen die Veranstaltung auf: ohne `booking_type`
+        # und `activity_id` gilt sie wieder als normale Buchung, und
+        # ohne die Court-Zeilen fehlt ihr die Auslastung. Die Grenze von
+        # vier Teilnehmern würde ausserdem 16 von 20 Leuten löschen.
+        grenze = 4
+        if ist_event:
+            grenze = EVENT_MAX_PLAETZE
+            eintrag["booking_type"] = "OPEN_PLAY"
+            eintrag["activity_id"] = str(erste.get("Event_Id", "") or f"ev-{tag}-{zeit}")
+            eintrag["activity_name"] = str(erste.get("Event_Name", "") or "Event")
+
         for i, (_, r) in enumerate(gruppe.iterrows(), start=1):
-            if i > 4:
+            if i > grenze:
                 break
             eintrag[f"participant_name_{i}"] = str(r.get("Name", ""))
             eintrag[f"participant_email_{i}"] = str(r.get("Email", "") or "")
-        zeilen.append(eintrag)
+
+        if ist_event:
+            # Je belegtem Court eine Zeile — genau die Form, in der
+            # Playtomic das Event geliefert hat.
+            courts = [c.strip() for c in str(court).split(",") if c.strip()]
+            for einzel in (courts or [str(court)]):
+                kopie = dict(eintrag)
+                kopie["resource_name"] = einzel
+                zeilen.append(kopie)
+        else:
+            zeilen.append(eintrag)
 
     return pd.DataFrame(zeilen)
 
@@ -4023,6 +4379,18 @@ def _analysieren(bdf, cdf, pdf=None, zahlungen_index=None) -> bool:
     b["_single"] = b["resource_name"].map(ist_single_court)
     b["_court"] = b["resource_name"].astype(str)
 
+    # ── Events erkennen und zusammenfassen ──────────────────────────────
+    b["_event"] = [event_kennung(r) for _, r in b.iterrows()]
+    b = _events_zusammenfassen(b)
+
+    # Event-Zahlungen stehen unter eigener SKU und fehlen im normalen
+    # Zahlungs-Index. Nur laden, wenn überhaupt ein Event dabei ist.
+    event_zahlungen = {}
+    if (b["_event"].astype(str) != "").any():
+        quelle = pdf if (pdf is not None and not pdf.empty) else loadsheet("playtomic_raw")
+        if quelle is not None and not quelle.empty:
+            event_zahlungen = _event_zahlungs_index(quelle)
+
     # ── Check-ins aufbereiten ───────────────────────────────────────────
     c = cdf.copy()
     um = {"Vor- & Nachname": "Name", "Datum": "Checkin_Datum_raw"}
@@ -4110,7 +4478,7 @@ def _analysieren(bdf, cdf, pdf=None, zahlungen_index=None) -> bool:
 
         def _buchung_zaehlt(row_b) -> bool:
             """Zählt diese Buchung für die Wellpass-Rechnung?"""
-            tn = _teilnehmer_liste(row_b)
+            tn = _teilnehmer_liste(row_b, _zeilen_plaetze(row_b))
             if not tn:
                 return False
             namen = [normalize_name(n) for n, _ in tn]
@@ -4131,7 +4499,7 @@ def _analysieren(bdf, cdf, pdf=None, zahlungen_index=None) -> bool:
                 # zu keinem Anspruch und bleibt deshalb bewusst als
                 # überzählig sichtbar — auch bei Mitarbeitern.
                 continue
-            for name_b, _m in _teilnehmer_liste(row_b):
+            for name_b, _m in _teilnehmer_liste(row_b, _zeilen_plaetze(row_b)):
                 ziel = _checkin_name(normalize_name(name_b))
                 if ziel is None:
                     continue
@@ -4143,7 +4511,8 @@ def _analysieren(bdf, cdf, pdf=None, zahlungen_index=None) -> bool:
                     besitzer[ziel] = (pos, abstand)
 
         for pos, (_, row) in enumerate(bt.iterrows()):
-            teilnehmer = _teilnehmer_liste(row)
+            ev_id = str(row.get("_event", "") or "")
+            teilnehmer = _teilnehmer_liste(row, _zeilen_plaetze(row))
             if not teilnehmer:
                 continue
 
@@ -4159,17 +4528,62 @@ def _analysieren(bdf, cdf, pdf=None, zahlungen_index=None) -> bool:
             if all(n in TEAM_NORM for n in namen_norm):
                 continue
 
-            liste = listenpreis(row["_start"], row["_min"], bool(row["_single"]))
-            plaetze = court_plaetze(row["_court"])
-            pro_platz = round(liste / max(plaetze, 1), 2)
+            ev_person, ev_titel_txt, ev_unsicher = {}, "", False
 
-            # Sitzt jemand vom Team mit drin, zahlt der 0 € — dessen Platz
-            # darf nicht als Wellpass-Rabatt gezählt werden.
-            team_im_spiel = sum(1 for n in namen_norm if n in TEAM_NORM)
-            liste_effektiv = liste - team_im_spiel * pro_platz
-            n_wellpass = wellpass_anzahl(liste_effektiv, row["_preis"],
-                                         max(plaetze - team_im_spiel, 1),
-                                         datum=tag)
+            if ev_id:
+                # ── Event ────────────────────────────────────────────────
+                # Preis und Rabatt kommen aus den Zahlungen des Events
+                # selbst. Der Stundentarif gilt hier nicht, und `price`
+                # der Zeile ist der Gesamtumsatz der Veranstaltung —
+                # daraus einen Platzpreis zu rechnen ergab bisher einen
+                # negativen Rabatt und damit null erkannte Wellpässe.
+                #
+                # Anders als bei einer Buchung wird hier pro Kopf
+                # gerechnet: Jede Zahlung steht einzeln in den Rohdaten,
+                # es muss also nichts aus einer Summe zurückgerechnet
+                # werden.
+                ev_titel_txt = str(row.get("_ev_titel", "") or "Event")
+                ende = (row["_ende"] if pd.notna(row["_ende"])
+                        else row["_start"] + timedelta(minutes=float(row["_min"])))
+                # Der Zahlungs-Zeitstempel eines Events ist dessen Ende,
+                # nicht der Beginn. Ein grosszügiges Fenster fängt beide
+                # Schreibweisen ab und trennt trotzdem zwei Events, die
+                # am selben Tag zu verschiedenen Zeiten laufen.
+                von, bis = row["_start"] - timedelta(hours=2), ende + timedelta(hours=2)
+                fenster = {nn_z: d for nn_z, d in event_zahlungen.get(tag, {}).items()
+                           if von <= d["dt"] <= bis}
+                vollpreis, rabatte, sicher = _event_rabatte(fenster)
+                ev_unsicher = not sicher
+
+                liste = vollpreis
+                plaetze = len(teilnehmer)
+                pro_platz = vollpreis
+                for nn_t in namen_norm:
+                    bez = fenster.get(nn_t, {}).get("betrag")
+                    rab = float(rabatte.get(nn_t, 0.0))
+                    # Ohne Zahlungsbeleg kein Rabattverdacht — genau wie
+                    # bei einer normalen Buchung.
+                    ev_person[nn_t] = (bez if bez is not None else vollpreis, rab,
+                                       bool(sicher and bez is not None and rab > 0.5))
+                n_wellpass = sum(1 for v in ev_person.values() if v[2])
+            else:
+                liste = listenpreis(row["_start"], row["_min"], bool(row["_single"]))
+                plaetze = court_plaetze(row["_court"])
+                pro_platz = round(liste / max(plaetze, 1), 2)
+
+                # Sitzt jemand vom Team mit drin, zahlt der 0 € — dessen Platz
+                # darf nicht als Wellpass-Rabatt gezählt werden.
+                #
+                # Bei einem Event gilt das ausdrücklich NICHT: Dort zahlt
+                # auch ein Dauergast echtes Startgeld. Würde sein Platz
+                # hier abgezogen, verschöben sich die Preisstufen für
+                # alle anderen. Aus der Nachrichten-Logik bleibt er
+                # trotzdem heraus — das entscheidet `team` weiter unten.
+                team_im_spiel = sum(1 for n in namen_norm if n in TEAM_NORM)
+                liste_effektiv = liste - team_im_spiel * pro_platz
+                n_wellpass = wellpass_anzahl(liste_effektiv, row["_preis"],
+                                             max(plaetze - team_im_spiel, 1),
+                                             datum=tag)
 
             # Wer von den Teilnehmern hat eingecheckt?
             eingecheckt = []
@@ -4189,10 +4603,17 @@ def _analysieren(bdf, cdf, pdf=None, zahlungen_index=None) -> bool:
             # Check-ins des Tages mitgeben: Wer eingecheckt hat, ist
             # nachweislich Wellpass-Mitglied — das entscheidet, wenn
             # innerhalb eines Paares offen bleibt, wer den Rabatt hatte.
-            traeger = _wellpass_traeger(teilnehmer, row["_start"], pro_platz,
-                                        n_wellpass, zahlungen,
-                                        checkin_namen=checkin_namen,
-                                        wellpass_bekannt=alle_wellpass)
+            if ev_id:
+                # Beim Event ist der Träger direkt belegt: Er hat
+                # nachweislich weniger gezahlt als der Vollzahler. Die
+                # Rückrechnung aus Paaren und Sammelzahlungen, die eine
+                # Buchung nötig macht, entfällt hier komplett.
+                traeger = {nn_t for nn_t, v in ev_person.items() if v[2]}
+            else:
+                traeger = _wellpass_traeger(teilnehmer, row["_start"], pro_platz,
+                                            n_wellpass, zahlungen,
+                                            checkin_namen=checkin_namen,
+                                            wellpass_bekannt=alle_wellpass)
 
             for name, mail in teilnehmer:
                 nn = normalize_name(name)
@@ -4210,9 +4631,25 @@ def _analysieren(bdf, cdf, pdf=None, zahlungen_index=None) -> bool:
                 # Platzhalter wie „Player 2" sind ausgenommen: die haben
                 # keine Nummer, keine E-Mail und keinen Wellpass. Wer da
                 # wirklich gespielt hat, weiss nur der Buchende.
-                echter_nachlass = (liste - row["_preis"]) > 0.5
-                fehler = (echter_nachlass and fehlend > 0 and nn in traeger
-                          and not hat_checkin and not team and not platzhalter)
+                if ev_id:
+                    # Beim Event steht der Preis pro Kopf einzeln in den
+                    # Rohdaten — jede Zeile trägt deshalb ihren eigenen
+                    # Betrag statt eines auf die Plätze geteilten
+                    # Buchungspreises.
+                    p_bezahlt, p_rabatt, p_wellpass = ev_person.get(
+                        nn, (liste, 0.0, False))
+                    p_liste, p_betrag = liste, p_bezahlt
+                    p_rabatte_n = 1 if p_wellpass else 0
+                    p_relevant = p_wellpass
+                    fehler = (p_wellpass and not hat_checkin
+                              and not team and not platzhalter)
+                else:
+                    p_liste, p_bezahlt, p_betrag = liste, row["_preis"], pro_platz
+                    p_rabatte_n = n_wellpass
+                    p_relevant = n_wellpass > 0
+                    echter_nachlass = (liste - row["_preis"]) > 0.5
+                    fehler = (echter_nachlass and fehlend > 0 and nn in traeger
+                              and not hat_checkin and not team and not platzhalter)
 
                 buchungen_out.append({
                     "Datum": str(tag),
@@ -4222,14 +4659,22 @@ def _analysieren(bdf, cdf, pdf=None, zahlungen_index=None) -> bool:
                     "Court": row["_court"],
                     "Service_Zeit": row["_zeit"],
                     "Dauer": int(row["_min"]),
-                    "Listenpreis": liste,
-                    "Bezahlt": row["_preis"],
-                    "Betrag": pro_platz,
+                    "Listenpreis": p_liste,
+                    "Bezahlt": p_bezahlt,
+                    "Betrag": p_betrag,
                     "Plaetze": plaetze,
-                    "Wellpass_Rabatte": n_wellpass,
+                    "Wellpass_Rabatte": p_rabatte_n,
                     "Teilnehmer": len(teilnehmer),
                     "Checkin_Zeit": zeit_je_name.get(nn, ""),
-                    "Relevant": "Ja" if n_wellpass > 0 else "Nein",
+                    "Relevant": "Ja" if p_relevant else "Nein",
+                    # Event-Merkmale — auch für spätere Auswertungen:
+                    # Auslastung (wie viele Courts wie lange belegt) und
+                    # Wiederkehrer-Vergleich vor/nach einer Veranstaltung.
+                    "Event": "Ja" if ev_id else "Nein",
+                    "Event_Name": ev_titel_txt,
+                    "Event_Id": ev_id,
+                    "Event_Courts": int(row.get("_ev_courts", 0) or 0),
+                    "Event_Unklar": "Ja" if (ev_id and ev_unsicher) else "Nein",
                     "Check-in": "Ja" if hat_checkin else "Nein",
                     "Team": "Ja" if team else "Nein",
                     "Fehler": "Ja" if fehler else "Nein",
@@ -5456,6 +5901,12 @@ def abzug_pruefen() -> dict:
     geprueft = 0
 
     for _, r in buchungen.iterrows():
+        # Events haben einen eigenen, frei gesetzten Rabatt (10 € statt
+        # 12 €). Sie gehören nicht in die Statistik, die den normalen
+        # Playtomic-Abzug bestimmt — sonst zieht ein einzelner Mexicano
+        # den erkannten Standardabzug in die Irre.
+        if str(r.get("Event", "")) == "Ja":
+            continue
         liste = parse_betrag(r.get("Listenpreis"))
         bezahlt = parse_betrag(r.get("Bezahlt"))
         plaetze = court_plaetze(str(r.get("Court", "")))
@@ -7165,6 +7616,117 @@ def _wa_pruefen():
                "zusammengeführt.")
 
 
+def _freigabe_dialog(name: str, name_norm: str):
+    """Der Hinweis, dass jemand wieder freigegeben werden muss."""
+    box(f"🔓 <b>{name} hat keine offene Sperre mehr.</b><br>"
+        "Der Wellpass-Zugang ist damit nicht automatisch wieder offen — "
+        "das musst du bei EGYM selbst freischalten. Erst danach hier "
+        "bestätigen.", "warn")
+    f1, f2 = st.columns([1.4, 1])
+    with f1:
+        if st.button("✅ Zugang wieder freigegeben", key=f"fg_ok_{name_norm}",
+                     use_container_width=True, type="primary"):
+            freigabe_bestaetigen(name_norm)
+            st.toast(f"{name} ist freigegeben.")
+            st.rerun()
+    with f2:
+        if st.button("Später", key=f"fg_spaeter_{name_norm}",
+                     use_container_width=True):
+            st.rerun()
+
+
+def _freigaben_anzeigen():
+    """
+    Wer wieder freigegeben werden muss — bewusst ganz oben.
+
+    Die Aufgabe bleibt so lange stehen, bis sie bestätigt wird. Ein
+    Spieler, dessen Sperre rechnerisch erledigt ist, aber bei EGYM noch
+    hängt, ist sonst der Fall, der niemandem auffällt.
+    """
+    freigaben = offene_freigaben()
+    if freigaben.empty:
+        return
+
+    st.markdown("##### 🔓 Freigabe nötig")
+    for _, f in freigaben.iterrows():
+        nn = str(f["name_norm"])
+        name = str(f.get("name") or nn)
+        # Als echtes Fenster, wo Streamlit es kann — sonst als
+        # hervorgehobener Kasten an derselben Stelle.
+        dialog = getattr(st, "dialog", None) or getattr(st, "experimental_dialog", None)
+        if dialog and not st.session_state.get(f"_fg_gesehen_{nn}"):
+            st.session_state[f"_fg_gesehen_{nn}"] = True
+
+            @dialog(f"{name} wieder freigeben?")
+            def _zeigen(name=name, nn=nn):
+                _freigabe_dialog(name, nn)
+            _zeigen()
+        else:
+            _freigabe_dialog(name, nn)
+    st.markdown("---")
+
+
+def _gesperrt_zeile(g, i: int):
+    """
+    Eine gesperrte Person mit der Möglichkeit, einen nachgeholten
+    Check-in von Hand einer ihrer Sperren zuzuordnen.
+    """
+    nn = str(g["Name_norm"])
+    name = str(g["Name"])
+    anzahl = int(g["Anzahl gesperrt"])
+
+    s1, s2 = st.columns([2.6, 1.2])
+    with s1:
+        farbe = "err" if anzahl > 1 else "warn"
+        st.markdown(f"**{name}**  {chip(f'{anzahl}× gesperrt', farbe)}",
+                    unsafe_allow_html=True)
+        st.caption(f"Spieltage: {g['Tage']}")
+    with s2:
+        with st.popover("Check-in zuordnen", use_container_width=True):
+            _sperre_zuordnen(nn, name, i)
+
+
+def _sperre_zuordnen(nn: str, name: str, i: int):
+    """
+    Auswahl: welcher nachgeholte Check-in gehört zu welcher Sperre?
+
+    Beides wird ausdrücklich gewählt. Automatisch passiert hier nichts —
+    ein Check-in bringt Geld und eine Sperre trifft einen Menschen.
+    """
+    faelle = gesperrt_faelle(nn)
+    if faelle.empty:
+        st.caption("Keine offene Sperre mehr.")
+        return
+
+    st.caption("1 · Welche Sperre wird ausgeglichen?")
+    tage = [str(x) for x in faelle["datum"]]
+    ziel = st.radio("Sperre", tage, key=f"sp_fall_{i}",
+                    format_func=lambda t: f"Spieltag {datum_kurz(t)}",
+                    label_visibility="collapsed")
+
+    # Für Gesperrte gilt ein weiteres Zeitfenster — die melden sich
+    # selten innerhalb der üblichen fünf Tage.
+    fenster = int(einstellung("sperre_nachhol_fenster_tage",
+                              CONFIG["sperre_nachhol_fenster_tage"]))
+    kandidaten = [k for k in nachhol_kandidaten(name, ziel, fenster=fenster)
+                  if k[4] > 0]
+
+    st.caption("2 · Welcher Check-in wird dafür verwendet?")
+    if not kandidaten:
+        st.caption(f"Kein freier Check-in in den {fenster} Tagen nach "
+                   f"dem {datum_kurz(ziel)} gefunden.")
+        return
+
+    for k, (anzeige, kand_norm, ci_datum, score, tage_danach) in enumerate(kandidaten[:8]):
+        st.markdown(f"**{anzeige}** · {datum_kurz(ci_datum)} "
+                    f"({tage_danach} Tage später) · {score:.0f}%")
+        if st.button("Diesen zuordnen", key=f"sp_zu_{i}_{k}",
+                     use_container_width=True):
+            if sperre_nachholung_zuordnen(nn, name, ziel, ci_datum, kand_norm):
+                st.toast(f"Check-in zugeordnet — eine Sperre weniger für {name}.")
+                st.rerun()
+
+
 def _wa_uebersicht():
     """
     Der Überblick über alle Tage — nicht Tag für Tag, sondern pro Person.
@@ -7192,10 +7754,14 @@ def _wa_uebersicht():
     st.markdown("")
     st.markdown("---")
 
+    # ── Freigabe nötig ───────────────────────────────────────────────────
+    _freigaben_anzeigen()
+
     # ── Gesperrt-Historie ────────────────────────────────────────────────
-    st.markdown("##### Gesperrt-Historie")
-    st.caption("Wer mehrfach auftaucht, dem fehlen entsprechend viele "
-               "Check-ins.")
+    st.markdown("##### Gesperrte Spieler")
+    st.caption("Je Person ein Eintrag pro fehlendem Check-in. Holt jemand "
+               "einen nach, ordnest du ihn hier von Hand einer Sperre zu — "
+               "die Zahl sinkt um eins.")
     gesperrt = gesperrt_historie()
     if gesperrt.empty:
         box('Noch niemand als „Gesperrt" erledigt markiert.', "info")
@@ -7204,10 +7770,8 @@ def _wa_uebersicht():
         if wiederholt:
             box(f"⚠️ <b>{wiederholt} Personen</b> wurden mehrfach gesperrt.",
                 "warn")
-        st.dataframe(
-            gesperrt[["Name", "Anzahl gesperrt", "Tage"]],
-            use_container_width=True, hide_index=True,
-            height=min(500, 60 + 35 * len(gesperrt)))
+        for i, (_, g) in enumerate(gesperrt.iterrows()):
+            _gesperrt_zeile(g, i)
 
     st.markdown("")
     st.markdown("---")
