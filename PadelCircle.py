@@ -497,6 +497,13 @@ def prozent(teil, ganz) -> float:
         return 0.0
 
 
+def prozent_text(teil, ganz) -> str:
+    """„7 von 9 · 78 %" — für Kennzahlen mit Bezugsgrösse."""
+    if not ganz:
+        return "keine Bezugsgrösse"
+    return f"{int(teil)} von {int(ganz)} · {prozent(teil, ganz):.0f} %"
+
+
 def telefon_normalisieren(phone) -> str:
     if phone is None or str(phone).strip() == "":
         return ""
@@ -2743,8 +2750,8 @@ def als_behoben_markieren(name_norm: str, datum: str,
     cache_leeren("corrections", funktionen=(
         "offene_fehler", "offene_je_tag", "verbrauchte_checkins",
         "offene_checkins", "offene_checkins_zeitraum", "nachhol_kandidaten",
-        "nachholung_quelle")
-        if geloest else ("offene_fehler", "offene_je_tag"))
+        "nachholung_quelle", "anspruch_bilanz")
+        if geloest else ("offene_fehler", "offene_je_tag", "anspruch_bilanz"))
 
 
 def _erledigt_knopf(name_norm: str, datum: str, key: str):
@@ -3135,11 +3142,36 @@ def checkins_ohne_buchung(datum_str: str) -> pd.DataFrame:
 
 
 def alle_checkins_ohne_buchung() -> pd.DataFrame:
-    """Alle überzähligen Check-ins, roh und ungruppiert — über alle Tage."""
+    """
+    Alle überzähligen Check-ins, roh und ungruppiert — über alle Tage.
+
+    „Überzählig" heisst: keine Buchung gefunden UND noch frei. Ein
+    Check-in, der bereits einen älteren Fall geschlossen hat oder über
+    eine bestätigte Namensverknüpfung längst einer Buchung gehört, ist
+    verbraucht und gehört nicht mehr in diese Liste. Ohne diese beiden
+    Abzüge zählte die Übersicht jede erledigte Zuordnung weiter mit —
+    die Zahl stieg mit jeder Bearbeitung, statt zu sinken.
+    """
     c = loadsheet("checkins")
     if c.empty or "Gespielt" not in c.columns or "analysis_date" not in c.columns:
         return pd.DataFrame()
-    return c[c["Gespielt"].astype(str) == "Nein"].copy()
+    df = c[c["Gespielt"].astype(str) == "Nein"].copy()
+    if df.empty:
+        return df
+
+    verbraucht = verbrauchte_checkins()
+    if verbraucht:
+        schluessel = [checkin_schluessel(str(t), str(n)) for t, n
+                      in zip(df["analysis_date"], df["Name_norm"])]
+        df = df[[k not in verbraucht for k in schluessel]]
+    if df.empty:
+        return df
+
+    belegt = mapping_belegte_checkins()
+    if belegt:
+        df = df[[str(n) not in belegt.get(str(t), set()) for t, n
+                 in zip(df["analysis_date"], df["Name_norm"])]]
+    return df
 
 
 def zu_viele_checkins_uebersicht() -> pd.DataFrame:
@@ -3304,6 +3336,293 @@ def spieler_segmente() -> pd.DataFrame:
         lambda r: prozent(r["wellpass_pflichtig"], r["buchungen"])
         if r["buchungen"] else 0.0, axis=1)
     return kunden
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#   🗓  EVENT- UND WIEDERKEHR-ANALYSEN
+#
+#   Die Frage hinter allem hier: Bringt ein Event etwas, das über den
+#   Umsatz des Tages hinausgeht? Zwanzig Leute an einem Sonntag sind
+#   schnell gezählt. Interessant ist, wer von ihnen vorher schon kam,
+#   wer danach wiederkam — und ob das mehr ist als bei allen anderen im
+#   selben Zeitraum. Ohne diesen Vergleich sagt eine Wiederkehrquote
+#   nichts: Wenn ohnehin 60 % innerhalb einer Woche wiederkommen, sind
+#   60 % nach dem Event kein Erfolg.
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def spieltage_je_spieler() -> dict:
+    """{name_norm: [datum, …]} — alle Spieltage je Spieler, aufsteigend."""
+    b = loadsheet("buchungen")
+    if b.empty or "Name_norm" not in b.columns or "analysis_date" not in b.columns:
+        return {}
+    df = b[~b["Name_norm"].astype(str).isin(TEAM_NORM)].copy()
+    if df.empty:
+        return {}
+    df["_d"] = df["analysis_date"].map(parse_date_safe)
+    df = df[df["_d"].notna()]
+    out = {}
+    for nn, gruppe in df.groupby("Name_norm"):
+        out[str(nn)] = sorted({d for d in gruppe["_d"]})
+    return out
+
+
+def _datenstand() -> tuple:
+    """Erster und letzter Tag, für den überhaupt Daten vorliegen."""
+    tage = verfuegbare_tage()
+    if not tage:
+        return None, None
+    geparst = sorted(d for d in (parse_date_safe(t) for t in tage) if d)
+    return (geparst[0], geparst[-1]) if geparst else (None, None)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def event_liste() -> pd.DataFrame:
+    """
+    Alle erkannten Events mit ihren Kennzahlen — eine Zeile je Event.
+
+    Court-Stunden statt nur Teilnehmerzahl: Ein Event blockiert die
+    halbe Halle. Erst im Verhältnis zur Tageskapazität wird sichtbar,
+    was es die Anlage gekostet hat.
+    """
+    b = loadsheet("buchungen")
+    if b.empty or "Event" not in b.columns:
+        return pd.DataFrame()
+    ev = b[b["Event"].astype(str) == "Ja"].copy()
+    if ev.empty:
+        return pd.DataFrame()
+
+    zeilen = []
+    for (tag, kennung), g in ev.groupby(["analysis_date", "Event_Id"], sort=False):
+        dauer = pd.to_numeric(g["Dauer"], errors="coerce").max()
+        courts = pd.to_numeric(g["Event_Courts"], errors="coerce").max()
+        dauer = 0 if pd.isna(dauer) else float(dauer)
+        courts = 0 if pd.isna(courts) else float(courts)
+        umsatz = pd.to_numeric(g["Bezahlt"], errors="coerce").fillna(0).sum()
+        zeilen.append({
+            "Datum": str(tag),
+            "Event_Id": str(kennung),
+            "Name": str(g["Event_Name"].iloc[0] or "Event"),
+            "Zeit": str(g["Service_Zeit"].iloc[0]),
+            "Teilnehmer": int(g["Name_norm"].nunique()),
+            "Wellpass": int((g["Relevant"].astype(str) == "Ja").sum()),
+            "Offene Fälle": int((g["Fehler"].astype(str) == "Ja").sum()),
+            "Courts": int(courts),
+            "Court-Stunden": round(courts * dauer / 60.0, 1),
+            "Umsatz": round(float(umsatz), 2),
+            "Unklar": str(g["Event_Unklar"].iloc[0]) if "Event_Unklar" in g.columns else "Nein",
+        })
+    df = pd.DataFrame(zeilen)
+    return df.sort_values("Datum", ascending=False)
+
+
+def _quote(menge: set, tage_je_spieler: dict, von: date, bis: date) -> tuple:
+    """Wie viele aus der Menge haben zwischen von und bis gespielt?"""
+    if not menge or von > bis:
+        return 0, len(menge)
+    treffer = 0
+    for nn in menge:
+        if any(von <= d <= bis for d in tage_je_spieler.get(nn, [])):
+            treffer += 1
+    return treffer, len(menge)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def event_wirkung(datum: str, event_id: str, fenster: tuple = (7, 14, 30)) -> dict:
+    """
+    Was das Event bewirkt hat — vorher, nachher, und im Vergleich.
+
+    Drei Zahlen je Zeitfenster:
+      • Teilnehmer, die vorher schon da waren  → wie viele waren Stammgäste
+      • Teilnehmer, die danach wiederkamen     → die eigentliche Wirkung
+      • dieselbe Quote für alle anderen Spieler → die Kontrollgruppe
+
+    Die Kontrollgruppe ist der Kern. Sie besteht aus allen Spielern, die
+    im Monat vor dem Event aktiv waren, aber nicht teilgenommen haben.
+    Kommen von denen genauso viele wieder, hat das Event nichts bewegt —
+    die Leute wären ohnehin gekommen.
+
+    Fenster, für die noch keine Daten vorliegen, werden als unvollständig
+    gekennzeichnet statt als Null ausgewiesen. Ein Event von vorgestern
+    kann keine 30-Tage-Wirkung haben, und eine 0 wäre schlicht falsch.
+    """
+    tag = parse_date_safe(datum)
+    if tag is None:
+        return {}
+    b = loadsheet("buchungen")
+    if b.empty or "Event_Id" not in b.columns:
+        return {}
+    ev = b[(b["analysis_date"].astype(str) == str(datum))
+           & (b["Event_Id"].astype(str) == str(event_id))]
+    if ev.empty:
+        return {}
+
+    teilnehmer = {str(n) for n in ev["Name_norm"] if str(n) not in TEAM_NORM}
+    alle_tage = spieltage_je_spieler()
+    _erster, letzter = _datenstand()
+
+    # Kontrollgruppe: im Monat vor dem Event aktiv, aber nicht dabei
+    kontrolle = set()
+    for nn, tage in alle_tage.items():
+        if nn in teilnehmer:
+            continue
+        if any(tag - timedelta(days=30) <= d < tag for d in tage):
+            kontrolle.add(nn)
+
+    ergebnis = {"teilnehmer": len(teilnehmer), "kontrollgruppe": len(kontrolle),
+                "datenstand": letzter, "fenster": {}}
+
+    # Wer war vor dem Event überhaupt schon einmal da?
+    #
+    # Vorsicht mit dem Wort „neu": Hier steht nur, dass im geladenen
+    # Zeitraum kein früherer Besuch liegt. Reichen die Daten bis kurz vor
+    # das Event, sieht die halbe Stammkundschaft wie Neukundschaft aus.
+    # Deshalb wird der Beginn des Datenzeitraums mitgegeben — die
+    # Anzeige muss die Zahl entsprechend einordnen.
+    neu = {nn for nn in teilnehmer
+           if not any(d < tag for d in alle_tage.get(nn, []))}
+    ergebnis["ohne_vorbesuch"] = len(neu)
+    ergebnis["ohne_vorbesuch_wieder"] = sum(
+        1 for nn in neu if any(d > tag for d in alle_tage.get(nn, [])))
+    ergebnis["daten_ab"] = _erster
+    ergebnis["vorlauf_tage"] = (tag - _erster).days if _erster else 0
+
+    for n in fenster:
+        vor_treffer, _ = _quote(teilnehmer, alle_tage,
+                                tag - timedelta(days=n), tag - timedelta(days=1))
+        vollstaendig = letzter is not None and letzter >= tag + timedelta(days=n)
+        bis_real = min(tag + timedelta(days=n), letzter) if letzter else tag
+        nach_treffer, _ = _quote(teilnehmer, alle_tage,
+                                 tag + timedelta(days=1), bis_real)
+        kon_treffer, _ = _quote(kontrolle, alle_tage,
+                                tag + timedelta(days=1), bis_real)
+        ergebnis["fenster"][n] = {
+            "vorher": vor_treffer,
+            "vorher_quote": prozent(vor_treffer, len(teilnehmer)),
+            "nachher": nach_treffer,
+            "nachher_quote": prozent(nach_treffer, len(teilnehmer)),
+            "kontrolle": kon_treffer,
+            "kontrolle_quote": prozent(kon_treffer, len(kontrolle)),
+            "vollstaendig": bool(vollstaendig),
+            "gemessen_bis": bis_real,
+        }
+    return ergebnis
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def wiederkehr_kurve(mindest_kohorte: int = 3) -> pd.DataFrame:
+    """
+    Von allen Spielern mit einem ersten Besuch in einer Woche: wie viele
+    kamen in den folgenden Wochen wieder?
+
+    Die klassische Kohortenfrage. Sie beantwortet, ob Neukunden hängen
+    bleiben — und ob sich das über die Monate verändert. Eine einzelne
+    Wiederkehrquote sagt wenig; die Reihe zeigt, ob es besser wird.
+
+    Nur Kohorten, deren Fenster vollständig in den Daten liegt.
+    """
+    tage_je = spieltage_je_spieler()
+    if not tage_je:
+        return pd.DataFrame()
+    erster, letzter = _datenstand()
+    if erster is None:
+        return pd.DataFrame()
+
+    # Die ersten Wochen der Daten sind unbrauchbar: Dort sieht jeder wie
+    # ein Neukunde aus, weil sein früherer Besuch schlicht nicht geladen
+    # ist. Ohne diesen Abstand meldete die erste Woche 260 „neue"
+    # Spieler — praktisch die gesamte Stammkundschaft.
+    vorlauf = erster + timedelta(days=14)
+
+    kohorten = {}
+    for nn, tage in tage_je.items():
+        if not tage:
+            continue
+        start = tage[0]
+        if start < vorlauf:
+            continue
+        woche = start - timedelta(days=start.weekday())
+        kohorten.setdefault(woche, []).append((nn, start))
+
+    zeilen = []
+    for woche in sorted(kohorten):
+        leute = kohorten[woche]
+        if len(leute) < mindest_kohorte:
+            continue
+        zeile = {"Kohorte": str(woche), "Neu": len(leute)}
+        for w in (1, 2, 4):
+            if letzter < woche + timedelta(days=7 * w + 7):
+                zeile[f"Woche {w}"] = None
+                continue
+            wieder = sum(
+                1 for nn, start in leute
+                if any(start < d <= start + timedelta(days=7 * w)
+                       for d in tage_je.get(nn, [])))
+            zeile[f"Woche {w}"] = round(prozent(wieder, len(leute)), 1)
+        zeilen.append(zeile)
+    return pd.DataFrame(zeilen)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def neukunden_je_woche() -> pd.DataFrame:
+    """Wie viele Spieler waren in einer Woche zum ersten Mal da?"""
+    tage_je = spieltage_je_spieler()
+    erster, _letzter = _datenstand()
+    if not tage_je or erster is None:
+        return pd.DataFrame()
+    vorlauf = erster + timedelta(days=14)
+    zaehler = {}
+    for nn, tage in tage_je.items():
+        if not tage or tage[0] < vorlauf:
+            continue
+        woche = tage[0] - timedelta(days=tage[0].weekday())
+        zaehler[woche] = zaehler.get(woche, 0) + 1
+    if not zaehler:
+        return pd.DataFrame()
+    return pd.DataFrame(
+        [{"Woche": str(w), "Neue Spieler": n} for w, n in sorted(zaehler.items())])
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def event_teilnehmer_details(datum: str, event_id: str) -> pd.DataFrame:
+    """
+    Je Teilnehmer eines Events: war er vorher da, kam er danach wieder?
+
+    Für den Blick auf die einzelnen Menschen statt nur auf die Quote —
+    wer neu war und wiederkam, ist die wertvollste Gruppe.
+    """
+    tag = parse_date_safe(datum)
+    b = loadsheet("buchungen")
+    if tag is None or b.empty or "Event_Id" not in b.columns:
+        return pd.DataFrame()
+    ev = b[(b["analysis_date"].astype(str) == str(datum))
+           & (b["Event_Id"].astype(str) == str(event_id))]
+    if ev.empty:
+        return pd.DataFrame()
+
+    tage_je = spieltage_je_spieler()
+    zeilen = []
+    for _, r in ev.drop_duplicates(subset=["Name_norm"]).iterrows():
+        nn = str(r["Name_norm"])
+        tage = tage_je.get(nn, [])
+        vorher = [d for d in tage if d < tag]
+        nachher = [d for d in tage if d > tag]
+        zeilen.append({
+            "Name": str(r["Name"]),
+            "Wellpass": str(r.get("Relevant", "")),
+            "Bezahlt": parse_betrag(r.get("Bezahlt")),
+            "Besuche vorher": len(vorher),
+            "Letzter Besuch davor": str(vorher[-1]) if vorher else "—",
+            "Wieder da am": str(nachher[0]) if nachher else "—",
+            "Tage bis Rückkehr": (nachher[0] - tag).days if nachher else None,
+            "Status": ("Ohne Vorbesuch · wiedergekommen" if not vorher and nachher else
+                       "Ohne Vorbesuch · noch nicht wieder" if not vorher else
+                       "Stammgast · wiedergekommen" if nachher else
+                       "Stammgast · noch nicht wieder"),
+        })
+    return pd.DataFrame(zeilen).sort_values(
+        ["Besuche vorher", "Name"], ascending=[True, True])
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -5789,13 +6108,58 @@ def anspruch_bilanz(monat: str) -> pd.DataFrame:
     stat = rabatte.merge(verguetet, on="Name_norm", how="left")
     stat["verguetete_checkins"] = (stat["verguetete_checkins"]
                                    .fillna(0).astype(int))
+
+    # ── Namensvarianten, die noch nicht bestätigt sind ──────────────────
+    #
+    # Bis hierher zählt nur der exakt gleiche Name oder eine bestätigte
+    # Verknüpfung. Playtomic und EGYM schreiben denselben Menschen aber
+    # oft verschieden — „Katja Hero" gegen „Katja Herold". Die Person
+    # stand dadurch mit null Check-ins und voller Lücke in der Liste,
+    # obwohl sie jedes Mal eingecheckt hat.
+    #
+    # Solche Treffer werden getrennt ausgewiesen statt einfach
+    # mitgezählt. Sie sind ein starker Hinweis, aber kein Beleg — und
+    # eine vermutete Deckung darf einen echten Verlust nicht verstecken.
+    offen_namen = set(stat.loc[stat["verguetete_checkins"]
+                               < stat["rabattierte_plaetze"], "Name_norm"]
+                      .astype(str))
+    vermutet = {}
+    if offen_namen and not c.empty and {"Name_norm", "analysis_date"} <= set(c.columns):
+        mc = c[c["analysis_date"].astype(str).str.startswith(str(monat))]
+        frei = (mc.drop_duplicates(subset=["Name_norm", "analysis_date"])
+                .groupby("Name_norm").size().to_dict())
+        schon_vergeben = set(stat["Name_norm"].astype(str))
+        abgelehnt = rejected_matches_laden()
+        for ziel in offen_namen:
+            such_vor, such_nach = _namensteile(ziel)
+            for kand, anzahl in frei.items():
+                kand = str(kand)
+                if kand in schon_vergeben:
+                    continue          # gehört nachweislich jemand anderem
+                if (kand, ziel) in abgelehnt or (ziel, kand) in abgelehnt:
+                    continue
+                kand_vor, kand_nach = _namensteile(kand)
+                passt = (such_nach and kand_nach
+                         and _teil_aehnlich(such_nach, kand_nach) >= 85
+                         and _teil_aehnlich(such_vor, kand_vor) >= 55)
+                if passt or _teilmengen_name(ziel, kand):
+                    vermutet[ziel] = vermutet.get(ziel, 0) + int(anzahl)
+
+    stat["vermutete_checkins"] = (stat["Name_norm"].astype(str)
+                                  .map(lambda n: vermutet.get(n, 0)).astype(int))
+    # Eine Vermutung kann die eigenen Rabatte nicht übersteigen
+    stat["vermutete_checkins"] = stat[
+        ["vermutete_checkins", "rabattierte_plaetze"]].min(axis=1)
+
     stat["luecke"] = (stat["rabattierte_plaetze"]
                       - stat["verguetete_checkins"]).clip(lower=0)
+    stat["luecke_sicher"] = (stat["luecke"]
+                             - stat["vermutete_checkins"]).clip(lower=0)
     satz = wellpass_wert_am(f"{monat}-01")
-    stat["verlust"] = (stat["luecke"] * satz).round(2)
+    stat["verlust"] = (stat["luecke_sicher"] * satz).round(2)
 
-    return stat.sort_values(["luecke", "rabattierte_plaetze"],
-                            ascending=[False, False])
+    return stat.sort_values(["luecke_sicher", "luecke", "rabattierte_plaetze"],
+                            ascending=[False, False, False])
 
 
 def _dash_abgleich():
@@ -5917,15 +6281,26 @@ def _dash_abgleich():
     if ab.empty:
         box("Für diesen Monat liegen keine rabattierten Buchungen vor.", "info")
     else:
-        luecken = ab[ab["luecke"] > 0]
+        luecken = ab[ab["luecke_sicher"] > 0]
+        vermutet_gesamt = int(ab["vermutete_checkins"].sum())
         g1, g2, g3 = st.columns(3)
         with g1:
             kpi("Rabattierte Plätze", str(int(ab["rabattierte_plaetze"].sum())))
         with g2:
-            kpi("Vergütete Check-ins", str(int(ab["verguetete_checkins"].sum())))
+            kpi("Vergütete Check-ins", str(int(ab["verguetete_checkins"].sum())),
+                f"+{vermutet_gesamt} über Namensvariante" if vermutet_gesamt else None)
         with g3:
-            kpi("Ungedeckt", str(int(ab["luecke"].sum())),
+            kpi("Ungedeckt", str(int(ab["luecke_sicher"].sum())),
                 euro(float(ab["verlust"].sum())))
+
+        if vermutet_gesamt:
+            betroffen = int((ab["vermutete_checkins"] > 0).sum())
+            box(f"🔤 <b>{vermutet_gesamt} Check-ins</b> bei <b>{betroffen} Spielern</b> "
+                "hängen nur an einer Namensvariante — Playtomic und EGYM "
+                "schreiben denselben Menschen verschieden — ein fehlender "
+                "Buchstabe im Nachnamen genügt. Sie sind hier bereits abgezogen, gelten "
+                "aber erst als belegt, wenn du sie im <b>Name-Abgleich</b> "
+                "bestätigst.", "info")
 
         st.markdown("")
         if luecken.empty:
@@ -5933,10 +6308,11 @@ def _dash_abgleich():
                 "ok")
         else:
             zeig = luecken[["Name", "rabattierte_plaetze",
-                            "verguetete_checkins", "luecke", "verlust"]].copy()
+                            "verguetete_checkins", "vermutete_checkins",
+                            "luecke_sicher", "verlust"]].copy()
             zeig["verlust"] = zeig["verlust"].map(euro)
-            zeig.columns = ["Spieler", "Rabatte", "Check-ins", "Lücke",
-                            "Entgangen"]
+            zeig.columns = ["Spieler", "Rabatte", "Check-ins",
+                            "davon Namensvariante", "Lücke", "Entgangen"]
             st.dataframe(zeig, use_container_width=True, hide_index=True,
                          height=300)
             st.download_button(
@@ -7950,6 +8326,39 @@ def _wa_uebersicht():
             ziel_daten.append((label, str(f["Name_norm"]), str(f["Datum"]),
                                email_fuer(str(f["Name"]))))
 
+        def _erlaubte_ziele(ci_datum: str, ci_norm: str) -> list:
+            """
+            Welche offenen Fälle darf dieser Check-in überhaupt schliessen?
+
+            Eine Nachholung läuft nur in eine Richtung: Der Check-in
+            kommt NACH dem Spieltag, den er erklärt. Vorher verglich
+            diese Ansicht ausschliesslich Namen — ein Check-in vom
+            17.07. wurde dadurch als Nachholung für einen Fall vom
+            16.08. angeboten, also für ein Spiel, das zu dem Zeitpunkt
+            noch gar nicht stattgefunden hatte.
+
+            Ausserdem gilt hier dasselbe wie überall sonst: Wer am Tag
+            des Check-ins selbst mit Rabatt gespielt hat, braucht ihn
+            für sich — EGYM vergütet pro Person und Tag nur einmal.
+            """
+            if eigener_anspruch(ci_norm, ci_datum):
+                return []
+            ci_d = parse_date_safe(ci_datum)
+            if ci_d is None:
+                return []
+            fenster = max(fenster_nachhol(),
+                          int(einstellung("sperre_nachhol_fenster_tage",
+                                          CONFIG["sperre_nachhol_fenster_tage"])))
+            erlaubt = []
+            for label, ziel_norm, ziel_datum, ziel_mail in ziel_daten:
+                ziel_d = parse_date_safe(ziel_datum)
+                if ziel_d is None:
+                    continue
+                abstand = (ci_d - ziel_d).days
+                if 0 < abstand <= fenster:
+                    erlaubt.append((label, ziel_norm, ziel_datum, ziel_mail))
+            return erlaubt
+
         with rechts:
             st.markdown("**Offene Fälle**")
             if offen_roh.empty:
@@ -7979,7 +8388,8 @@ def _wa_uebersicht():
                     ci_norm = str(r["Name_norm"])
                     ci_name = str(r["Name"])
                     bester_label, bester = None, 0.0
-                    for label, ziel_norm, _zd, ziel_mail in ziel_daten:
+                    for label, ziel_norm, _zd, ziel_mail in _erlaubte_ziele(
+                            str(r["analysis_date"]), ci_norm):
                         sc = fuzz.token_set_ratio(ziel_norm, ci_norm)
                         if ziel_mail:
                             sc = max(sc, email_aehnlichkeit(ziel_mail, ci_name))
@@ -8015,11 +8425,23 @@ def _wa_uebersicht():
                     if erklaerung.get("text"):
                         st.caption(f"↳ {erklaerung['text']}")
 
+                    moeglich = _erlaubte_ziele(ci_datum, ci_norm)
+                    if not moeglich:
+                        st.caption("↳ Kein Fall zuordenbar — entweder hat er "
+                                   "an diesem Tag selbst mit Rabatt gespielt, "
+                                   "oder es gibt keinen offenen Fall davor.")
+                        st.markdown("")
+                        continue
+
+                    warnung = nachhol_warnung(ci_norm, ci_datum)
+                    if warnung:
+                        box(warnung, "warn")
+
                     bester_label = r.get("_bester")
                     bester_score = float(r.get("_rang", 0))
                     if bester_label and bester_score >= 80:
                         ziel_norm, ziel_datum = next(
-                            (zn, zd) for lbl, zn, zd, _m in ziel_daten
+                            (zn, zd) for lbl, zn, zd, _m in moeglich
                             if lbl == bester_label)
                         if st.button(f"✓ Nachholung für {bester_label} "
                                     f"({bester_score:.0f}%)",
@@ -8030,9 +8452,9 @@ def _wa_uebersicht():
                                 st.toast("Zugeordnet.")
                                 st.rerun()
 
-                    if ziel_daten:
+                    if moeglich:
                         with st.expander("Anderem Fall zuordnen"):
-                            optionen = ["—"] + [lbl for lbl, *_r in ziel_daten]
+                            optionen = ["—"] + [lbl for lbl, *_r in moeglich]
                             wahl = st.selectbox(
                                 "Fall", optionen, key=f"ueb_sel_{i}",
                                 label_visibility="collapsed")
@@ -8040,13 +8462,191 @@ def _wa_uebersicht():
                                     "Zuordnen", key=f"ueb_zu_{i}",
                                     use_container_width=True):
                                 ziel_norm, ziel_datum = next(
-                                    (zn, zd) for lbl, zn, zd, _m in ziel_daten
+                                    (zn, zd) for lbl, zn, zd, _m in moeglich
                                     if lbl == wahl)
                                 if nachholung_speichern(ci_datum, ci_norm,
                                                         ziel_datum, ziel_norm):
                                     st.toast("Zugeordnet.")
                                     st.rerun()
                     st.markdown("")
+
+
+def _ev_wirkung_block(zeile):
+    """Die Wirkung eines Events — vorher, nachher, Kontrollgruppe."""
+    w = event_wirkung(str(zeile["Datum"]), str(zeile["Event_Id"]))
+    if not w:
+        box("Keine Wirkungsdaten für dieses Event.", "info")
+        return
+
+    k1, k2, k3, k4 = st.columns(4)
+    with k1:
+        kpi("Teilnehmer", str(w["teilnehmer"]))
+    with k2:
+        kpi("ohne früheren Besuch", str(w["ohne_vorbesuch"]),
+            f"in den {w['vorlauf_tage']} Tagen davor")
+    with k3:
+        kpi("davon wiedergekommen", str(w["ohne_vorbesuch_wieder"]),
+            prozent_text(w["ohne_vorbesuch_wieder"], w["ohne_vorbesuch"]))
+    with k4:
+        kpi("Kontrollgruppe", str(w["kontrollgruppe"]),
+            "aktiv im Monat davor, nicht dabei")
+
+    st.markdown("")
+    st.markdown("**Wiederkehr im Vergleich**")
+    box("Die mittlere Spalte allein sagt nichts. Wenn ohnehin die Hälfte "
+        "innerhalb einer Woche wiederkommt, sind 50 % nach dem Event kein "
+        "Erfolg. Erst der Abstand zur Kontrollgruppe zeigt, ob das Event "
+        "etwas bewegt hat.", "info")
+
+    zeilen = []
+    for n, d in w["fenster"].items():
+        if not d["vollstaendig"]:
+            zeilen.append({
+                "Zeitfenster": f"{n} Tage",
+                "vorher schon da": f"{d['vorher']} ({d['vorher_quote']:.0f} %)",
+                "danach wieder da": "— noch offen —",
+                "Kontrollgruppe": "—",
+                "Unterschied": "—",
+            })
+            continue
+        diff = d["nachher_quote"] - d["kontrolle_quote"]
+        zeilen.append({
+            "Zeitfenster": f"{n} Tage",
+            "vorher schon da": f"{d['vorher']} ({d['vorher_quote']:.0f} %)",
+            "danach wieder da": f"{d['nachher']} ({d['nachher_quote']:.0f} %)",
+            "Kontrollgruppe": f"{d['kontrolle_quote']:.0f} %",
+            "Unterschied": f"{diff:+.0f} Pp",
+        })
+    st.dataframe(pd.DataFrame(zeilen), use_container_width=True,
+                 hide_index=True)
+
+    if w.get("vorlauf_tage", 0) < 60:
+        box(f"ℹ️ Vor dem Event liegen nur <b>{w['vorlauf_tage']} Tage</b> an "
+            "Daten. „Ohne früheren Besuch\u201c heisst deshalb nicht "
+            "zwangsläufig „neuer Gast\u201c — wer länger pausiert hatte, "
+            "sieht hier genauso aus. Mit mehr geladenen Monaten wird die "
+            "Zahl belastbar.", "info")
+
+    unvollstaendig = [str(n) for n, d in w["fenster"].items()
+                      if not d["vollstaendig"]]
+    if unvollstaendig:
+        stand = w.get("datenstand")
+        box(f"⏳ Die Fenster über <b>{', '.join(unvollstaendig)} Tage</b> sind "
+            f"noch nicht abgelaufen — die Daten reichen bis "
+            f"{datum_kurz(str(stand)) if stand else 'unbekannt'}. Statt einer "
+            "falschen Null steht dort nichts.", "warn")
+
+
+def _ev_teilnehmer_block(zeile):
+    """Die einzelnen Menschen hinter der Quote."""
+    det = event_teilnehmer_details(str(zeile["Datum"]), str(zeile["Event_Id"]))
+    if det.empty:
+        box("Keine Teilnehmerdaten.", "info")
+        return
+
+    verteilung = det["Status"].value_counts().to_dict()
+    spalten = st.columns(4)
+    for col, status in zip(spalten, ["Ohne Vorbesuch · wiedergekommen",
+                                     "Ohne Vorbesuch · noch nicht wieder",
+                                     "Stammgast · wiedergekommen",
+                                     "Stammgast · noch nicht wieder"]):
+        with col:
+            kpi(status.replace(" · ", "\n"), str(verteilung.get(status, 0)))
+
+    st.markdown("")
+    zeig = det.copy()
+    zeig["Letzter Besuch davor"] = zeig["Letzter Besuch davor"].map(
+        lambda x: datum_kurz(x) if x != "—" else "—")
+    zeig["Wieder da am"] = zeig["Wieder da am"].map(
+        lambda x: datum_kurz(x) if x != "—" else "—")
+    zeig["Bezahlt"] = zeig["Bezahlt"].map(euro)
+    st.dataframe(zeig, use_container_width=True, hide_index=True,
+                 height=min(600, 60 + 35 * len(zeig)))
+    st.download_button(
+        "⬇️ Teilnehmer als CSV",
+        data=zeig.to_csv(index=False, sep=";").encode("utf-8-sig"),
+        file_name=f"event_{zeile['Datum']}.csv", mime="text/csv",
+        use_container_width=True)
+
+
+def modul_events():
+    head("Events", "Was eine Veranstaltung wirklich gebracht hat")
+
+    events = event_liste()
+    if events.empty:
+        box("Noch kein Event in den Daten. Ein Event erkennt die App an "
+            "Playtomics Kennzeichnung (<code>OPEN_PLAY</code> mit "
+            "Aktivitäts-Kennung) — lade einen Tag mit Veranstaltung hoch.",
+            "info")
+        return
+
+    t1, t2 = st.tabs(["🗓 Einzelnes Event", "📈 Wiederkehr allgemein"])
+
+    with t1:
+        labels = [f"{datum_kurz(str(r['Datum']))} · {r['Name']} "
+                  f"({r['Teilnehmer']} Teilnehmer)"
+                  for _, r in events.iterrows()]
+        wahl = st.selectbox("Event", labels, key="ev_wahl")
+        zeile = events.iloc[labels.index(wahl)]
+
+        if str(zeile.get("Unklar", "")) == "Ja":
+            box("⚠️ Bei diesem Event haben alle denselben Betrag gezahlt. "
+                "Ohne Vollzahler als Vergleich lässt sich nicht sagen, wer "
+                "Wellpass genutzt hat — die Wellpass-Zahl unten ist deshalb "
+                "nicht belastbar.", "warn")
+
+        k1, k2, k3, k4 = st.columns(4)
+        with k1:
+            kpi("Umsatz", euro(float(zeile["Umsatz"])))
+        with k2:
+            kpi("Wellpass", str(int(zeile["Wellpass"])),
+                prozent_text(int(zeile["Wellpass"]), int(zeile["Teilnehmer"])))
+        with k3:
+            kpi("Court-Stunden", f"{zeile['Court-Stunden']:.1f}",
+                f"{int(zeile['Courts'])} Courts belegt")
+        with k4:
+            kpi("Offene Fälle", str(int(zeile["Offene Fälle"])),
+                "fehlende Check-ins")
+
+        st.markdown("")
+        st.markdown("---")
+        _ev_wirkung_block(zeile)
+        st.markdown("")
+        st.markdown("---")
+        st.markdown("##### Teilnehmer im Einzelnen")
+        _ev_teilnehmer_block(zeile)
+
+        if len(events) > 1:
+            st.markdown("")
+            st.markdown("---")
+            st.markdown("##### Alle Events im Vergleich")
+            st.dataframe(events.drop(columns=["Event_Id", "Unklar"]),
+                         use_container_width=True, hide_index=True)
+
+    with t2:
+        st.markdown("##### Kommen Neukunden wieder?")
+        box("Von allen Spielern, die in einer Woche zum ersten Mal da waren: "
+            "wie viele kamen innerhalb einer, zwei und vier Wochen wieder? "
+            "Eine einzelne Quote sagt wenig — die Reihe zeigt, ob es besser "
+            "wird. Wochen, deren Fenster noch läuft, bleiben leer.", "info")
+        kurve = wiederkehr_kurve()
+        if kurve.empty:
+            box("Noch zu wenig Verlauf für eine Kohortenauswertung.", "info")
+        else:
+            st.dataframe(kurve, use_container_width=True, hide_index=True)
+
+        st.markdown("")
+        st.markdown("---")
+        st.markdown("##### Neue Spieler je Woche")
+        neu = neukunden_je_woche()
+        if neu.empty:
+            box("Noch keine Neukundendaten.", "info")
+        else:
+            st.dataframe(neu, use_container_width=True, hide_index=True,
+                         height=min(420, 60 + 35 * len(neu)))
+            st.caption("Erster Besuch innerhalb des ausgewerteten Zeitraums. "
+                       "Wer schon am ersten Datentag da war, zählt nicht als "
+                       "neu — sein echter Erstbesuch liegt davor.")
 
 
 def modul_whatsapp():
@@ -8208,7 +8808,9 @@ def nachholung_speichern(checkin_datum: str, checkin_name: str,
                  funktionen=("offene_fehler", "offene_je_tag",
                              "verbrauchte_checkins", "offene_checkins",
                              "offene_checkins_zeitraum", "zuordnung_vorschlag",
-                             "nachhol_kandidaten", "nachholung_quelle"))
+                             "nachhol_kandidaten", "nachholung_quelle",
+                             "anspruch_bilanz", "eigener_anspruch",
+                             "anspruch_verdacht"))
     return True
 
 
@@ -9282,7 +9884,8 @@ MODULE = [
     {"id": "rechnungen", "ic": "🧾", "ti": "Rechnungen",
      "de": "Bearbeitungsgebühr automatisch", "an": False, "fn": None},
     {"id": "events",    "ic": "🗓", "ti": "Events",
-     "de": "Mexicano, Coaching, Ladies Day", "an": False, "fn": None},
+     "de": "Wirkung, Wiederkehr, Teilnehmer", "an": True,
+     "fn": lambda: modul_events()},
 ]
 
 
