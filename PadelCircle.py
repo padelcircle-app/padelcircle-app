@@ -18,6 +18,7 @@ import pandas as pd
 from rapidfuzz import fuzz
 from datetime import datetime, date, timedelta
 from calendar import monthrange
+from functools import lru_cache
 import time
 import random
 import re
@@ -400,37 +401,23 @@ _DATE_FORMATS = ("%d/%m/%Y %H:%M", "%d/%m/%Y", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H
                  "%m/%d/%Y", "%Y/%m/%d")
 
 
-def parse_date_safe(val):
-    if val is None or val == "" or val == "-":
-        return None
-    try:
-        if pd.isna(val):
-            return None
-    except (TypeError, ValueError):
-        pass
-    s = str(val).strip()
-    for fmt in _DATE_FORMATS:
-        try:
-            return datetime.strptime(s, fmt).date()
-        except ValueError:
-            continue
-    try:
-        d = pd.to_datetime(s, errors="coerce", dayfirst=True)
-        return d.date() if pd.notna(d) else None
-    except Exception:
-        return None
+@lru_cache(maxsize=200_000)
+def _datum_aus_text(s: str):
+    """
+    Der eigentliche Datums-Erkenner — gemerkt statt jedes Mal neu.
 
+    Ohne das Merken war dies mit Abstand die teuerste Stelle der ganzen
+    App. `_DATE_FORMATS` wird von vorn durchprobiert, und das Format der
+    gespeicherten Daten (`%Y-%m-%d`) steht an sechster Stelle: Jeder
+    Aufruf verbrannte erst fünf fehlschlagende `strptime`. Gemessen an
+    den echten Daten waren das 267.365 `strptime`-Versuche für 42.366
+    Aufrufe — 3,6 von 4,6 Sekunden Rechenzeit.
 
-def parse_datetime_safe(val):
-    """Wie parse_date_safe, gibt aber datetime inkl. Uhrzeit zurück."""
-    if val is None or val == "":
-        return None
-    try:
-        if pd.isna(val):
-            return None
-    except (TypeError, ValueError):
-        pass
-    s = str(val).strip()
+    Dabei sind die Werte fast alle gleich: Im Blatt `buchungen` stehen
+    4043 Zeilen mit ganzen 44 verschiedenen Datumswerten. Gemerkt wird
+    deshalb der Text, nicht der Aufruf — damit greift der Speicher auch
+    dann, wenn dasselbe Datum aus verschiedenen Spalten kommt.
+    """
     for fmt in _DATE_FORMATS:
         try:
             return datetime.strptime(s, fmt)
@@ -441,6 +428,35 @@ def parse_datetime_safe(val):
         return d.to_pydatetime() if pd.notna(d) else None
     except Exception:
         return None
+
+
+def _datums_text(val):
+    """Den zu erkennenden Text herausschälen — None, wenn nichts da ist."""
+    if val is None or val == "" or val == "-":
+        return None
+    try:
+        if pd.isna(val):
+            return None
+    except (TypeError, ValueError):
+        pass
+    s = str(val).strip()
+    return s or None
+
+
+def parse_date_safe(val):
+    s = _datums_text(val)
+    if s is None:
+        return None
+    d = _datum_aus_text(s)
+    return d.date() if d is not None else None
+
+
+def parse_datetime_safe(val):
+    """Wie parse_date_safe, gibt aber datetime inkl. Uhrzeit zurück."""
+    s = _datums_text(val)
+    if s is None:
+        return None
+    return _datum_aus_text(s)
 
 
 def parse_betrag(val) -> float:
@@ -1074,7 +1090,16 @@ ABGELEITETE_CACHES = ("tages_kennzahlen", "verfuegbare_tage", "monats_kennzahlen
                       "buchungsnamen_am_tag", "abzug_pruefen", "verguetung_wert",
                       "checkins_von_am", "rabattierte_buchungen_am", "checkins_roh_und_verguetet",
                       "playtomic_spieler", "spieltage_von", "mapping_konflikte",
-                      "offene_freigaben", "anspruch_verdacht")
+                      "offene_freigaben", "anspruch_verdacht",
+                      # Auswertungen. Die standen hier lange nicht drin und
+                      # zeigten nach einer Bearbeitung bis zu 15 Minuten lang
+                      # alte Zahlen — man korrigierte einen Fall und sah die
+                      # Korrektur nirgends.
+                      "spieltage_je_spieler", "zweitbesuch_dauer",
+                      "wiederkehr_kurve", "neukunden_je_woche", "tuerooeffner",
+                      "wellpass_vergleich", "platzausnutzung", "spieler_rhythmus",
+                      "_buchungsgruppen", "auslastung_vorschlaege",
+                      "event_liste", "event_wirkung", "event_teilnehmer_details")
 
 
 def _cache_funktion_leeren(name: str):
@@ -4480,9 +4505,21 @@ def _zahlungs_index(pdf: pd.DataFrame) -> dict:
     if df.empty:
         return {}
 
+    # Nachträglich am Tresen abgerechnete Zeilen kenntlich machen —
+    # siehe `_nachbuchung_umverteilen`, das sie später umhängt.
+    if "Payment date" in df.columns and "Origin" in df.columns:
+        gezahlt = df["Payment date"].map(parse_datetime_safe)
+        vom_tresen = df["Origin"].astype(str).str.contains("desktop", case=False,
+                                                           na=False)
+        df["_spaet"] = [bool(v and pd.notna(g) and g > s)
+                        for v, g, s in zip(vom_tresen, gezahlt, df["_dt"])]
+    else:
+        df["_spaet"] = False
+
     out = {}
     for schluessel, gruppe in df.groupby(["_nn", "_dt"]):
         betraege = [float(x) for x in gruppe["_bt"]]
+        spaet_je_betrag = list(zip(betraege, [bool(x) for x in gruppe["_spaet"]]))
 
         # Rückerstattungen mit ihrer Ursprungszahlung verrechnen.
         #
@@ -4504,11 +4541,27 @@ def _zahlungs_index(pdf: pd.DataFrame) -> dict:
                 offen.remove(passend[0])
 
         effektiv = sorted(offen + nullen)
+
+        # Welche der übrig gebliebenen Beträge kamen vom Tresen? Die
+        # Verrechnung oben arbeitet nur mit Zahlen, deshalb wird die
+        # Herkunft hier wieder zugeordnet — Betrag für Betrag, jeder
+        # Beleg nur einmal.
+        rest = list(spaet_je_betrag)
+        nachtraeglich = []
+        for wert in effektiv:
+            for i, (betrag, spaet) in enumerate(rest):
+                if abs(betrag - wert) < 0.01:
+                    if spaet:
+                        nachtraeglich.append(wert)
+                    rest.pop(i)
+                    break
+
         out[schluessel] = {
             "summe": float(sum(betraege)),
             "kleinste": effektiv[0] if effektiv else float(sum(betraege)),
             "zeilen": len(effektiv),
             "werte": effektiv,          # die wirksamen Einzelzahlungen
+            "nachtraeglich": sorted(nachtraeglich),
         }
     return out
 
@@ -4703,6 +4756,91 @@ def _zerlege_zahlung(betrag: float, voll: float, rabattiert: float,
     return beste
 
 
+def _nachbuchung_umverteilen(namen, start, zahlungen, rabattiert):
+    """
+    Nachträglich am Tresen abgerechnete Rabattplätze dem richtigen
+    Spieler zuordnen. → korrigierte Zahlungseinträge dieser Buchung
+
+    Playtomic schreibt in den Zahlungs-Export den Namen des Kontos, über
+    das abgerechnet wurde — nicht den des Spielers, dem der Platz gehört.
+    Solange jeder selbst zahlt, ist das dasselbe. Wird ein offener Platz
+    später am Tresen abgerechnet, läuft er dagegen auf den Eigentümer der
+    Buchung, und der Rabatt eines anderen klebt an dessen Namen.
+
+    Belegter Fall vom 20.08.: Playtomic zeigt in der Buchungsansicht
+    „Egym Wellpass" bei Luca Engstler und Fabian Shi, Johannes Epp zahlte
+    13,00 € Vollpreis. Im Export steht:
+
+        Johannes Epp   13 €  Apple Pay    App (iOS)      11:44   ← selbst
+        Mario Zingerle 13 €  Credit card  App (Android)  13:06   ← selbst
+        Johannes Epp    1 €  Credit card  Web (desktop)  19:05   ← Tresen
+        Johannes Epp    1 €  Credit card  Web (desktop)  19:06   ← Tresen
+
+    Beide Rabatte hingen damit an Epp, und er wurde als Wellpass-
+    Vergesser gemeldet, obwohl er voll bezahlt hat.
+
+    Erkennbar sind solche Zeilen daran, dass sie nach dem Spieltermin
+    über `Web (desktop)` gebucht wurden — in den echten Daten 348 Stück.
+    Sie werden dem Zahler abgezogen und den Teilnehmern ohne eigene
+    Zahlung gegeben. Geht die Zahl nicht genau auf, werden sie nur
+    abgezogen und niemandem zugeschrieben: dann bleibt der Fall offen,
+    statt den Falschen zu beschuldigen.
+
+    Der eigene Platz des Zahlers bleibt unangetastet — wer sonst nichts
+    bezahlt hat, behält eine nachträgliche Rabattzeile für sich selbst.
+    """
+    eintraege = {nn: zahlungen.get((nn, start)) for nn in namen}
+    if not any(eintraege.values()):
+        return eintraege
+
+    ohne_eigene = [nn for nn in namen if eintraege.get(nn) is None]
+    abzugeben, korrigiert = 0, {}
+
+    for nn, daten in eintraege.items():
+        if not daten:
+            continue
+        nachtraeglich = list(daten.get("nachtraeglich") or [])
+        rabatt_zeilen = [w for w in nachtraeglich
+                         if abs(w - rabattiert) < 0.01]
+        if not rabatt_zeilen:
+            continue
+
+        # Hat er noch anderes bezahlt, ist sein eigener Platz damit
+        # abgedeckt und alle Tresen-Rabatte gehören anderen. Sonst
+        # behält er einen für sich.
+        werte = list(daten.get("werte") or [])
+        anderes = len(werte) - len(nachtraeglich)
+        fremd = rabatt_zeilen if anderes >= 1 else rabatt_zeilen[1:]
+        if not fremd:
+            continue
+
+        rest = list(werte)
+        for w in fremd:
+            for i, v in enumerate(rest):
+                if abs(v - w) < 0.01:
+                    rest.pop(i)
+                    break
+        korrigiert[nn] = dict(daten, werte=sorted(rest), zeilen=len(rest),
+                              kleinste=min(rest) if rest else daten["kleinste"],
+                              nachtraeglich=[w for w in nachtraeglich
+                                             if w not in fremd])
+        abzugeben += len(fremd)
+
+    if not abzugeben:
+        return eintraege
+
+    eintraege.update(korrigiert)
+
+    # Nur bei glatter Rechnung zuschreiben: so viele offene Rabatte wie
+    # Teilnehmer ohne eigene Zahlung.
+    if abzugeben == len(ohne_eigene):
+        for nn in ohne_eigene:
+            eintraege[nn] = {"summe": rabattiert, "kleinste": rabattiert,
+                             "zeilen": 1, "werte": [rabattiert],
+                             "nachtraeglich": []}
+    return eintraege
+
+
 def _wellpass_traeger(teilnehmer, start, pro_platz, n_wellpass, zahlungen,
                       checkin_namen=None, wellpass_bekannt=None) -> set:
     """
@@ -4767,9 +4905,13 @@ def _wellpass_traeger(teilnehmer, start, pro_platz, n_wellpass, zahlungen,
         if float(weiterer) not in kandidaten:
             kandidaten.append(float(weiterer))
 
-    bestes = None
+    bestes, bestes_beleg = None, None
     for abzug in kandidaten:
         rabattiert = max(0.0, pro_platz - abzug)
+        # Am Tresen nachgebuchte Rabattplätze zuerst dem richtigen
+        # Spieler zuordnen — sonst hängen sie am Eigentümer der Buchung.
+        korr = _nachbuchung_umverteilen(namen, start, zahlungen, rabattiert)
+        beleg = {nn for nn, d in korr.items() if d is not None}
         traeger, offen_paare, unklar, erklaerte = set(), [], set(), 0
 
         for paar in paare:
@@ -4778,7 +4920,7 @@ def _wellpass_traeger(teilnehmer, start, pro_platz, n_wellpass, zahlungen,
             eigene = {}          # nn → (volle, rabattierte)
             unlesbar = set()
             for nn in paar:
-                daten = zahlungen.get((nn, start))
+                daten = korr.get(nn)
                 if daten is None:
                     continue
                 volle = rabatte_nn = 0
@@ -4860,13 +5002,14 @@ def _wellpass_traeger(teilnehmer, start, pro_platz, n_wellpass, zahlungen,
 
         rest = traeger | unklar | {nn for paar in offen_paare for nn in paar}
         if bestes is None or len(rest) < len(bestes):
-            bestes = rest
+            bestes, bestes_beleg = rest, beleg
 
     # Bleibt es nach allen Abzug-Kandidaten unklar, wird nur noch
     # jemand mit eigenem Zahlungsbeleg als Träger geführt — alles
     # andere wäre eine Vermutung ohne Nachweis.
     ergebnis = bestes if bestes is not None else set(namen)
-    return ergebnis & namen_mit_beleg
+    return ergebnis & (bestes_beleg if bestes_beleg is not None
+                       else namen_mit_beleg)
 
 def _als_rohbuchungen(tage=None) -> pd.DataFrame:
     """
