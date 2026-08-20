@@ -8,11 +8,14 @@ Zentrale Business-App für Padel Circle GmbH, Memmingen.
 | Modul | Zweck |
 |---|---|
 | Daten-Zentrale | Playtomic- und Wellpass-Exporte einlesen und abgleichen |
-| Business Dashboard | Umsatz, Zielfortschritt, Prognose, Auslastungs-Heatmap |
-| WhatsApp Reminder | Wellpass-Vergesser anschreiben, einzeln oder als Sammelversand |
+| Business Dashboard | Umsatz, Zielfortschritt, Prognose, Auslastung, Wetter |
+| WhatsApp Reminder | Wellpass-Vergesser anschreiben · auffällige Kurzabsagen |
 | Spieler & Community | Rangliste, Vielspieler, Rückholung inaktiver Spieler |
 | Wellpass-Nachmeldung | CSV-Export für den EGYM-Nachmeldungs-Bot |
 | Name-Abgleich | Playtomic ↔ Wellpass Namensvarianten zusammenführen |
+| Events | Wirkung einer Veranstaltung, Teilnehmer, Kontrollgruppe |
+| Analysen | Bindung, Netzwerk, Wirtschaftlichkeit |
+| Circle Points | Rangliste nach Spieltagen, Monat für Monat |
 | Einstellungen | Monatsziele, Spielersuche, Systemcheck |
 
 ## Dateien
@@ -43,6 +46,7 @@ Offene Punkte sind mit `← AUSFÜLLEN` markiert.
 
 ## Kennzahlen
 
+- Anlage: 5 Doppelcourts (Padel 1–5) + 1 Single Court (Padel 6), 6–24 Uhr
 - Wellpass: 13,00 € × 95 % = **12,35 €** pro Check-in
 - Bearbeitungsgebühr bei vergessenem Check-in: **15,00 €**
 - Double Court: 28 € (6–12) · 32 € (12–16) · 36 € (ab 16 / WE)

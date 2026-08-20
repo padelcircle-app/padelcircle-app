@@ -19,6 +19,8 @@ from rapidfuzz import fuzz
 from datetime import datetime, date, timedelta
 from calendar import monthrange
 from functools import lru_cache
+import urllib.request
+import urllib.parse
 import time
 import random
 import re
@@ -68,6 +70,14 @@ CONFIG = {
     "single_court_nummern": [6],
     "oeffnung_von":   6,      # 06:00
     "oeffnung_bis":  24,      # 24:00
+    # Ab wann die heutige Anlage gilt. Davor lief der Betrieb woanders —
+    # mit anderen Courts und sogar Tennisplätzen. Für Auslastungszahlen
+    # wäre das ein falscher Nenner.
+    "standort_seit": "2026-07-05",
+
+    # ── Wetter (Open-Meteo, keine Anmeldung nötig) ────────────────────────────
+    "wetter_lat":  47.9878,   # Memmingen
+    "wetter_lon":  10.1810,
 
     # ── Preise Double Court (€ / 60 Min) ─────────────────────────────────────
     "preis_double_frueh":  28.0,   # Mo–Fr  06:00–12:00
@@ -598,6 +608,9 @@ SHEET_SPALTEN = {
                           "checkin_name", "fall_datum", "fall_name", "timestamp"],
     "freigaben":        ["name_norm", "name", "ausgeloest_am", "letzte_sperre",
                          "bestaetigt", "timestamp"],
+    "auffaellige":      ["name_norm", "name", "art", "notiz", "timestamp"],
+    "wetter":           ["datum", "code", "lage", "t_max", "t_min",
+                         "regen_mm", "art", "timestamp"],
     "auth_tokens":      ["token", "created", "expires"],
     "settings":         ["key", "value"],
 }
@@ -1099,7 +1112,15 @@ ABGELEITETE_CACHES = ("tages_kennzahlen", "verfuegbare_tage", "monats_kennzahlen
                       "wiederkehr_kurve", "neukunden_je_woche", "tuerooeffner",
                       "wellpass_vergleich", "platzausnutzung", "spieler_rhythmus",
                       "_buchungsgruppen", "auslastung_vorschlaege",
-                      "event_liste", "event_wirkung", "event_teilnehmer_details")
+                      "event_liste", "event_wirkung", "event_teilnehmer_details",
+                      # Auslastung, Punkte, Absagen, Wetter — dieselbe Regel:
+                      # Was aus den Blättern rechnet, muss nach einer
+                      # Änderung neu rechnen.
+                      "belegte_slots", "auslastung_raster", "auslastung_slot",
+                      "circle_points", "circle_points_monate",
+                      "circle_points_verlauf", "absagen_liste",
+                      "absagen_ignoriert", "absagen_markierungen",
+                      "wetter_daten", "wetter_korrelation", "wetter_hinweise")
 
 
 def _cache_funktion_leeren(name: str):
@@ -2233,6 +2254,213 @@ def auslastung_matrix(monat: str = None) -> pd.DataFrame:
     return matrix
 
 
+# ── Belegung: wie voll die Halle wirklich war ────────────────────────────────
+#
+# `auslastung_matrix` oben zählt Zahlungsbelege je Wochentag und Stunde. Das
+# sagt, wann viel gebucht wird — aber nicht, wie voll die Halle war. Ein
+# 120-Minuten-Slot zählt dort genauso einmal wie ein 60-Minuten-Slot, und
+# ohne die Zahl der Courts fehlt jeder Nenner.
+#
+# Hier wird stattdessen in belegten Court-Minuten gerechnet und gegen die
+# tatsächliche Kapazität gestellt: 6 Courts × 60 Minuten × Anzahl der Tage.
+
+
+def court_kurz(name) -> str:
+    """
+    Court-Bezeichnungen vereinheitlichen.
+
+    Playtomic schreibt denselben Platz verschieden — „Single Court Padel 6"
+    und „Padel 6" haben dieselbe `resource_id`, ebenso gehört
+    „Padel 4 Kalthalle" zum alten Standort. Für die Auslastung zählt die
+    Nummer, nicht die Schreibweise.
+    """
+    txt = str(name).strip()
+    nummer = re.search(r"(\d+)", txt)
+    return f"Padel {nummer.group(1)}" if nummer else (txt or "—")
+
+
+def courts_liste() -> list:
+    """Die Courts der Anlage in fester Reihenfolge."""
+    anzahl = CONFIG["courts_double"] + CONFIG["courts_single"]
+    return [f"Padel {i}" for i in range(1, anzahl + 1)]
+
+
+def standort_start() -> str:
+    """
+    Ab wann die heutige Anlage gilt.
+
+    Vor dem Umzug lief der Betrieb an einem anderen Standort — andere
+    Courts, sogar Tennisplätze. Diese Buchungen in eine Auslastung der
+    heutigen Halle zu mischen, ergäbe einen falschen Nenner.
+    """
+    return str(einstellung("standort_seit", CONFIG["standort_seit"]))
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def belegte_slots(von: str = None, bis: str = None) -> pd.DataFrame:
+    """
+    Jede Buchung einmal, aufgelöst nach Court.
+
+    Das Blatt `buchungen` führt eine Zeile je Teilnehmer — vier Zeilen für
+    eine Buchung. Für die Belegung zählt der Platz, nicht der Spieler.
+
+    Events belegen mehrere Courts gleichzeitig und stehen deshalb mit
+    allen belegten Plätzen in einem Feld („Padel 1, Padel 2, …"). Die
+    werden hier wieder aufgetrennt, sonst fehlte der halben Halle ihre
+    Belegung, obwohl sie besetzt war.
+    """
+    b = loadsheet("buchungen")
+    noetig = {"analysis_date", "Court", "Service_Zeit", "Dauer"}
+    if b.empty or not noetig <= set(b.columns):
+        return pd.DataFrame()
+
+    df = b.copy()
+    df["_tag"] = df["analysis_date"].astype(str)
+    grenze = von or standort_start()
+    df = df[df["_tag"] >= str(grenze)]
+    if bis:
+        df = df[df["_tag"] <= str(bis)]
+    if df.empty:
+        return pd.DataFrame()
+
+    # Eine Zeile je Buchung statt je Teilnehmer.
+    #
+    # Doppelte Zeilen sind dabei normal: Wer sich überlappende Exporte
+    # einliest, hat dieselbe Buchung mehrfach im Blatt. Für die Belegung
+    # macht das nichts (gruppiert wird ohnehin), für die Kopfzahl schon —
+    # deshalb werden die Namen entdoppelt, sonst stehen acht Spieler auf
+    # einem Court, auf den vier passen.
+    df["_std"] = df["Service_Zeit"].map(stunde_aus_zeit)
+    df["_min"] = df["Service_Zeit"].map(
+        lambda z: int(re.search(r"\d{1,2}:(\d{2})", str(z)).group(1))
+        if re.search(r"\d{1,2}:(\d{2})", str(z)) else 0)
+    df = df[df["_std"] >= 0]
+    gruppen = df.groupby(["_tag", "Court", "Service_Zeit"], as_index=False).agg(
+        dauer=("Dauer", "max"),
+        koepfe=("Name", lambda s: len({str(x).strip().lower()
+                                       for x in s if str(x).strip()})),
+        namen=("Name", lambda s: ", ".join(
+            dict.fromkeys(str(x).strip() for x in s if str(x).strip()))),
+        std=("_std", "first"), minute=("_min", "first"))
+    if gruppen.empty:
+        return pd.DataFrame()
+
+    zeilen = []
+    for _, r in gruppen.iterrows():
+        tag = parse_date_safe(r["_tag"])
+        if tag is None:
+            continue
+        dauer = float(r["dauer"] or 60)
+        for einzel in str(r["Court"]).split(","):
+            einzel = einzel.strip()
+            if not einzel:
+                continue
+            zeilen.append({
+                "tag": tag, "court": court_kurz(einzel),
+                "zeit": str(r["Service_Zeit"]), "stunde": int(r["std"]),
+                "minute": int(r["minute"]), "dauer": dauer,
+                "wochentag": tag.weekday(),
+                "koepfe": int(r["koepfe"]), "namen": str(r["namen"]),
+            })
+    return pd.DataFrame(zeilen)
+
+
+def _minuten_je_stunde(stunde: int, dauer: float, minute: int = 0) -> dict:
+    """
+    Eine Buchung auf die Stunden verteilen, die sie belegt.
+
+    Ein 90-Minuten-Slot ab 18:30 belegt 30 Minuten der Stunde 18 und
+    60 Minuten der Stunde 19 — ihn nur der Startstunde zuzuschlagen,
+    würde die späten Stunden systematisch zu leer aussehen lassen.
+
+    Die Startminute muss dabei mitgezählt werden. Ohne sie bekam der
+    18:30-Slot volle 60 Minuten auf Stunde 18 gebucht; lag davor noch
+    ein Slot von 17:00 bis 18:30, kamen dessen 30 Minuten obendrauf und
+    die Stunde 18 stand bei 90 von 60 Minuten. In der Heatmap führte
+    das zu Auslastungen über 100 %, obwohl sich nichts überschnitt.
+    """
+    out, rest = {}, float(dauer)
+    zeiger, offset = int(stunde), max(0, min(59, int(minute)))
+    while rest > 0 and zeiger < CONFIG["oeffnung_bis"]:
+        anteil = min(60.0 - offset, rest)
+        out[zeiger] = out.get(zeiger, 0.0) + anteil
+        rest -= anteil
+        zeiger += 1
+        offset = 0
+    return out
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def auslastung_raster(von: str = None, bis: str = None,
+                      court: str = None) -> dict:
+    """
+    Auslastung je Wochentag × Stunde.
+
+    → {"quote": {(wt, std): prozent}, "minuten": …, "buchungen": …,
+       "tage": {wt: anzahl}, "von": …, "bis": …}
+
+    Der Nenner ist die echte Kapazität: Anzahl Courts × 60 Minuten ×
+    Anzahl dieser Wochentage im Zeitraum. Ist ein einzelner Court
+    gewählt, zählt nur dieser eine.
+    """
+    slots = belegte_slots(von, bis)
+    if slots.empty:
+        return {}
+
+    if court:
+        slots = slots[slots["court"] == court]
+        if slots.empty:
+            return {}
+
+    minuten, anzahl = {}, {}
+    for _, r in slots.iterrows():
+        for std, min_ in _minuten_je_stunde(int(r["stunde"]), r["dauer"], int(r.get("minute", 0))).items():
+            minuten[(int(r["wochentag"]), std)] = \
+                minuten.get((int(r["wochentag"]), std), 0.0) + min_
+            anzahl[(int(r["wochentag"]), std)] = \
+                anzahl.get((int(r["wochentag"]), std), 0) + 1
+
+    tag_von, tag_bis = min(slots["tag"]), max(slots["tag"])
+    tage = {}
+    for i in range((tag_bis - tag_von).days + 1):
+        tage[(tag_von + timedelta(days=i)).weekday()] = \
+            tage.get((tag_von + timedelta(days=i)).weekday(), 0) + 1
+
+    courts = 1 if court else len(courts_liste())
+    quote = {}
+    for (wt, std), min_ in minuten.items():
+        kapazitaet = courts * 60.0 * tage.get(wt, 0)
+        quote[(wt, std)] = round(min_ / kapazitaet * 100, 1) if kapazitaet else 0.0
+
+    return {"quote": quote, "minuten": minuten, "buchungen": anzahl,
+            "tage": tage, "von": tag_von, "bis": tag_bis,
+            "courts": courts}
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def auslastung_slot(wochentag: int, stunde: int, von: str = None,
+                    bis: str = None, court: str = None) -> pd.DataFrame:
+    """Welche Buchungen stecken hinter einer Zelle der Heatmap?"""
+    slots = belegte_slots(von, bis)
+    if slots.empty:
+        return pd.DataFrame()
+    if court:
+        slots = slots[slots["court"] == court]
+
+    treffer = []
+    for _, r in slots.iterrows():
+        if int(r["wochentag"]) != int(wochentag):
+            continue
+        if int(stunde) in _minuten_je_stunde(int(r["stunde"]), r["dauer"], int(r.get("minute", 0))):
+            treffer.append({"Datum": str(r["tag"]), "Court": r["court"],
+                            "Zeit": r["zeit"], "Dauer": int(r["dauer"]),
+                            "Spieler": int(r["koepfe"]), "Namen": r["namen"]})
+    if not treffer:
+        return pd.DataFrame()
+    return pd.DataFrame(treffer).sort_values(["Datum", "Zeit"],
+                                             ascending=[False, True])
+
+
 @st.cache_data(ttl=900, show_spinner=False)
 def auslastung_vorschlaege() -> list:
     """
@@ -3364,6 +3592,353 @@ def spieler_segmente() -> pd.DataFrame:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#   🌦  WETTER
+#
+#   Padel ist Indoor — trotzdem entscheidet das Wetter mit, ob jemand am
+#   Sonntagnachmittag in die Halle fährt oder an den See. Die Daten kommen
+#   von Open-Meteo: kostenlos, ohne Anmeldung, ein einziger Aufruf liefert
+#   Vergangenheit und Vorhersage zusammen.
+#
+#   Geholt wird höchstens einmal am Tag und im Blatt `wetter` abgelegt —
+#   nicht bei jedem Seitenaufbau. Fällt der Dienst aus, bleibt der letzte
+#   Stand stehen, statt dass die Seite kaputtgeht.
+# ══════════════════════════════════════════════════════════════════════════════
+
+WETTER_URL = "https://api.open-meteo.com/v1/forecast"
+
+
+def _wetter_lage(code, regen_mm) -> str:
+    """WMO-Wettercode in eine Lage übersetzen, die man vorlesen kann."""
+    try:
+        c = int(float(code))
+    except (TypeError, ValueError):
+        return "unbekannt"
+    try:
+        mm = float(regen_mm or 0)
+    except (TypeError, ValueError):
+        mm = 0.0
+
+    if c >= 95:
+        return "Gewitter"
+    if 71 <= c <= 77 or 85 <= c <= 86:
+        return "Schnee"
+    if 61 <= c <= 67 or 80 <= c <= 82 or mm >= 2.0:
+        return "Regen"
+    if 51 <= c <= 57 or mm >= 0.2:
+        return "Nieselregen"
+    if 45 <= c <= 48:
+        return "Nebel"
+    if c <= 1:
+        return "Sonne"
+    return "Bewölkt"
+
+
+def wetter_abrufen(rueckblick: int = 92, vorhersage: int = 7) -> pd.DataFrame:
+    """
+    Wetter bei Open-Meteo holen. → leerer DataFrame, wenn es nicht klappt.
+
+    `past_days` liefert die Vergangenheit gleich mit — deshalb reicht ein
+    Aufruf für Rückblick und Vorhersage. Mehr als 92 Tage zurück gibt die
+    Schnittstelle nicht her.
+    """
+    frage = urllib.parse.urlencode({
+        "latitude": CONFIG["wetter_lat"], "longitude": CONFIG["wetter_lon"],
+        "daily": "weathercode,temperature_2m_max,temperature_2m_min,"
+                 "precipitation_sum",
+        "timezone": "Europe/Berlin",
+        "past_days": max(0, min(92, int(rueckblick))),
+        "forecast_days": max(1, min(16, int(vorhersage))),
+    })
+    try:
+        with urllib.request.urlopen(f"{WETTER_URL}?{frage}", timeout=12) as antwort:
+            daten = json.loads(antwort.read().decode("utf-8"))
+    except Exception as e:
+        # Den Grund merken statt stumm zu scheitern. Der häufigste Fall ist
+        # kein Ausfall von Open-Meteo, sondern ein fehlender
+        # Zertifikatsspeicher der lokalen Python-Installation — daran
+        # sucht man sonst lange.
+        st.session_state["_wetter_fehler"] = f"{type(e).__name__}: {str(e)[:140]}"
+        return pd.DataFrame()
+
+    st.session_state["_wetter_fehler"] = ""
+    return _wetter_aufbereiten(daten)
+
+
+def _wetter_aufbereiten(daten: dict) -> pd.DataFrame:
+    """Die Antwort von Open-Meteo in Zeilen verwandeln."""
+    taeglich = (daten or {}).get("daily") or {}
+    tage = taeglich.get("time") or []
+    if not tage:
+        return pd.DataFrame()
+
+    heute = str(date.today())
+    codes = taeglich.get("weathercode") or []
+    tmax = taeglich.get("temperature_2m_max") or []
+    tmin = taeglich.get("temperature_2m_min") or []
+    regen = taeglich.get("precipitation_sum") or []
+
+    def hol(liste, i):
+        return liste[i] if i < len(liste) else None
+
+    zeilen = []
+    for i, tag in enumerate(tage):
+        zeilen.append({
+            "datum": str(tag),
+            "code": hol(codes, i),
+            "lage": _wetter_lage(hol(codes, i), hol(regen, i)),
+            "t_max": hol(tmax, i),
+            "t_min": hol(tmin, i),
+            "regen_mm": hol(regen, i),
+            "art": "vorhersage" if str(tag) > heute else "ist",
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+        })
+    return pd.DataFrame(zeilen)
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def wetter_daten() -> pd.DataFrame:
+    """Was im Blatt `wetter` steht."""
+    df = loadsheet("wetter", SHEET_SPALTEN["wetter"])
+    if df.empty or "datum" not in df.columns:
+        return pd.DataFrame()
+    out = df.copy()
+    for spalte in ("t_max", "t_min", "regen_mm"):
+        if spalte in out.columns:
+            out[spalte] = pd.to_numeric(out[spalte], errors="coerce")
+    return out[out["datum"].astype(str).str.len() >= 8]
+
+
+def wetter_aktualisieren(erzwingen: bool = False) -> int:
+    """
+    Einmal täglich nachladen. → Anzahl geschriebener Tage, 0 wenn nichts zu tun
+
+    Vorhersagezeilen werden bei jedem Lauf überschrieben: Aus der
+    Vorhersage von gestern ist heute eine Tatsache geworden.
+    """
+    alt = wetter_daten()
+    if not erzwingen and not alt.empty and "timestamp" in alt.columns:
+        letzte = max((str(x)[:10] for x in alt["timestamp"] if str(x)), default="")
+        if letzte >= str(date.today()):
+            return 0
+
+    neu = wetter_abrufen()
+    if neu.empty:
+        return 0
+
+    if not alt.empty:
+        behalten = alt[~alt["datum"].astype(str).isin(set(neu["datum"].astype(str)))]
+        neu = pd.concat([behalten, neu], ignore_index=True)
+    neu = neu.sort_values("datum").reset_index(drop=True)
+
+    if savesheet(neu, "wetter"):
+        cache_leeren("wetter", funktionen=["wetter_daten", "wetter_korrelation",
+                                           "wetter_hinweise"])
+        return len(neu)
+    return 0
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def wetter_korrelation(tage_zurueck: int = 90) -> tuple:
+    """
+    Wetterlage gegen Buchungsaufkommen. → (verlauf, tabelle)
+
+    `verlauf` ist Tag für Tag: Buchungen und Höchsttemperatur.
+    `tabelle` fasst je Wetterlage zusammen — mit Tagesanzahl, weil eine
+    Prozentaussage über vier Regentage nichts wert ist.
+    """
+    wetter = wetter_daten()
+    slots = belegte_slots()
+    if wetter.empty or slots.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    je_tag = slots.groupby("tag").size().reset_index(name="buchungen")
+    je_tag["datum"] = je_tag["tag"].astype(str)
+
+    grenze = str(date.today() - timedelta(days=int(tage_zurueck)))
+    heute = str(date.today())
+    ist = wetter[(wetter["art"].astype(str) != "vorhersage")
+                 & (wetter["datum"].astype(str) >= grenze)
+                 & (wetter["datum"].astype(str) < heute)]
+    if ist.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    verlauf = ist.merge(je_tag[["datum", "buchungen"]], on="datum", how="inner")
+    if verlauf.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    schnitt = verlauf["buchungen"].mean()
+    reihen = []
+    for lage, g in verlauf.groupby("lage"):
+        mittel = float(g["buchungen"].mean())
+        reihen.append({
+            "Wetterlage": str(lage), "Tage": len(g),
+            "Ø Buchungen": round(mittel, 1),
+            "ggü. Schnitt": round((mittel - schnitt) / schnitt * 100, 1)
+            if schnitt else 0.0,
+            "Ø Temperatur": round(float(g["t_max"].mean()), 1)
+            if g["t_max"].notna().any() else None,
+            # Unter zehn Tagen ist der Unterschied kaum mehr als Zufall.
+            "belastbar": len(g) >= 10,
+        })
+
+    # Warme Sonnentage getrennt ausweisen — danach war ausdrücklich gefragt
+    warm = verlauf[(verlauf["lage"] == "Sonne") & (verlauf["t_max"] >= 22)]
+    if len(warm):
+        mittel = float(warm["buchungen"].mean())
+        reihen.append({
+            "Wetterlage": "Sonne über 22 °C", "Tage": len(warm),
+            "Ø Buchungen": round(mittel, 1),
+            "ggü. Schnitt": round((mittel - schnitt) / schnitt * 100, 1)
+            if schnitt else 0.0,
+            "Ø Temperatur": round(float(warm["t_max"].mean()), 1),
+            "belastbar": len(warm) >= 10,
+        })
+
+    tabelle = pd.DataFrame(reihen).sort_values("Tage", ascending=False)
+    return verlauf.sort_values("datum"), tabelle.reset_index(drop=True)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def wetter_hinweise() -> list:
+    """
+    Blick auf die nächsten Tage. → [{"datum", "lage", "t_max", "text"}, …]
+
+    Kein Orakel: Schlechtes Wetter am Wochenende ist der einzige Fall, in
+    dem sich eine kurzfristige Aktion sicher lohnt — dann suchen Leute
+    ohnehin nach etwas drinnen.
+    """
+    wetter = wetter_daten()
+    if wetter.empty:
+        return []
+
+    heute = str(date.today())
+    kommend = wetter[(wetter["datum"].astype(str) >= heute)].head(8)
+    out = []
+    for _, r in kommend.iterrows():
+        tag = parse_date_safe(r["datum"])
+        if tag is None:
+            continue
+        lage = str(r.get("lage", ""))
+        t_max = r.get("t_max")
+        kalt = pd.notna(t_max) and float(t_max) < 10
+        nass = lage in ("Regen", "Gewitter", "Schnee", "Nieselregen")
+        if not (kalt or nass):
+            continue
+        wochenende = tag.weekday() >= 5
+        text = (f"{WOCHENTAGE_DE[tag.weekday()]} wird es "
+                + ("nass" if nass else "kalt")
+                + (f" ({float(t_max):.0f} °C)" if pd.notna(t_max) else "")
+                + ". "
+                + ("Gute Gelegenheit für eine Push-Nachricht auf die "
+                   "Nachmittagsslots — da ist am meisten frei."
+                   if wochenende else
+                   "Wer draussen geplant hatte, sucht jetzt eine Halle."))
+        out.append({"datum": str(r["datum"]), "lage": lage,
+                    "t_max": t_max, "wochenende": wochenende, "text": text})
+    return out
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#   🏆  CIRCLE POINTS
+#
+#   Ein Punkt je Spieltag im Monat. Bewusst nicht nach Umsatz: Ein reiner
+#   Wellpass-Spieler zahlt 0 € und stünde in einer Umsatzwertung ewig auf
+#   null — ausgerechnet die Gruppe, die am zuverlässigsten wiederkommt
+#   (45,9 % Wiederkehrquote gegen 30,6 % bei Selbstzahlern). Gezählt wird
+#   deshalb das, was für die Halle zählt: dass jemand da war.
+#
+#   Zweimal am selben Tag zählt einmal. Das Team bleibt draussen, sonst
+#   führt die Rangliste, wer hier arbeitet.
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def circle_points(monat: str = None) -> pd.DataFrame:
+    """
+    Rangliste eines Monats. → Name · Punkte · Courts · Letzter Besuch
+
+    `monat` im Format „2026-08"; ohne Angabe der laufende Monat.
+    """
+    b = loadsheet("buchungen")
+    noetig = {"analysis_date", "Name", "Name_norm"}
+    if b.empty or not noetig <= set(b.columns):
+        return pd.DataFrame()
+
+    monat = monat or date.today().strftime("%Y-%m")
+    df = b[b["analysis_date"].astype(str).str.startswith(str(monat))].copy()
+    if df.empty:
+        return pd.DataFrame()
+
+    if "Team" in df.columns:
+        df = df[df["Team"].astype(str) != "Ja"]
+    df = df[~df["Name_norm"].isin(TEAM_NORM)]
+    df = df[~df["Name"].map(ist_platzhalter)]
+    if df.empty:
+        return pd.DataFrame()
+
+    df["_tag"] = df["analysis_date"].astype(str)
+    reihen = []
+    for nn, g in df.groupby("Name_norm"):
+        tage = sorted(set(g["_tag"]))
+        # Der am häufigsten geschriebene Name gewinnt — Playtomic
+        # schreibt dieselbe Person mal mit, mal ohne Nachnamen.
+        anzeige = g["Name"].astype(str).value_counts().index[0]
+        # Der Court, auf dem er am häufigsten stand — aussagekräftiger
+        # als eine Aufzählung aller je betretenen Plätze.
+        lieblingscourt = ""
+        if "Court" in g.columns:
+            zaehl = {}
+            for feld in g["Court"]:
+                for einzel in str(feld).split(","):
+                    if einzel.strip():
+                        k = court_kurz(einzel)
+                        zaehl[k] = zaehl.get(k, 0) + 1
+            if zaehl:
+                lieblingscourt = max(zaehl.items(), key=lambda x: x[1])[0]
+        reihen.append({
+            "Name": anzeige, "Name_norm": str(nn),
+            "Punkte": len(tage), "Spieltage": len(tage),
+            "Letzter Besuch": tage[-1],
+            "Lieblingscourt": lieblingscourt,
+        })
+
+    out = pd.DataFrame(reihen).sort_values(
+        ["Punkte", "Letzter Besuch"], ascending=[False, False]).reset_index(drop=True)
+    out.insert(0, "Rang", range(1, len(out) + 1))
+    return out
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def circle_points_monate() -> list:
+    """Welche Monate haben überhaupt Daten? Neueste zuerst."""
+    b = loadsheet("buchungen")
+    if b.empty or "analysis_date" not in b.columns:
+        return []
+    monate = {str(t)[:7] for t in b["analysis_date"] if len(str(t)) >= 7}
+    grenze = standort_start()[:7]
+    return sorted((m for m in monate if m >= grenze), reverse=True)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def circle_points_verlauf(name_norm: str, monate: int = 6) -> pd.DataFrame:
+    """Punktestand einer Person über die letzten Monate."""
+    alle = circle_points_monate()[:int(monate)]
+    reihen = []
+    for m in sorted(alle):
+        rang = circle_points(m)
+        if rang.empty:
+            reihen.append({"Monat": m, "Punkte": 0, "Rang": None})
+            continue
+        treffer = rang[rang["Name_norm"] == str(name_norm)]
+        reihen.append({
+            "Monat": m,
+            "Punkte": int(treffer["Punkte"].iloc[0]) if not treffer.empty else 0,
+            "Rang": int(treffer["Rang"].iloc[0]) if not treffer.empty else None,
+        })
+    return pd.DataFrame(reihen)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #   🗓  EVENT- UND WIEDERKEHR-ANALYSEN
 #
 #   Die Frage hinter allem hier: Bringt ein Event etwas, das über den
@@ -4471,6 +5046,173 @@ def _kunden_index(df: pd.DataFrame) -> dict:
             elif spalte not in eintrag:
                 eintrag[spalte] = ""
     return out
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#   ⚠️  KURZABSAGEN
+#
+#   Bewusst keine No-Show-Erkennung. Der naheliegende Weg — "Buchung ohne
+#   Check-in = nicht erschienen" — funktioniert hier nicht: Check-ins kommen
+#   von EGYM und existieren nur für Wellpass-Nutzer. Ein Selbstzahler checkt
+#   nie ein und wäre jedes Mal ein No-Show. Bei Wellpass-Nutzern wiederum
+#   bedeutet ein fehlender Check-in genau das, was die App ohnehin verfolgt:
+#   vergessen, nicht abwesend.
+#
+#   Stornos dagegen stehen sauber in den Daten. Jede Erstattung ist ein
+#   Zeilenpaar: Die Originalzahlung trägt eine `Refund id`, die
+#   Erstattungszeile hat diese als `Payment id`, und ihr `Payment date` ist
+#   der Zeitpunkt der Absage. Aus dem Abstand zum `Service date` ergibt sich
+#   der Vorlauf.
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def absagen_liste(tage_zurueck: int = 90, ab_absagen: int = 2) -> pd.DataFrame:
+    """
+    Wer sagt auffällig oft kurzfristig ab?
+
+    → Name · Slots · Absagen · <24h · <2h · nach Beginn · Quote · Score
+
+    Ein Hinweis zur Genauigkeit: Storno und Buchung hängen am `User name`
+    der Zahlung — und das ist der Zahler, nicht zwingend der Spieler. Wer
+    für vier bucht und absagt, bekommt eine Absage angerechnet, nicht vier.
+    Für eine Rangliste reicht das; eine exakte Quote je Person ist es nicht.
+    Deshalb steht hier die absolute Zahl im Vordergrund.
+    """
+    raw = loadsheet("playtomic_raw")
+    noetig = {"Service date", "Payment date", "User name",
+              "Payment status", "Payment id", "Refund id"}
+    if raw.empty or not noetig <= set(raw.columns):
+        return pd.DataFrame()
+
+    df = raw.copy()
+    df["_service"] = df["Service date"].map(parse_datetime_safe)
+    df["_gezahlt"] = df["Payment date"].map(parse_datetime_safe)
+    df = df[df["_service"].notna()]
+    if df.empty:
+        return pd.DataFrame()
+
+    grenze = date.today() - timedelta(days=int(tage_zurueck))
+    df = df[df["_service"].map(lambda d: d.date()) >= grenze]
+    if df.empty:
+        return pd.DataFrame()
+
+    # Originalzahlung je Erstattung: deren `Refund id` ist die
+    # `Payment id` der Erstattungszeile.
+    original = {}
+    for _, r in df.iterrows():
+        rid = str(r.get("Refund id", "-") or "-").strip()
+        if rid and rid != "-":
+            original[rid] = r
+
+    stat = {}
+    for _, r in df.iterrows():
+        name = str(r.get("User name", "") or "").strip()
+        if not name:
+            continue
+        nn = normalize_name(name)
+        if nn in TEAM_NORM or ist_platzhalter(name):
+            continue
+        eintrag = stat.setdefault(nn, {
+            "Name": name, "Slots": set(), "Absagen": 0,
+            "<24h": 0, "<2h": 0, "nach Beginn": 0})
+
+        if str(r.get("Payment status", "")).strip().lower() != "refund":
+            eintrag["Slots"].add(str(r["Service date"]))
+            continue
+
+        quelle = original.get(str(r.get("Payment id", "") or "").strip())
+        if quelle is None or pd.isna(r["_gezahlt"]):
+            continue
+        vorlauf = (quelle["_service"] - r["_gezahlt"]).total_seconds() / 3600.0
+        eintrag["Absagen"] += 1
+        if vorlauf < 0:
+            eintrag["nach Beginn"] += 1
+        elif vorlauf < 2:
+            eintrag["<2h"] += 1
+        elif vorlauf < 24:
+            eintrag["<24h"] += 1
+
+    reihen = []
+    for nn, e in stat.items():
+        if e["Absagen"] < int(ab_absagen):
+            continue
+        gesamt = len(e["Slots"]) + e["Absagen"]
+        kurz = e["<24h"] + e["<2h"] + e["nach Beginn"]
+        reihen.append({
+            "Name": e["Name"], "Name_norm": nn, "Slots": gesamt,
+            "Absagen": e["Absagen"], "<24h": e["<24h"], "<2h": e["<2h"],
+            "nach Beginn": e["nach Beginn"], "kurzfristig": kurz,
+            "Quote": round(e["Absagen"] / gesamt * 100, 1) if gesamt else 0.0,
+            # Je kurzfristiger, desto schwerer wiegt es.
+            "Score": round((e["nach Beginn"] * 3 + e["<2h"] * 2 + e["<24h"])
+                           / max(gesamt, 1), 3),
+        })
+    if not reihen:
+        return pd.DataFrame()
+
+    out = pd.DataFrame(reihen).sort_values(
+        ["Score", "Absagen"], ascending=[False, False]).reset_index(drop=True)
+
+    # Wer als erledigt markiert wurde, verschwindet aus der Liste.
+    weg = absagen_ignoriert()
+    if weg:
+        out = out[~out["Name_norm"].isin(weg)].reset_index(drop=True)
+    return out
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def absagen_ignoriert() -> set:
+    """Namen, die du bewusst ausgeblendet hast."""
+    df = loadsheet("auffaellige", SHEET_SPALTEN["auffaellige"])
+    if df.empty or "name_norm" not in df.columns:
+        return set()
+    aktiv = df[df["art"].astype(str) == "ignoriert"] if "art" in df.columns else df
+    return {str(x) for x in aktiv["name_norm"]}
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def absagen_markierungen() -> dict:
+    """{name_norm: art} — Vorauszahlung oder ignoriert."""
+    df = loadsheet("auffaellige", SHEET_SPALTEN["auffaellige"])
+    if df.empty or "name_norm" not in df.columns:
+        return {}
+    return {str(r["name_norm"]): str(r.get("art", ""))
+            for _, r in df.iterrows()}
+
+
+def absage_markieren(name_norm: str, name: str, art: str) -> bool:
+    """Eine Person markieren — „vorauszahlung" oder „ignoriert"."""
+    df = loadsheet("auffaellige", SHEET_SPALTEN["auffaellige"])
+    if not df.empty and "name_norm" in df.columns:
+        df = df[df["name_norm"].astype(str) != str(name_norm)]
+    neu = pd.DataFrame([{
+        "name_norm": str(name_norm), "name": str(name), "art": str(art),
+        "notiz": "", "timestamp": datetime.now().isoformat(timespec="seconds"),
+    }])
+    zusammen = pd.concat([df, neu], ignore_index=True) if not df.empty else neu
+    ok = savesheet(zusammen, "auffaellige")
+    if ok:
+        cache_leeren("auffaellige",
+                     funktionen=["absagen_ignoriert", "absagen_markierungen",
+                                 "absagen_liste"])
+    return ok
+
+
+def absage_markierung_loesen(name_norm: str) -> bool:
+    """Markierung wieder entfernen."""
+    df = loadsheet("auffaellige", SHEET_SPALTEN["auffaellige"])
+    if df.empty or "name_norm" not in df.columns:
+        return False
+    behalten = df[df["name_norm"].astype(str) != str(name_norm)]
+    if len(behalten) == len(df):
+        return False
+    ok = savesheet(behalten, "auffaellige")
+    if ok:
+        cache_leeren("auffaellige",
+                     funktionen=["absagen_ignoriert", "absagen_markierungen",
+                                 "absagen_liste"])
+    return ok
 
 
 def _zahlungs_index(pdf: pd.DataFrame) -> dict:
@@ -6335,76 +7077,113 @@ def _dash_monat():
 
 
 def _dash_auslastung():
-    tage = verfuegbare_tage()
-    if not tage:
-        box("Noch keine Daten.", "warn")
+    slots_da = not belegte_slots().empty
+    if not slots_da:
+        box("Noch keine Buchungsdaten für die heutige Anlage.", "warn")
         return
 
-    monate = sorted({t[:7] for t in tage}, reverse=True)
-    wahl = st.selectbox("Zeitraum", ["Alle Daten"] + monate,
-                        format_func=lambda m: m if m == "Alle Daten"
-                        else f"{MONATE_DE[int(m[5:7])-1]} {m[:4]}")
-    monat = None if wahl == "Alle Daten" else wahl
+    c1, c2, c3 = st.columns([2, 2, 2])
+    with c1:
+        bereich = st.selectbox(
+            "Zeitraum", ["Seit Standortwechsel", "Letzte 4 Wochen",
+                         "Letzte 8 Wochen", "Letzte 12 Wochen"],
+            key="al_zeit")
+    with c2:
+        wahl_court = st.selectbox("Court", ["Alle Courts"] + courts_liste(),
+                                  key="al_court")
+    with c3:
+        anzeige = st.radio("Anzeige", ["Auslastung %", "Buchungen"],
+                           horizontal=True, key="al_modus")
 
-    matrix = auslastung_matrix(monat)
-    if matrix.empty:
-        box("Zu wenig Daten für die Auslastung.", "info")
+    heute = date.today()
+    wochen = {"Letzte 4 Wochen": 28, "Letzte 8 Wochen": 56,
+              "Letzte 12 Wochen": 84}.get(bereich)
+    von = str(heute - timedelta(days=wochen)) if wochen else None
+    court = None if wahl_court == "Alle Courts" else wahl_court
+
+    raster = auslastung_raster(von, None, court)
+    if not raster:
+        box("Für diesen Zeitraum liegen keine Buchungen vor.", "info")
         return
-
-    box("Je heller das Feld, desto mehr Buchungen. Dunkle Felder in der "
-        "Prime-Time sind ungenutzte Zeit — dort lohnen sich Events, Kurse "
-        "oder Aktionen.", "info")
 
     stunden = list(range(CONFIG["oeffnung_von"], CONFIG["oeffnung_bis"]))
-    z = [[0] * len(stunden) for _ in range(7)]
-    for _, r in matrix.iterrows():
-        wt, std = int(r["_wochentag"]), int(r["_stunde"])
-        if 0 <= wt < 7 and std in stunden:
-            z[wt][stunden.index(std)] = int(r["anzahl"])
+    prozente = anzeige.startswith("Auslastung")
+    quelle = raster["quote"] if prozente else raster["buchungen"]
 
+    z = [[quelle.get((wt, std), 0) for std in stunden] for wt in range(7)]
+    # Wochentage ohne einen einzigen Tag im Zeitraum bleiben leer statt 0 %
+    for wt in range(7):
+        if not raster["tage"].get(wt):
+            z[wt] = [None] * len(stunden)
+
+    einheit = "%" if prozente else " Buchungen"
     fig = go.Figure(go.Heatmap(
-        z=z,
-        x=[f"{s}:00" for s in stunden],
-        y=WOCHENTAGE_KURZ,
-        colorscale=[[0, C["ink2"]], [0.45, C["blue"]], [1, C["volt"]]],
-        hovertemplate="%{y} %{x}<br>%{z} Buchungen<extra></extra>",
-        showscale=False,
+        z=z, x=[f"{s}:00" for s in stunden], y=WOCHENTAGE_KURZ,
+        colorscale=[[0, C["ink2"]], [0.20, C["anthracite"]],
+                    [0.50, C["blue_soft"]], [0.75, C["volt_dim"]],
+                    [1, C["volt"]]],
+        zmin=0, zmax=100 if prozente else None,
+        hovertemplate="%{y} %{x}<br>%{z}" + einheit + "<extra></extra>",
+        showscale=False, xgap=2, ygap=2,
     ))
-    fig.update_layout(height=310, margin=dict(l=8, r=8, t=20, b=8),
-                      plot_bgcolor="white", paper_bgcolor="white",
+    fig.update_layout(height=330, margin=dict(l=8, r=8, t=16, b=8),
+                      plot_bgcolor=C["ink0"], paper_bgcolor=C["ink0"],
                       font=dict(color=C["text"], size=12))
     st.plotly_chart(fig, use_container_width=True)
 
-    # ── Beste und schwächste Slots ──────────────────────────────────────
-    flach = []
-    for wt in range(7):
-        for i, std in enumerate(stunden):
-            flach.append({"wt": wt, "std": std, "n": z[wt][i]})
-    fdf = pd.DataFrame(flach)
+    tage_gesamt = sum(raster["tage"].values())
+    st.caption(f"{raster['von']} bis {raster['bis']} · {tage_gesamt} Tage · "
+               f"{raster['courts']} Court{'s' if raster['courts'] > 1 else ''} · "
+               "grau leer, blau mittel, gelb voll")
 
-    top = fdf.nlargest(5, "n")
-    prime = fdf[(fdf["std"] >= 16) & (fdf["n"] == 0)]
+    # ── Kennzahlen ──────────────────────────────────────────────────────
+    quoten = list(raster["quote"].values())
+    prime = [q for (wt, std), q in raster["quote"].items() if std >= 17]
+    schwach = sorted(((q, wt, std) for (wt, std), q in raster["quote"].items()
+                      if std >= 16), key=lambda x: x[0])
+    k1, k2, k3 = st.columns(3)
+    with k1:
+        kapazitaet = raster["courts"] * 60.0 * tage_gesamt * OEFFNUNGSSTUNDEN
+        kpi("Auslastung gesamt",
+            f"{sum(raster['minuten'].values()) / max(kapazitaet, 1) * 100:.0f} %",
+            f"über alle {OEFFNUNGSSTUNDEN} Öffnungsstunden")
+    with k2:
+        kpi("Prime-Time ab 17 Uhr",
+            f"{(sum(prime) / len(prime)) if prime else 0:.0f} %",
+            "hier verdient die Halle")
+    with k3:
+        if schwach:
+            q, wt, std = schwach[0]
+            kpi("Schwächster Abendslot", f"{WOCHENTAGE_KURZ[wt]} {std}:00",
+                f"nur {q:.0f} % belegt")
 
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("**Stärkste Slots**")
-        for _, r in top.iterrows():
-            if r["n"] > 0:
-                st.markdown(f"<div class='pc-row'><span class='nm'>"
-                            f"{WOCHENTAGE_DE[int(r['wt'])]} {int(r['std'])}:00</span>"
-                            f"<span class='mt'>{int(r['n'])} Buchungen</span></div>",
-                            unsafe_allow_html=True)
-    with c2:
-        st.markdown("**Leere Prime-Time-Slots**")
-        if prime.empty:
-            st.caption("Keine — Prime-Time läuft überall.")
-        else:
-            st.caption(f"{len(prime)} Slots ab 16 Uhr ohne einzige Buchung.")
-            for _, r in prime.head(5).iterrows():
-                st.markdown(f"<div class='pc-row'><span class='nm'>"
-                            f"{WOCHENTAGE_DE[int(r['wt'])]} {int(r['std'])}:00</span>"
-                            f"<span class='mt'>leer</span></div>",
-                            unsafe_allow_html=True)
+    # ── Detail zu einer Zelle ───────────────────────────────────────────
+    #
+    # Plotly-Klicks liefert Streamlit nicht zurück, deshalb zwei
+    # Auswahlfelder statt einer anklickbaren Zelle — dasselbe Ergebnis,
+    # nur ohne Rätselraten, welche Zelle getroffen wurde.
+    st.markdown("")
+    st.markdown("##### 🔍 Slot ansehen")
+    d1, d2 = st.columns(2)
+    with d1:
+        wt_wahl = st.selectbox("Wochentag", list(range(7)),
+                               format_func=lambda i: WOCHENTAGE_DE[i],
+                               key="al_wt")
+    with d2:
+        std_wahl = st.selectbox("Uhrzeit", stunden,
+                                index=min(len(stunden) - 1, max(0, 19 - stunden[0])),
+                                format_func=lambda s: f"{s}:00 Uhr", key="al_std")
+
+    q = raster["quote"].get((wt_wahl, std_wahl), 0.0)
+    n = raster["buchungen"].get((wt_wahl, std_wahl), 0)
+    st.markdown(f"**{WOCHENTAGE_DE[wt_wahl]} {std_wahl}:00** — "
+                f"{q:.0f} % belegt, {n} Buchungen im Zeitraum")
+
+    detail = auslastung_slot(wt_wahl, std_wahl, von, None, court)
+    if detail.empty:
+        box("In diesem Slot wurde im gewählten Zeitraum nie gespielt.", "info")
+    else:
+        st.dataframe(detail, use_container_width=True, hide_index=True)
 
     # ── Handlungsvorschläge ──────────────────────────────────────────────
     #
@@ -6980,8 +7759,9 @@ def _dash_einnahmen():
 
 def modul_dashboard():
     head("Business Dashboard", "Umsatz · Auslastung · Abgleich")
-    t1, t2, t3, t4, t5 = st.tabs(["📅 Tag", "💰 Einnahmen", "📈 Monat",
-                                  "🔥 Auslastung", "⚖️ Monatsabgleich"])
+    t1, t2, t3, t4, t5, t6 = st.tabs(["📅 Tag", "💰 Einnahmen", "📈 Monat",
+                                      "📊 Auslastung", "⚖️ Monatsabgleich",
+                                      "🌦 Wetter"])
     with t1:
         _dash_tag()
     with t2:
@@ -6992,6 +7772,100 @@ def modul_dashboard():
         _dash_auslastung()
     with t5:
         _dash_abgleich()
+    with t6:
+        _dash_wetter()
+
+
+def _dash_wetter():
+    """Wetterlage gegen Buchungsaufkommen."""
+    box("Padel ist Indoor — trotzdem entscheidet das Wetter mit, ob jemand "
+        "am Sonntag in die Halle fährt oder an den See. Die Daten kommen "
+        "von Open-Meteo und werden einmal täglich geholt.", "info")
+
+    wetter = wetter_daten()
+    c1, c2 = st.columns([3, 1])
+    with c2:
+        if st.button("🔄 Wetter aktualisieren", use_container_width=True,
+                     key="wetter_neu"):
+            with st.spinner("Hole Wetterdaten …"):
+                anzahl = wetter_aktualisieren(erzwingen=True)
+            if anzahl:
+                st.toast(f"{anzahl} Tage gespeichert.")
+                st.rerun()
+            else:
+                grund = st.session_state.get("_wetter_fehler", "")
+                st.warning("Open-Meteo antwortet gerade nicht — der letzte "
+                           "Stand bleibt stehen."
+                           + (f"\n\nGrund: {grund}" if grund else ""))
+                if "CERTIFICATE" in grund.upper():
+                    st.caption("Das ist kein Ausfall des Dienstes, sondern "
+                               "ein fehlender Zertifikatsspeicher der "
+                               "Python-Installation. Auf Streamlit Cloud "
+                               "tritt das nicht auf.")
+    with c1:
+        if wetter.empty:
+            st.caption("Noch keine Wetterdaten im Blatt.")
+        else:
+            stand = max((str(x)[:10] for x in wetter.get("timestamp", [])
+                         if str(x)), default="—")
+            st.caption(f"{len(wetter)} Tage gespeichert · zuletzt geholt am "
+                       f"{datum_kurz(stand) if stand != '—' else '—'}")
+
+    if wetter.empty:
+        box("Noch nichts geholt — ein Klick auf „Wetter aktualisieren\" "
+            "lädt die letzten 92 Tage und die Vorhersage.", "warn")
+        return
+
+    # ── Vorhersage und Marketing-Hinweis ────────────────────────────────
+    hinweise = wetter_hinweise()
+    if hinweise:
+        st.markdown("##### 📣 Die nächsten Tage")
+        for h in hinweise[:4]:
+            art = "warn" if h["wochenende"] else "info"
+            box(f"**{datum_kurz(h['datum'])} · {h['lage']}** — {h['text']}", art)
+    else:
+        box("Für die nächsten Tage ist nichts gemeldet, was eine Aktion "
+            "nahelegt.", "ok")
+
+    # ── Verlauf ─────────────────────────────────────────────────────────
+    zeitraum = st.selectbox("Zeitraum", [30, 60, 90], index=2,
+                            format_func=lambda t: f"letzte {t} Tage",
+                            key="wetter_zeit")
+    verlauf, tabelle = wetter_korrelation(zeitraum)
+    if verlauf.empty:
+        box("Noch zu wenig Überschneidung zwischen Wetter- und "
+            "Buchungsdaten.", "info")
+        return
+
+    st.markdown("")
+    st.markdown("##### Buchungen und Temperatur")
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=verlauf["datum"], y=verlauf["buchungen"],
+                         name="Buchungen", marker_color=C["blue_soft"]))
+    fig.add_trace(go.Scatter(x=verlauf["datum"], y=verlauf["t_max"],
+                             name="Höchsttemperatur", yaxis="y2",
+                             mode="lines", line=dict(color=C["volt"], width=2)))
+    fig.update_layout(
+        yaxis2=dict(overlaying="y", side="right", title="°C",
+                    showgrid=False, color=C["dim"]))
+    st.plotly_chart(plotly_layout(fig, 340, "Buchungen"),
+                    use_container_width=True)
+
+    # ── Tabelle ─────────────────────────────────────────────────────────
+    st.markdown("##### Was das Wetter ausmacht")
+    zeig = tabelle.copy()
+    zeig["ggü. Schnitt"] = zeig["ggü. Schnitt"].map(lambda x: f"{x:+.0f} %")
+    zeig["Sicherheit"] = zeig["belastbar"].map(
+        lambda b: "belastbar" if b else "zu wenig Tage")
+    st.dataframe(zeig[["Wetterlage", "Tage", "Ø Buchungen", "ggü. Schnitt",
+                       "Ø Temperatur", "Sicherheit"]],
+                 use_container_width=True, hide_index=True)
+
+    duenn = int((~tabelle["belastbar"]).sum())
+    if duenn:
+        st.caption(f"{duenn} von {len(tabelle)} Zeilen stehen auf weniger als "
+                   "zehn Tagen — die Prozentwerte dort sind noch Zufall, "
+                   "nicht Erkenntnis. Das wächst mit jedem Monat.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -7440,6 +8314,32 @@ def ist_zweitbuchung(name_norm: str, datum: str) -> bool:
     """
     return (rabattierte_buchungen_am(name_norm, datum) >= 2
             and checkins_von_am(name_norm, datum) > 0)
+
+
+def absage_nachricht(name: str, absagen: int, kurzfristig: int) -> str:
+    """
+    Freundlicher Hinweis bei häufigen Kurzabsagen.
+
+    Bewusst ohne Vorwurf und ohne Zahlenkeule: Der Ton entscheidet, ob
+    jemand sein Verhalten ändert oder wegbleibt. Genannt wird nur, was
+    stimmt, und der Grund, warum es weh tut — der Platz stand leer.
+    """
+    vorname = name.split()[0] if " " in name else name
+    wie_oft = ("ein paar Mal" if kurzfristig <= 2
+               else f"{kurzfristig} Mal")
+    return f"""🔵 Hey {vorname}!
+
+Schön, dass du regelmässig bei uns spielst. ⚡
+
+Eine kleine Bitte: In letzter Zeit hat es {wie_oft} sehr kurzfristig
+nicht geklappt. Das ist überhaupt kein Drama — nur bleibt der Platz
+dann meist leer, weil ihn so schnell niemand mehr übernehmen kann.
+
+Wenn du merkst, dass es eng wird: Sag einfach früher ab, dann geben
+wir den Platz weiter. Alles andere passt. 👍
+
+⚡ Once in. Never out.
+Dein {CONFIG['name']} Team"""
 
 
 def zweitbuchung_nachricht(name: str, datum: str, zeit: str = "",
@@ -9082,6 +9982,98 @@ def _an_wellpass():
                    "auch in keiner Wellpass-Kontrolle auf.")
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#   🏆  MODUL · CIRCLE POINTS
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def modul_punkte():
+    head("Circle Points", "Ein Punkt je Spieltag")
+
+    monate = circle_points_monate()
+    if not monate:
+        box("Noch keine Daten — lade zuerst einen Tag in der Daten-Zentrale "
+            "hoch.", "warn")
+        return
+
+    c1, c2 = st.columns([2, 3])
+    with c1:
+        monat = st.selectbox(
+            "Monat", monate, key="cp_monat",
+            format_func=lambda m: f"{MONATE_DE[int(m[5:7]) - 1]} {m[:4]}")
+    with c2:
+        box("Ein Punkt für jeden Tag, an dem jemand gespielt hat. Zweimal am "
+            "selben Tag zählt einmal. Wellpass und Selbstzahler stehen "
+            "gleich — gezählt wird, dass jemand da war.", "info")
+
+    rang = circle_points(monat)
+    if rang.empty:
+        box("In diesem Monat wurde nichts gespielt.", "info")
+        return
+
+    laufend = monat == date.today().strftime("%Y-%m")
+    k1, k2, k3 = st.columns(3)
+    with k1:
+        kpi("Spieler im Monat", str(len(rang)))
+    with k2:
+        kpi("Punkte vergeben", str(int(rang["Punkte"].sum())))
+    with k3:
+        kpi("Spitzenreiter", f"{int(rang['Punkte'].iloc[0])} Punkte",
+            str(rang["Name"].iloc[0]))
+    if laufend:
+        st.caption("Laufender Monat — der Stand wächst noch bis zum Monatsende.")
+
+    # ── Top 20 ──────────────────────────────────────────────────────────
+    st.markdown("")
+    st.markdown("##### Rangliste")
+    top = rang.head(20)
+    for _, r in top.iterrows():
+        platz = int(r["Rang"])
+        zeichen = MEDAILLEN[platz - 1] if platz <= 3 else f"{platz}."
+        st.markdown(
+            f"<div class='pc-row'><span class='nm'>{zeichen} {r['Name']}</span>"
+            f"<span class='mt'>{int(r['Punkte'])} Punkte · zuletzt "
+            f"{datum_kurz(str(r['Letzter Besuch']))}</span></div>",
+            unsafe_allow_html=True)
+
+    if len(rang) > 20:
+        with st.expander(f"Alle {len(rang)} Spieler anzeigen"):
+            st.dataframe(rang[["Rang", "Name", "Punkte", "Letzter Besuch"]],
+                         use_container_width=True, hide_index=True)
+
+    st.download_button(
+        "⬇️ Rangliste als CSV",
+        data=rang[["Rang", "Name", "Punkte", "Letzter Besuch"]]
+            .to_csv(index=False, sep=";").encode("utf-8-sig"),
+        file_name=f"circle_points_{monat}.csv", mime="text/csv",
+        use_container_width=True)
+
+    # ── Einzelner Spieler ───────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("##### Einzelner Spieler")
+    wahl = st.selectbox("Spieler", list(rang["Name"]), key="cp_spieler")
+    treffer = rang[rang["Name"] == wahl]
+    if treffer.empty:
+        return
+    nn = str(treffer["Name_norm"].iloc[0])
+
+    verlauf = circle_points_verlauf(nn)
+    if verlauf.empty:
+        return
+
+    s1, s2 = st.columns(2)
+    with s1:
+        kpi("Punkte diesen Monat", str(int(treffer["Punkte"].iloc[0])),
+            f"Rang {int(treffer['Rang'].iloc[0])} von {len(rang)}")
+    with s2:
+        kpi("Summe über alle Monate", str(int(verlauf["Punkte"].sum())))
+
+    fig = go.Figure(go.Bar(
+        x=[f"{MONATE_DE[int(m[5:7]) - 1][:3]} {m[2:4]}" for m in verlauf["Monat"]],
+        y=verlauf["Punkte"], marker_color=C["volt"]))
+    st.plotly_chart(plotly_layout(fig, 260, "Punkte"), use_container_width=True)
+
+
 def modul_analysen():
     head("Analysen", "Was hinter den Zahlen steht")
 
@@ -9171,8 +10163,9 @@ def modul_whatsapp():
         box("Der Wellpass-QR-Link fehlt — die Nachrichten gehen ohne QR raus.",
             "info")
 
-    t1, t2, t3, t4, t5 = st.tabs(["📅 Tagesarbeit", "🔍 Zuordnung prüfen",
-                                  "✅ Erledigt", "📊 Übersicht", "📜 Protokoll"])
+    t1, t2, t3, t4, t5, t6 = st.tabs(["📅 Tagesarbeit", "🔍 Zuordnung prüfen",
+                                      "✅ Erledigt", "📊 Übersicht",
+                                      "📜 Protokoll", "⚠️ Auffällige Spieler"])
 
     with t1:
         _wa_tagesarbeit()
@@ -9226,33 +10219,139 @@ def modul_whatsapp():
 
     # ── Protokoll ───────────────────────────────────────────────────────
     with t5:
-        log = loadsheet("whatsapp_log", SHEET_SPALTEN["whatsapp_log"])
-        if log.empty:
-            box("Noch nichts versendet.", "info")
+        _wa_protokoll()
+
+    with t6:
+        _wa_auffaellige()
+
+
+def _wa_protokoll():
+    """
+    Versandprotokoll.
+
+    Stand früher direkt im Reiter und verliess bei leerem Protokoll per
+    `return` das ganze Modul — der nachfolgende Reiter blieb dann leer.
+    """
+    log = loadsheet("whatsapp_log", SHEET_SPALTEN["whatsapp_log"])
+    if log.empty:
+        box("Noch nichts versendet.", "info")
+        return
+
+    log = log.copy()
+    log["_ts"] = pd.to_datetime(log["timestamp"], errors="coerce")
+    log = log.sort_values("_ts", ascending=False)
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        kpi("Gesendet gesamt", str(len(log)))
+    with c2:
+        letzte7 = int((log["_ts"] >= datetime.now() - timedelta(days=7)).sum())
+        kpi("Letzte 7 Tage", str(letzte7))
+    with c3:
+        arten = log["art"].value_counts().to_dict() if "art" in log.columns else {}
+        kpi("Reminder", str(arten.get("reminder", 0)))
+
+    st.markdown("")
+    spalten = [c for c in ["name", "datum", "art", "timestamp"]
+               if c in log.columns]
+    zeig = log[spalten].head(150).copy()
+    zeig.columns = [{"name": "Spieler", "datum": "Spieltag",
+                     "art": "Art", "timestamp": "Gesendet"}.get(c, c)
+                    for c in spalten]
+    st.dataframe(zeig, use_container_width=True, hide_index=True, height=420)
+
+
+def _wa_auffaellige():
+    """Wer sagt auffällig oft kurzfristig ab?"""
+    box("Absagen aus den Zahlungsdaten: Jede Erstattung verrät, wann "
+        "storniert wurde. Je kürzer der Vorlauf, desto schwerer wiegt es — "
+        "ein Platz, der zwei Stunden vorher frei wird, bleibt meist leer.",
+        "info")
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        zeitraum = st.selectbox("Zeitraum", [30, 90, 180, 365], index=1,
+                                format_func=lambda t: f"letzte {t} Tage",
+                                key="auf_zeit")
+    with c2:
+        mindest = st.selectbox("Ab wie vielen Absagen?", [2, 3, 4, 5], index=0,
+                               key="auf_min")
+    with c3:
+        nur_stamm = st.checkbox("Nur Stammkunden (ab 10 Slots)",
+                                key="auf_stamm")
+
+    liste = absagen_liste(zeitraum, mindest)
+    if liste.empty:
+        box("Niemand fällt auf — im gewählten Zeitraum gibt es keine "
+            "Häufung von Absagen.", "ok")
+        return
+
+    if nur_stamm:
+        liste = liste[liste["Slots"] >= 10].reset_index(drop=True)
+        if liste.empty:
+            box("Unter den Stammkunden fällt niemand auf.", "ok")
             return
 
-        log = log.copy()
-        log["_ts"] = pd.to_datetime(log["timestamp"], errors="coerce")
-        log = log.sort_values("_ts", ascending=False)
+    kurz = liste[liste["kurzfristig"] > 0]
+    k1, k2, k3 = st.columns(3)
+    with k1:
+        kpi("Auffällige Spieler", str(len(liste)))
+    with k2:
+        kpi("mit Kurzabsage", str(len(kurz)), "unter 24 Stunden vorher")
+    with k3:
+        kpi("Absagen gesamt", str(int(liste["Absagen"].sum())))
 
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            kpi("Gesendet gesamt", str(len(log)))
-        with c2:
-            letzte7 = int((log["_ts"] >= datetime.now() - timedelta(days=7)).sum())
-            kpi("Letzte 7 Tage", str(letzte7))
-        with c3:
-            arten = log["art"].value_counts().to_dict() if "art" in log.columns else {}
-            kpi("Reminder", str(arten.get("reminder", 0)))
+    markiert = absagen_markierungen()
 
-        st.markdown("")
-        spalten = [c for c in ["name", "datum", "art", "timestamp"]
-                   if c in log.columns]
-        zeig = log[spalten].head(150).copy()
-        zeig.columns = [{"name": "Spieler", "datum": "Spieltag",
-                         "art": "Art", "timestamp": "Gesendet"}.get(c, c)
-                        for c in spalten]
-        st.dataframe(zeig, use_container_width=True, hide_index=True, height=420)
+    st.markdown("")
+    for i, (_, r) in enumerate(liste.head(40).iterrows()):
+        nn = str(r["Name_norm"])
+        ampel = ("🔴" if r["Score"] >= 0.30 else
+                 "🟠" if r["Score"] >= 0.15 else "🟡")
+        vermerk = markiert.get(nn, "")
+
+        with st.container(border=True):
+            z1, z2 = st.columns([3, 2])
+            with z1:
+                st.markdown(f"**{ampel} {r['Name']}**"
+                            + (" · 💳 Vorauszahlung" if vermerk == "vorauszahlung"
+                               else ""))
+                st.caption(
+                    f"{int(r['Slots'])} Slots · {int(r['Absagen'])} Absagen "
+                    f"({r['Quote']:.0f} %) · davon <24 h: {int(r['<24h'])} · "
+                    f"<2 h: {int(r['<2h'])} · nach Beginn: "
+                    f"{int(r['nach Beginn'])}")
+            with z2:
+                b1, b2 = st.columns(2)
+                with b1:
+                    if vermerk == "vorauszahlung":
+                        if st.button("Vorauszahlung lösen", key=f"auf_l{i}",
+                                     use_container_width=True):
+                            absage_markierung_loesen(nn)
+                            st.rerun()
+                    elif st.button("💳 Vorauszahlung", key=f"auf_v{i}",
+                                   use_container_width=True):
+                        absage_markieren(nn, str(r["Name"]), "vorauszahlung")
+                        st.rerun()
+                with b2:
+                    if st.button("Ignorieren", key=f"auf_i{i}",
+                                 use_container_width=True):
+                        absage_markieren(nn, str(r["Name"]), "ignoriert")
+                        st.rerun()
+
+            if r["kurzfristig"] > 0:
+                with st.expander("💬 Freundlicher Hinweis zum Kopieren"):
+                    st.code(absage_nachricht(str(r["Name"]),
+                                             int(r["Absagen"]),
+                                             int(r["kurzfristig"])),
+                            language=None)
+
+    if len(liste) > 40:
+        st.caption(f"… und {len(liste) - 40} weitere.")
+
+    st.caption("Die Absage hängt am Zahler der Buchung. Wer für vier bucht "
+               "und absagt, erscheint hier einmal, nicht viermal — als "
+               "Rangliste taugt das, als exakte Quote je Person nicht.")
 
 
 
@@ -10401,6 +11500,9 @@ MODULE = [
     {"id": "analysen",  "ic": "🔬", "ti": "Analysen",
      "de": "Bindung, Netzwerk, Wirtschaftlichkeit", "an": True,
      "fn": lambda: modul_analysen()},
+    {"id": "punkte",    "ic": "🏆", "ti": "Circle Points",
+     "de": "Rangliste nach Spieltagen", "an": True,
+     "fn": lambda: modul_punkte()},
 ]
 
 
