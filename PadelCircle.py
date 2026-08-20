@@ -19,6 +19,7 @@ from rapidfuzz import fuzz
 from datetime import datetime, date, timedelta
 from calendar import monthrange
 from functools import lru_cache
+import ssl
 import urllib.request
 import urllib.parse
 import time
@@ -28,6 +29,7 @@ import secrets
 import json
 import hashlib
 
+import certifi
 import gspread
 from gspread.utils import numericise
 from google.oauth2.service_account import Credentials
@@ -3607,6 +3609,22 @@ def spieler_segmente() -> pd.DataFrame:
 WETTER_URL = "https://api.open-meteo.com/v1/forecast"
 
 
+def _ssl_kontext():
+    """
+    Zertifikate für den Wetter-Abruf.
+
+    Auf Streamlit Cloud reicht der Standard. Lokal auf macOS scheitert er
+    oft mit CERTIFICATE_VERIFY_FAILED — die python.org-Installation bringt
+    keinen Zertifikatsspeicher mit, solange „Install Certificates.command"
+    nicht gelaufen ist. `certifi` liegt ohnehin bei (gspread und google-auth
+    hängen daran), also wird es als Rückfallebene genommen.
+    """
+    try:
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return None
+
+
 def _wetter_lage(code, regen_mm) -> str:
     """WMO-Wettercode in eine Lage übersetzen, die man vorlesen kann."""
     try:
@@ -3650,7 +3668,8 @@ def wetter_abrufen(rueckblick: int = 92, vorhersage: int = 7) -> pd.DataFrame:
         "forecast_days": max(1, min(16, int(vorhersage))),
     })
     try:
-        with urllib.request.urlopen(f"{WETTER_URL}?{frage}", timeout=12) as antwort:
+        with urllib.request.urlopen(f"{WETTER_URL}?{frage}", timeout=15,
+                                    context=_ssl_kontext()) as antwort:
             daten = json.loads(antwort.read().decode("utf-8"))
     except Exception as e:
         # Den Grund merken statt stumm zu scheitern. Der häufigste Fall ist
@@ -3682,13 +3701,22 @@ def _wetter_aufbereiten(daten: dict) -> pd.DataFrame:
 
     zeilen = []
     for i, tag in enumerate(tage):
+        werte = (hol(codes, i), hol(tmax, i), hol(tmin, i), hol(regen, i))
+        # Open-Meteo liefert für `past_days` die angeforderte Spanne auch
+        # dann als Zeilen, wenn das Modellarchiv gar nicht so weit
+        # zurückreicht — dann stehen in allen Feldern None. Bei 90 Tagen
+        # Rückfrage waren das die ältesten 23 Tage. Die als „unbekannt"
+        # abzulegen, würde eine eigene Wetterlage erfinden, die es nicht
+        # gibt, und die Auswertung verwässern.
+        if all(w is None for w in werte):
+            continue
         zeilen.append({
             "datum": str(tag),
-            "code": hol(codes, i),
-            "lage": _wetter_lage(hol(codes, i), hol(regen, i)),
-            "t_max": hol(tmax, i),
-            "t_min": hol(tmin, i),
-            "regen_mm": hol(regen, i),
+            "code": werte[0],
+            "lage": _wetter_lage(werte[0], werte[3]),
+            "t_max": werte[1],
+            "t_min": werte[2],
+            "regen_mm": werte[3],
             "art": "vorhersage" if str(tag) > heute else "ist",
             "timestamp": datetime.now().isoformat(timespec="seconds"),
         })
@@ -7129,7 +7157,33 @@ def _dash_auslastung():
     fig.update_layout(height=330, margin=dict(l=8, r=8, t=16, b=8),
                       plot_bgcolor=C["ink0"], paper_bgcolor=C["ink0"],
                       font=dict(color=C["text"], size=12))
-    st.plotly_chart(fig, use_container_width=True)
+
+    # Zelle anklickbar. Streamlit gibt Plotly-Auswahlen seit 1.35 direkt
+    # zurück — dafür braucht es keine Zusatzkomponente. Ältere Fassungen
+    # kennen `on_select` nicht; dann bleibt die Heatmap eben nur zum
+    # Ansehen und die Auswahlfelder unten machen dieselbe Arbeit.
+    klick_wt, klick_std = None, None
+    try:
+        auswahl = st.plotly_chart(fig, use_container_width=True,
+                                  key="al_heatmap", on_select="rerun",
+                                  selection_mode="points")
+        punkte = ((auswahl or {}).get("selection") or {}).get("points") or []
+        if punkte:
+            y = str(punkte[0].get("y", ""))
+            if y in WOCHENTAGE_KURZ:
+                klick_wt = WOCHENTAGE_KURZ.index(y)
+            treffer = re.match(r"(\d{1,2}):", str(punkte[0].get("x", "")))
+            if treffer:
+                klick_std = int(treffer.group(1))
+    except TypeError:
+        st.plotly_chart(fig, use_container_width=True)
+
+    # Der Klick setzt die Auswahlfelder — vor deren Erzeugung, sonst
+    # gewinnt der zuletzt von Hand gewählte Wert.
+    if klick_wt is not None:
+        st.session_state["al_wt"] = klick_wt
+    if klick_std is not None and klick_std in stunden:
+        st.session_state["al_std"] = klick_std
 
     tage_gesamt = sum(raster["tage"].values())
     st.caption(f"{raster['von']} bis {raster['bis']} · {tage_gesamt} Tage · "
@@ -7164,14 +7218,16 @@ def _dash_auslastung():
     # nur ohne Rätselraten, welche Zelle getroffen wurde.
     st.markdown("")
     st.markdown("##### 🔍 Slot ansehen")
+    st.caption("Klick in die Heatmap wählt den Slot aus — oder hier von Hand.")
     d1, d2 = st.columns(2)
     with d1:
         wt_wahl = st.selectbox("Wochentag", list(range(7)),
                                format_func=lambda i: WOCHENTAGE_DE[i],
                                key="al_wt")
     with d2:
+        if "al_std" not in st.session_state:
+            st.session_state["al_std"] = 19 if 19 in stunden else stunden[0]
         std_wahl = st.selectbox("Uhrzeit", stunden,
-                                index=min(len(stunden) - 1, max(0, 19 - stunden[0])),
                                 format_func=lambda s: f"{s}:00 Uhr", key="al_std")
 
     q = raster["quote"].get((wt_wahl, std_wahl), 0.0)
@@ -8062,8 +8118,8 @@ def _winback():
 
 def modul_spieler():
     head("Spieler & Community", "Rangliste · Vielspieler · Rückholung")
-    t1, t2, t3, t4 = st.tabs(["🏆 Rangliste", "⭐ Vielspieler", "🔄 Rückholung",
-                              "🔎 Analysen"])
+    t1, t2, t3, t4, t5 = st.tabs(["🏆 Rangliste", "⭐ Vielspieler", "🔄 Rückholung",
+                                  "🔎 Analysen", "👤 Einzelner Spieler"])
     with t1:
         _spieler_rangliste()
     with t2:
@@ -8072,6 +8128,89 @@ def modul_spieler():
         _winback()
     with t4:
         _spieler_analysen()
+    with t5:
+        _spieler_profil()
+
+
+def _spieler_profil():
+    """Alles zu einer Person auf einen Blick — samt Circle Points."""
+    monate = circle_points_monate()
+    if not monate:
+        box("Noch keine Daten.", "warn")
+        return
+
+    aktuell = circle_points(monate[0])
+    # `spieler_statistik` führt den Anzeigenamen in „Name" und kennt kein
+    # `name_norm` — der Abgleich läuft deshalb über normalize_name.
+    stat = spieler_statistik()
+    namen = sorted(set(aktuell["Name"])) if not aktuell.empty else []
+    if not stat.empty and "Name" in stat.columns:
+        namen = sorted(set(namen)
+                       | set(stat[~stat["team"]]["Name"].astype(str)))
+    if not namen:
+        box("Noch keine Spieler erfasst.", "info")
+        return
+
+    wahl = st.selectbox("Spieler", namen, key="prof_spieler")
+    nn = normalize_name(wahl)
+
+    # ── Circle Points ───────────────────────────────────────────────────
+    st.markdown("##### 🏆 Circle Points")
+    treffer = aktuell[aktuell["Name_norm"] == nn] if not aktuell.empty \
+        else pd.DataFrame()
+    verlauf = circle_points_verlauf(nn, 6)
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        kpi("Punkte diesen Monat",
+            str(int(treffer["Punkte"].iloc[0])) if not treffer.empty else "0",
+            f"{MONATE_DE[int(monate[0][5:7]) - 1]} {monate[0][:4]}")
+    with c2:
+        kpi("Rang",
+            f"{int(treffer['Rang'].iloc[0])} von {len(aktuell)}"
+            if not treffer.empty else "—")
+    with c3:
+        kpi("Summe letzte 6 Monate",
+            str(int(verlauf["Punkte"].sum())) if not verlauf.empty else "0")
+
+    if not verlauf.empty:
+        fig = go.Figure(go.Bar(
+            x=[f"{MONATE_DE[int(m[5:7]) - 1][:3]} {m[2:4]}"
+               for m in verlauf["Monat"]],
+            y=verlauf["Punkte"], marker_color=C["volt"],
+            hovertemplate="%{x}<br>%{y} Punkte<extra></extra>"))
+        st.plotly_chart(plotly_layout(fig, 250, "Punkte"),
+                        use_container_width=True)
+
+    # ── Wellpass und Besuche ────────────────────────────────────────────
+    if not stat.empty and "Name" in stat.columns:
+        person = stat[stat["Name"].map(normalize_name) == nn]
+        if not person.empty:
+            p = person.iloc[0]
+            st.markdown("---")
+            st.markdown("##### Besuche und Wellpass")
+            b1, b2, b3 = st.columns(3)
+            with b1:
+                kpi("Buchungen gesamt", str(int(p.get("buchungen", 0))))
+            with b2:
+                kpi("Wellpass-pflichtig", str(int(p.get("wellpass_pflichtig", 0))))
+            with b3:
+                tage_her = p.get("tage_her")
+                kpi("Zuletzt da",
+                    f"vor {int(tage_her)} Tagen" if pd.notna(tage_her) else "—")
+
+    # ── Absagen ─────────────────────────────────────────────────────────
+    absagen = absagen_liste(180, 1)
+    if not absagen.empty:
+        eigen = absagen[absagen["Name_norm"] == nn]
+        if not eigen.empty:
+            a = eigen.iloc[0]
+            st.markdown("---")
+            st.markdown("##### Absagen")
+            st.caption(f"{int(a['Absagen'])} Absagen bei {int(a['Slots'])} "
+                       f"Slots · davon <24 h: {int(a['<24h'])} · "
+                       f"<2 h: {int(a['<2h'])} · nach Beginn: "
+                       f"{int(a['nach Beginn'])}")
 
 
 def _spieler_analysen():
