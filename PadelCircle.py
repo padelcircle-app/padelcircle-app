@@ -3585,6 +3585,251 @@ def neukunden_je_woche() -> pd.DataFrame:
 
 
 @st.cache_data(ttl=900, show_spinner=False)
+def _buchungsgruppen() -> list:
+    """
+    Jede Buchung als Gruppe der Menschen, die zusammen gespielt haben.
+
+    → [(datum, [name_norm, …]), …]
+
+    Grundlage für alles, was mit Mitspielern zu tun hat. Eine Buchung
+    erkennt man an Tag, Uhrzeit und Court — dieselben drei Angaben, an
+    denen auch das Neuberechnen die Zeilen wieder zusammensetzt.
+    """
+    b = loadsheet("buchungen")
+    noetig = {"analysis_date", "Service_Zeit", "Court", "Name_norm"}
+    if b.empty or not noetig <= set(b.columns):
+        return []
+    df = b[~b["Name_norm"].astype(str).isin(TEAM_NORM)].copy()
+    if df.empty:
+        return []
+    df["_d"] = df["analysis_date"].map(parse_date_safe)
+    df = df[df["_d"].notna()]
+
+    gruppen = []
+    for (_tag, _zeit, _court), g in df.groupby(
+            ["analysis_date", "Service_Zeit", "Court"], sort=False):
+        namen = sorted({str(x) for x in g["Name_norm"]})
+        if len(namen) >= 2:
+            gruppen.append((g["_d"].iloc[0], namen))
+    return gruppen
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def tuerooeffner() -> pd.DataFrame:
+    """
+    Wer bringt neue Leute mit?
+
+    Für jeden Spieler wird sein erster Spieltag gesucht und geschaut,
+    wer an dem Tag mit ihm auf dem Platz stand. Wer dort schon länger
+    dabei war, hat ihn mitgebracht — jedenfalls war er dabei, als der
+    Neue zum ersten Mal kam.
+
+    Das ist die vielleicht wichtigste Zahl im Verein und steht in keiner
+    Umsatzliste: Ein Spieler, der über Monate fünf Leute mitbringt, ist
+    mehr wert als einer, der doppelt so oft allein bucht.
+
+    Kein Beweis, sondern ein Hinweis — wer zufällig im selben Open Match
+    landet, taucht hier genauso auf.
+    """
+    tage_je = spieltage_je_spieler()
+    gruppen = _buchungsgruppen()
+    if not tage_je or not gruppen:
+        return pd.DataFrame()
+    erster_tag, _letzter = _datenstand()
+    if erster_tag is None:
+        return pd.DataFrame()
+
+    # Die Anlaufphase zählt nicht: Dort ist jeder zum „ersten Mal" da.
+    vorlauf = erster_tag + timedelta(days=14)
+    erstbesuch = {nn: tage[0] for nn, tage in tage_je.items()
+                  if tage and tage[0] >= vorlauf}
+    if not erstbesuch:
+        return pd.DataFrame()
+
+    zaehler, mitgebracht = {}, {}
+    for tag, namen in gruppen:
+        neue = [n for n in namen if erstbesuch.get(n) == tag]
+        if not neue:
+            continue
+        etablierte = [n for n in namen
+                      if n not in neue
+                      and tage_je.get(n) and tage_je[n][0] < tag]
+        for pate in etablierte:
+            zaehler[pate] = zaehler.get(pate, 0) + len(neue)
+            mitgebracht.setdefault(pate, []).extend(neue)
+
+    if not zaehler:
+        return pd.DataFrame()
+
+    b = loadsheet("buchungen")
+    anzeige = {}
+    if not b.empty and {"Name_norm", "Name"} <= set(b.columns):
+        anzeige = (b.drop_duplicates(subset=["Name_norm"])
+                   .set_index("Name_norm")["Name"].to_dict())
+
+    zeilen = []
+    for nn, anzahl in zaehler.items():
+        geblieben = sum(1 for neu in set(mitgebracht[nn])
+                        if len(tage_je.get(neu, [])) >= 2)
+        zeilen.append({
+            "Name": str(anzeige.get(nn, nn)),
+            "Neue mitgebracht": anzahl,
+            "davon geblieben": geblieben,
+            "Eigene Besuche": len(tage_je.get(nn, [])),
+        })
+    return (pd.DataFrame(zeilen)
+            .sort_values(["Neue mitgebracht", "davon geblieben"],
+                         ascending=[False, False]))
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def wellpass_vergleich() -> pd.DataFrame:
+    """
+    Spielen Wellpass-Nutzer anders als Selbstzahler?
+
+    Die Frage dahinter ist geschäftlich: Wellpass kostet Platzpreis und
+    bringt eine Vergütung. Ob sich das lohnt, hängt nicht am einzelnen
+    Platz, sondern daran, ob diese Spieler häufiger kommen und länger
+    bleiben. Deshalb wird nach Anteil rabattierter Buchungen gruppiert
+    und je Gruppe verglichen: Besuche, Rhythmus, Verweildauer.
+    """
+    b = loadsheet("buchungen")
+    noetig = {"Name_norm", "analysis_date", "Relevant"}
+    if b.empty or not noetig <= set(b.columns):
+        return pd.DataFrame()
+    df = b[~b["Name_norm"].astype(str).isin(TEAM_NORM)].copy()
+    if df.empty:
+        return pd.DataFrame()
+    df["_d"] = df["analysis_date"].map(parse_date_safe)
+    df = df[df["_d"].notna()]
+
+    zeilen = []
+    for nn, g in df.groupby("Name_norm"):
+        tage = sorted({d for d in g["_d"]})
+        anteil = prozent((g["Relevant"].astype(str) == "Ja").sum(), len(g))
+        gruppe = ("Nur Wellpass" if anteil >= 80 else
+                  "Überwiegend Wellpass" if anteil >= 50 else
+                  "Gemischt" if anteil > 0 else "Nur Selbstzahler")
+        abstaende = [(tage[i + 1] - tage[i]).days for i in range(len(tage) - 1)]
+        zeilen.append({
+            "Gruppe": gruppe,
+            "Besuche": len(tage),
+            "Ø Abstand": (sum(abstaende) / len(abstaende)) if abstaende else None,
+            "Spanne": (tage[-1] - tage[0]).days,
+            "Mehrfach da": len(tage) >= 2,
+        })
+    if not zeilen:
+        return pd.DataFrame()
+
+    roh = pd.DataFrame(zeilen)
+    aus = []
+    for gruppe, g in roh.groupby("Gruppe"):
+        abst = g["Ø Abstand"].dropna()
+        aus.append({
+            "Gruppe": gruppe,
+            "Spieler": len(g),
+            "Ø Besuche": round(float(g["Besuche"].mean()), 1),
+            "Ø Abstand (Tage)": round(float(abst.mean()), 1) if len(abst) else None,
+            "Mehr als einmal da": round(prozent(int(g["Mehrfach da"].sum()), len(g)), 1),
+        })
+    reihenfolge = ["Nur Wellpass", "Überwiegend Wellpass", "Gemischt",
+                   "Nur Selbstzahler"]
+    out = pd.DataFrame(aus)
+    out["_r"] = out["Gruppe"].map(lambda x: reihenfolge.index(x)
+                                  if x in reihenfolge else 9)
+    return out.sort_values("_r").drop(columns=["_r"])
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def zweitbesuch_dauer() -> dict:
+    """
+    Wie schnell kommt jemand nach dem ersten Mal wieder?
+
+    Der Abstand zwischen erstem und zweitem Besuch sagt mehr über die
+    Bindung als jede Gesamtzahl: Wer nach fünf Tagen wiederkommt,
+    bleibt meist; wer nach dreissig kommt, war zufällig da.
+    """
+    tage_je = spieltage_je_spieler()
+    erster_tag, _letzter = _datenstand()
+    if not tage_je or erster_tag is None:
+        return {}
+    vorlauf = erster_tag + timedelta(days=14)
+
+    abstaende, ohne_zweiten = [], 0
+    for _nn, tage in tage_je.items():
+        if not tage or tage[0] < vorlauf:
+            continue
+        if len(tage) < 2:
+            ohne_zweiten += 1
+            continue
+        abstaende.append((tage[1] - tage[0]).days)
+    if not abstaende and not ohne_zweiten:
+        return {}
+
+    reihe = pd.Series(abstaende) if abstaende else pd.Series(dtype=float)
+    stufen = [("innerhalb 7 Tagen", 7), ("8–14 Tage", 14),
+              ("15–30 Tage", 30), ("über 30 Tage", 10**6)]
+    verteilung, vorher = [], 0
+    for label, grenze in stufen:
+        anzahl = int(((reihe > vorher) & (reihe <= grenze)).sum()) if len(reihe) else 0
+        verteilung.append({"Abstand": label, "Spieler": anzahl})
+        vorher = grenze
+    return {
+        "median": float(reihe.median()) if len(reihe) else None,
+        "mit_zweitem": len(abstaende),
+        "ohne_zweiten": ohne_zweiten,
+        "verteilung": pd.DataFrame(verteilung),
+    }
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def platzausnutzung() -> pd.DataFrame:
+    """
+    Wie voll sind die gebuchten Plätze?
+
+    Playtomic berechnet den Court immer voll, egal wie viele Namen
+    eingetragen sind. Buchungen mit zwei Leuten auf einem Doppelcourt
+    kosten den Buchenden also denselben Preis — und blockieren zwei
+    Plätze, die niemand nutzt. Wie oft das vorkommt, ist eine der
+    wenigen Stellschrauben, an denen sich ohne Preiserhöhung etwas
+    bewegen lässt.
+    """
+    b = loadsheet("buchungen")
+    noetig = {"analysis_date", "Service_Zeit", "Court", "Name_norm"}
+    if b.empty or not noetig <= set(b.columns):
+        return pd.DataFrame()
+    df = b.copy()
+    if "Event" in df.columns:
+        df = df[df["Event"].astype(str) != "Ja"]   # Events sind anders belegt
+    if df.empty:
+        return pd.DataFrame()
+
+    zeilen = []
+    for (_t, _z, court), g in df.groupby(
+            ["analysis_date", "Service_Zeit", "Court"], sort=False):
+        besetzt = g["Name_norm"].nunique()
+        plaetze = court_plaetze(str(court))
+        zeilen.append({"besetzt": besetzt, "plaetze": plaetze,
+                       "frei": max(0, plaetze - besetzt)})
+    if not zeilen:
+        return pd.DataFrame()
+
+    roh = pd.DataFrame(zeilen)
+    aus = []
+    for plaetze, g in roh.groupby("plaetze"):
+        art = "Einzelcourt" if plaetze == 2 else "Doppelcourt"
+        for besetzt, gg in g.groupby("besetzt"):
+            aus.append({
+                "Court": art,
+                "Spieler eingetragen": int(besetzt),
+                "Buchungen": len(gg),
+                "Anteil": round(prozent(len(gg), len(g)), 1),
+                "Ungenutzte Plätze": int(gg["frei"].sum()),
+            })
+    return pd.DataFrame(aus).sort_values(["Court", "Spieler eingetragen"])
+
+
+@st.cache_data(ttl=900, show_spinner=False)
 def event_teilnehmer_details(datum: str, event_id: str) -> pd.DataFrame:
     """
     Je Teilnehmer eines Events: war er vorher da, kam er danach wieder?
@@ -8569,6 +8814,153 @@ def _ev_teilnehmer_block(zeile):
         use_container_width=True)
 
 
+def _an_bindung():
+    """Kommen die Leute wieder?"""
+    st.markdown("##### Vom ersten zum zweiten Besuch")
+    box("Der Abstand zwischen erstem und zweitem Besuch sagt mehr über "
+        "Bindung als jede Gesamtzahl. Wer nach fünf Tagen wiederkommt, "
+        "bleibt meistens; wer nach dreissig kommt, war zufällig da.", "info")
+
+    z = zweitbesuch_dauer()
+    if not z:
+        box("Noch zu wenig Verlauf.", "info")
+    else:
+        k1, k2, k3 = st.columns(3)
+        with k1:
+            kpi("Kam wieder", str(z["mit_zweitem"]))
+        with k2:
+            kpi("Blieb einmalig", str(z["ohne_zweiten"]),
+                prozent_text(z["ohne_zweiten"],
+                             z["ohne_zweiten"] + z["mit_zweitem"]))
+        with k3:
+            kpi("Median-Abstand",
+                f"{z['median']:.0f} Tage" if z["median"] is not None else "—")
+        st.markdown("")
+        st.dataframe(z["verteilung"], use_container_width=True, hide_index=True)
+
+    st.markdown("")
+    st.markdown("---")
+    st.markdown("##### Bleiben Neuzugänge? (Kohorten)")
+    box("Von allen Spielern mit erstem Besuch in einer Woche: wie viele "
+        "kamen innerhalb einer, zwei und vier Wochen wieder? Eine einzelne "
+        "Quote sagt wenig — die Reihe zeigt, ob es besser wird. Leere "
+        "Felder heissen: Fenster läuft noch.", "info")
+    kurve = wiederkehr_kurve()
+    if kurve.empty:
+        box("Noch zu wenig Verlauf für eine Kohortenauswertung.", "info")
+    else:
+        st.dataframe(kurve, use_container_width=True, hide_index=True)
+
+    st.markdown("")
+    st.markdown("---")
+    st.markdown("##### Neue Spieler je Woche")
+    neu = neukunden_je_woche()
+    if neu.empty:
+        box("Noch keine Neukundendaten.", "info")
+    else:
+        st.dataframe(neu, use_container_width=True, hide_index=True,
+                     height=min(400, 60 + 35 * len(neu)))
+    st.caption("Die ersten 14 Tage der geladenen Daten zählen nicht mit — "
+               "dort sieht jeder wie ein Neukunde aus, weil sein früherer "
+               "Besuch schlicht nicht geladen ist.")
+
+
+def _an_netzwerk():
+    """Wer bringt wen mit?"""
+    st.markdown("##### Wer bringt neue Leute mit")
+    box("Für jeden neuen Spieler wird geschaut, wer an seinem ersten Tag "
+        "mit ihm auf dem Platz stand. Das ist die vielleicht wichtigste "
+        "Zahl im Verein und steht in keiner Umsatzliste: Wer über Monate "
+        "fünf Leute mitbringt, ist mehr wert als jemand, der doppelt so "
+        "oft allein bucht.", "info")
+
+    tu = tuerooeffner()
+    if tu.empty:
+        box("Noch keine Daten — dafür braucht es Spieler, deren erster "
+            "Besuch im geladenen Zeitraum liegt.", "info")
+        return
+
+    k1, k2 = st.columns(2)
+    with k1:
+        kpi("Spieler mit Neuzugang dabei", str(len(tu)))
+    with k2:
+        kpi("davon geblieben",
+            str(int(tu["davon geblieben"].sum())),
+            prozent_text(int(tu["davon geblieben"].sum()),
+                         int(tu["Neue mitgebracht"].sum())))
+
+    st.markdown("")
+    st.dataframe(tu.head(50), use_container_width=True, hide_index=True,
+                 height=min(600, 60 + 35 * min(len(tu), 50)))
+    st.caption("„Geblieben\u201c heisst: der Mitgebrachte war danach "
+               "mindestens noch ein zweites Mal da. Kein Beweis, sondern "
+               "ein Hinweis — wer zufällig im selben Open Match landet, "
+               "steht hier genauso.")
+    st.download_button(
+        "⬇️ Als CSV",
+        data=tu.to_csv(index=False, sep=";").encode("utf-8-sig"),
+        file_name="tueroeffner.csv", mime="text/csv",
+        use_container_width=True)
+
+
+def _an_wellpass():
+    """Lohnt sich Wellpass?"""
+    st.markdown("##### Wellpass-Nutzer gegen Selbstzahler")
+    box("Wellpass kostet Platzpreis und bringt eine Vergütung. Ob sich das "
+        "lohnt, entscheidet sich nicht am einzelnen Platz, sondern daran, "
+        "ob diese Spieler häufiger kommen und länger bleiben.", "info")
+
+    verg = wellpass_vergleich()
+    if verg.empty:
+        box("Noch keine Daten.", "info")
+        return
+    st.dataframe(verg, use_container_width=True, hide_index=True)
+    st.caption("Gruppiert nach dem Anteil rabattierter Buchungen je "
+               "Spieler: ab 80 % „Nur Wellpass\u201c, ab 50 % "
+               "„Überwiegend\u201c, darunter „Gemischt\u201c.")
+
+    st.markdown("")
+    st.markdown("---")
+    st.markdown("##### Wie voll sind die gebuchten Plätze?")
+    box("Playtomic berechnet den Court immer voll, egal wie viele Namen "
+        "eingetragen sind. Zwei Leute auf einem Doppelcourt zahlen "
+        "denselben Preis — und zwei Plätze bleiben leer. Eine der wenigen "
+        "Stellschrauben, an denen sich ohne Preiserhöhung etwas bewegen "
+        "lässt.", "info")
+    pa = platzausnutzung()
+    if pa.empty:
+        box("Noch keine Daten.", "info")
+    else:
+        st.dataframe(pa, use_container_width=True, hide_index=True)
+        leer = int(pa["Ungenutzte Plätze"].sum())
+        st.caption(f"Insgesamt {leer} nicht eingetragene Plätze im "
+                   "geladenen Zeitraum. Ein Teil davon sind Mitspieler, "
+                   "die der Buchende nicht einträgt — sie tauchen dann "
+                   "auch in keiner Wellpass-Kontrolle auf.")
+
+
+def modul_analysen():
+    head("Analysen", "Was hinter den Zahlen steht")
+
+    if not verfuegbare_tage():
+        box("Noch keine Daten — lade zuerst einen Tag in der Daten-Zentrale "
+            "hoch.", "warn")
+        return
+
+    von, bis = _datenstand()
+    if von and bis:
+        st.caption(f"Datengrundlage: {datum_kurz(str(von))} bis "
+                   f"{datum_kurz(str(bis))} · {(bis - von).days} Tage")
+
+    t1, t2, t3 = st.tabs(["🔁 Bindung", "🤝 Netzwerk", "💶 Wirtschaftlichkeit"])
+    with t1:
+        _an_bindung()
+    with t2:
+        _an_netzwerk()
+    with t3:
+        _an_wellpass()
+
+
 def modul_events():
     head("Events", "Was eine Veranstaltung wirklich gebracht hat")
 
@@ -8580,7 +8972,9 @@ def modul_events():
             "info")
         return
 
-    t1, t2 = st.tabs(["🗓 Einzelnes Event", "📈 Wiederkehr allgemein"])
+    # Die allgemeinen Wiederkehr-Auswertungen liegen im Modul „Analysen" —
+    # hier geht es nur um die einzelne Veranstaltung.
+    t1, = st.tabs(["🗓 Einzelnes Event"])
 
     with t1:
         labels = [f"{datum_kurz(str(r['Datum']))} · {r['Name']} "
@@ -8622,31 +9016,6 @@ def modul_events():
             st.markdown("##### Alle Events im Vergleich")
             st.dataframe(events.drop(columns=["Event_Id", "Unklar"]),
                          use_container_width=True, hide_index=True)
-
-    with t2:
-        st.markdown("##### Kommen Neukunden wieder?")
-        box("Von allen Spielern, die in einer Woche zum ersten Mal da waren: "
-            "wie viele kamen innerhalb einer, zwei und vier Wochen wieder? "
-            "Eine einzelne Quote sagt wenig — die Reihe zeigt, ob es besser "
-            "wird. Wochen, deren Fenster noch läuft, bleiben leer.", "info")
-        kurve = wiederkehr_kurve()
-        if kurve.empty:
-            box("Noch zu wenig Verlauf für eine Kohortenauswertung.", "info")
-        else:
-            st.dataframe(kurve, use_container_width=True, hide_index=True)
-
-        st.markdown("")
-        st.markdown("---")
-        st.markdown("##### Neue Spieler je Woche")
-        neu = neukunden_je_woche()
-        if neu.empty:
-            box("Noch keine Neukundendaten.", "info")
-        else:
-            st.dataframe(neu, use_container_width=True, hide_index=True,
-                         height=min(420, 60 + 35 * len(neu)))
-            st.caption("Erster Besuch innerhalb des ausgewerteten Zeitraums. "
-                       "Wer schon am ersten Datentag da war, zählt nicht als "
-                       "neu — sein echter Erstbesuch liegt davor.")
 
 
 def modul_whatsapp():
@@ -9884,8 +10253,11 @@ MODULE = [
     {"id": "rechnungen", "ic": "🧾", "ti": "Rechnungen",
      "de": "Bearbeitungsgebühr automatisch", "an": False, "fn": None},
     {"id": "events",    "ic": "🗓", "ti": "Events",
-     "de": "Wirkung, Wiederkehr, Teilnehmer", "an": True,
+     "de": "Wirkung, Teilnehmer, Kontrollgruppe", "an": True,
      "fn": lambda: modul_events()},
+    {"id": "analysen",  "ic": "🔬", "ti": "Analysen",
+     "de": "Bindung, Netzwerk, Wirtschaftlichkeit", "an": True,
+     "fn": lambda: modul_analysen()},
 ]
 
 
