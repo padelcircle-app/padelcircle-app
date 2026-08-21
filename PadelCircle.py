@@ -9741,6 +9741,36 @@ def _wa_uebersicht():
     tage_alle = verfuegbare_tage()
     offen_roh = alle_offenen_fehler(tage_alle) if tage_alle else pd.DataFrame()
 
+    # ── Suche über beide Spalten ────────────────────────────────────────
+    #
+    # Bei 86 überzähligen Check-ins zeigt die Liste nur die 40
+    # relevantesten. Wer einen bestimmten Menschen sucht, findet ihn
+    # sonst nicht. Gesucht wird auf beiden Seiten gleichzeitig, damit
+    # man Check-in und Fall derselben Person nebeneinander sieht.
+    suche = st.text_input(
+        "🔎 Nach Name suchen", key="ueb_suche", placeholder="z. B. Michael",
+        help="Filtert beide Spalten. Umlaute und Schreibweisen sind egal — "
+             "„Mueller\" findet auch „Müller\".")
+
+    def _trifft(name) -> bool:
+        """Passt dieser Name zur Suche? Auch über Umlaut-Schreibweisen."""
+        if not suche.strip():
+            return True
+        txt, frage = str(name), suche.strip()
+        return (frage.lower() in txt.lower()
+                or normalize_name(frage) in normalize_name(txt))
+
+    gesucht = bool(suche.strip())
+    ueber_zeig = (ueber_roh[ueber_roh["Name"].map(_trifft)]
+                  if gesucht and not ueber_roh.empty else ueber_roh)
+    offen_zeig = (offen_roh[offen_roh["Name"].map(_trifft)]
+                  if gesucht and not offen_roh.empty else offen_roh)
+
+    if gesucht and ueber_zeig.empty and offen_zeig.empty:
+        box(f"Nichts gefunden zu „{suche.strip()}\". Vielleicht steht die "
+            "Person unter einer anderen Schreibweise in Playtomic — der "
+            "Name-Abgleich hilft da weiter.", "info")
+
     if ueber_roh.empty and offen_roh.empty:
         box("✅ Keine überzähligen Check-ins und keine offenen Fälle.", "ok")
     else:
@@ -9788,11 +9818,14 @@ def _wa_uebersicht():
 
         with rechts:
             st.markdown("**Offene Fälle**")
-            if offen_roh.empty:
-                box("✅ Keine offenen Fälle.", "ok")
+            if offen_zeig.empty:
+                box("Kein offener Fall zu dieser Suche." if gesucht
+                    else "✅ Keine offenen Fälle.",
+                    "info" if gesucht else "ok")
             else:
-                st.caption(f"{len(offen_roh)} offen")
-                zeig = offen_roh[["Name", "Datum", "Service_Zeit"]].copy()
+                st.caption(f"{len(offen_zeig)} von {len(offen_roh)} gefunden"
+                           if gesucht else f"{len(offen_roh)} offen")
+                zeig = offen_zeig[["Name", "Datum", "Service_Zeit"]].copy()
                 zeig["Datum"] = zeig["Datum"].astype(str).map(datum_kurz)
                 zeig.columns = ["Name", "Tag", "Zeit"]
                 st.dataframe(zeig, use_container_width=True, hide_index=True,
@@ -9800,16 +9833,19 @@ def _wa_uebersicht():
 
         with links:
             st.markdown("**Zu viele Check-ins**")
-            if ueber_roh.empty:
-                box("✅ Keine überzähligen Check-ins.", "ok")
+            if ueber_zeig.empty:
+                box("Kein Check-in zu dieser Suche." if gesucht
+                    else "✅ Keine überzähligen Check-ins.",
+                    "info" if gesucht else "ok")
             else:
-                st.caption(f"{len(ueber_roh)} überzählig")
+                st.caption(f"{len(ueber_zeig)} von {len(ueber_roh)} gefunden"
+                           if gesucht else f"{len(ueber_roh)} überzählig")
 
                 # Für jeden überzähligen Check-in den besten offenen Fall
                 # vorschlagen — dieselbe Namens-/E-Mail-Ähnlichkeit wie in
                 # der Tagesarbeit, nur über den gesamten offenen Bestand
                 # statt nur ein Zeitfenster um einen Tag.
-                ueber = ueber_roh.copy()
+                ueber = ueber_zeig.copy()
                 raenge, beste = [], []
                 for _, r in ueber.iterrows():
                     ci_norm = str(r["Name_norm"])
@@ -9828,19 +9864,31 @@ def _wa_uebersicht():
                 ueber["_bester"] = beste
                 ueber = ueber.sort_values("_rang", ascending=False)
 
+                # Bei aktiver Suche wird nicht zusätzlich gefiltert und
+                # nicht abgeschnitten — sonst sucht man jemanden und
+                # bekommt ihn trotzdem nicht zu sehen.
                 nur_passend = False
-                if ziel_daten and len(ueber) > 12:
+                if ziel_daten and len(ueber) > 12 and not gesucht:
                     nur_passend = st.toggle("Nur passende zeigen", value=True,
                                             key="ueb_nur_passend")
                 anzeige = (ueber[ueber["_rang"] >= 70]
                           if nur_passend else ueber)
                 if anzeige.empty:
                     box("Keine passenden Check-ins gefunden.", "info")
-                if len(anzeige) > 40:
-                    st.caption(f"Zeige die 40 relevantesten von "
+                # Gesucht wird grosszügiger angezeigt als ungefiltert, aber
+                # nicht unbegrenzt: Jeder Eintrag rendert Knöpfe und
+                # Auswahlfelder, und ein kurzer Suchbegriff trifft schnell
+                # dreistellig.
+                grenze = 60 if gesucht else 40
+                if len(anzeige) > grenze:
+                    st.caption(f"Zeige die {grenze} relevantesten von "
+                               f"{len(anzeige)} — such etwas genauer, um "
+                               "den Rest zu sehen."
+                               if gesucht else
+                               f"Zeige die {grenze} relevantesten von "
                                f"{len(anzeige)}.")
 
-                for i, (_, r) in enumerate(anzeige.head(40).iterrows()):
+                for i, (_, r) in enumerate(anzeige.head(grenze).iterrows()):
                     ci_datum = str(r["analysis_date"])
                     ci_name = str(r["Name"])
                     ci_norm = str(r["Name_norm"])
