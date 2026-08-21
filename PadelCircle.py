@@ -153,6 +153,18 @@ CONFIG = {
     ],
 
     # ── Familie / Dauergäste ohne Wellpass-Pflicht ───────────────────────────
+    # Check-ins ohne zugehörige Buchung, die trotzdem in Ordnung sind:
+    # Familie und Team checken ein, EGYM vergütet — es gibt nur nichts
+    # zuzuordnen. In der Zuordnungsansicht stehen sie deshalb als
+    # eigene kleine Tabelle statt zwischen den echten offenen Fällen.
+    "geschenk_checkins": [
+        "Marcel Sidorov",
+        "Ludmila Sidorov",
+        "Angelika Sidorov",
+        "Mattia Niklas Mauta",
+        "Mattia Mauta",
+    ],
+
     "immer_gruen": [
         "Marcel Sidorov",
         "Mattia Mauta",
@@ -396,6 +408,11 @@ MITARBEITER_NORM = {normalize_name(n) for n in CONFIG["mitarbeiter"]}
 IMMER_GRUEN_NORM = {normalize_name(n) for n in CONFIG["immer_gruen"]}
 TEAM_NORM = MITARBEITER_NORM | IMMER_GRUEN_NORM
 
+# Check-ins, die nie einen offenen Fall erklären müssen. Das Team gehört
+# ebenso dazu — auch dessen Check-ins bringen Geld, ohne dass es etwas
+# zuzuordnen gäbe.
+GESCHENK_NORM = {normalize_name(n) for n in CONFIG["geschenk_checkins"]} | TEAM_NORM
+
 
 def is_true(val) -> bool:
     if val is None:
@@ -611,6 +628,7 @@ SHEET_SPALTEN = {
     "freigaben":        ["name_norm", "name", "ausgeloest_am", "letzte_sperre",
                          "bestaetigt", "timestamp"],
     "auffaellige":      ["name_norm", "name", "art", "notiz", "timestamp"],
+    "geschenke":        ["checkin_key", "datum", "name", "grund", "timestamp"],
     "wetter":           ["datum", "code", "lage", "t_max", "t_min",
                          "regen_mm", "art", "timestamp"],
     "auth_tokens":      ["token", "created", "expires"],
@@ -1122,7 +1140,8 @@ ABGELEITETE_CACHES = ("tages_kennzahlen", "verfuegbare_tage", "monats_kennzahlen
                       "circle_points", "circle_points_monate",
                       "circle_points_verlauf", "absagen_liste",
                       "absagen_ignoriert", "absagen_markierungen",
-                      "wetter_daten", "wetter_korrelation", "wetter_hinweise")
+                      "wetter_daten", "wetter_korrelation", "wetter_hinweise",
+                      "geschenk_checkins")
 
 
 def _cache_funktion_leeren(name: str):
@@ -9833,19 +9852,72 @@ def _wa_uebersicht():
 
         with links:
             st.markdown("**Zu viele Check-ins**")
+
+            # ── Geschenke abtrennen ─────────────────────────────────────
+            #
+            # Zwei Sorten Check-in erklären nie einen offenen Fall:
+            # Familie und Team, und die Mitspieler, für die jemand
+            # anderes alles bezahlt hat. Beide gehören nicht zwischen
+            # die echten Fälle, sondern in eine eigene kleine Tabelle —
+            # sie sind geschenktes Geld, keine Arbeit.
+            markiert = geschenk_checkins()
             if ueber_zeig.empty:
+                geschenke = ueber_zeig
+                arbeit = ueber_zeig
+            else:
+                ist_g = ueber_zeig.apply(
+                    lambda r: ist_geschenk(str(r["Name_norm"]),
+                                           str(r["analysis_date"]), markiert),
+                    axis=1)
+                geschenke, arbeit = ueber_zeig[ist_g], ueber_zeig[~ist_g]
+
+            if not geschenke.empty:
+                wert = wellpass_wert_summe(
+                    [str(x) for x in geschenke["analysis_date"]])
+                with st.expander(f"🎁 {len(geschenke)} geschenkte Check-ins "
+                                 f"· {euro(wert)}"):
+                    st.caption("Check-ins ohne zuzuordnende Buchung — Familie, "
+                               "Team, oder jemand hat für sie mitbezahlt. "
+                               "EGYM vergütet sie trotzdem.")
+                    tab = geschenke[["Name", "analysis_date"]].copy()
+                    tab["Zeit"] = geschenke.get("Checkin_Zeit", "")
+                    tab["analysis_date"] = tab["analysis_date"].astype(str).map(
+                        datum_kurz)
+                    tab.columns = ["Name", "Tag", "Zeit"]
+                    st.dataframe(tab.sort_values("Tag", ascending=False),
+                                 use_container_width=True, hide_index=True,
+                                 height=min(400, 60 + 35 * len(tab)))
+
+                    # Einzeln markierte lassen sich zurücknehmen; die über
+                    # den Namen erkannten stehen in den Einstellungen.
+                    eigene = [(k, v) for k, v in markiert.items()
+                              if k in {checkin_schluessel(
+                                  str(r["analysis_date"]), str(r["Name_norm"]))
+                                  for _, r in geschenke.iterrows()}]
+                    if eigene:
+                        zurueck = st.selectbox(
+                            "Markierung zurücknehmen", ["—"] + [k for k, _ in eigene],
+                            format_func=lambda k: "—" if k == "—" else
+                            f"{k.split('|')[1]} · {datum_kurz(k.split('|')[0])}",
+                            key="gesch_zurueck")
+                        if zurueck != "—" and st.button("Zurücknehmen",
+                                                        key="gesch_zurueck_btn"):
+                            geschenk_loesen(zurueck)
+                            st.rerun()
+
+            if arbeit.empty:
                 box("Kein Check-in zu dieser Suche." if gesucht
                     else "✅ Keine überzähligen Check-ins.",
                     "info" if gesucht else "ok")
             else:
-                st.caption(f"{len(ueber_zeig)} von {len(ueber_roh)} gefunden"
-                           if gesucht else f"{len(ueber_roh)} überzählig")
+                st.caption(f"{len(arbeit)} von {len(ueber_roh)} gefunden"
+                           if gesucht else f"{len(arbeit)} zu klären")
 
                 # Für jeden überzähligen Check-in den besten offenen Fall
                 # vorschlagen — dieselbe Namens-/E-Mail-Ähnlichkeit wie in
                 # der Tagesarbeit, nur über den gesamten offenen Bestand
                 # statt nur ein Zeitfenster um einen Tag.
-                ueber = ueber_zeig.copy()
+                ueber = arbeit.copy()
                 raenge, beste = [], []
                 for _, r in ueber.iterrows():
                     ci_norm = str(r["Name_norm"])
@@ -9864,9 +9936,8 @@ def _wa_uebersicht():
                 ueber["_bester"] = beste
                 ueber = ueber.sort_values("_rang", ascending=False)
 
-                # Bei aktiver Suche wird nicht zusätzlich gefiltert und
-                # nicht abgeschnitten — sonst sucht man jemanden und
-                # bekommt ihn trotzdem nicht zu sehen.
+                # Bei aktiver Suche wird nicht zusätzlich gefiltert — sonst
+                # versteckt der Ähnlichkeitsfilter genau den Treffer.
                 nur_passend = False
                 if ziel_daten and len(ueber) > 12 and not gesucht:
                     nur_passend = st.toggle("Nur passende zeigen", value=True,
@@ -9875,59 +9946,69 @@ def _wa_uebersicht():
                           if nur_passend else ueber)
                 if anzeige.empty:
                     box("Keine passenden Check-ins gefunden.", "info")
-                # Gesucht wird grosszügiger angezeigt als ungefiltert, aber
-                # nicht unbegrenzt: Jeder Eintrag rendert Knöpfe und
-                # Auswahlfelder, und ein kurzer Suchbegriff trifft schnell
-                # dreistellig.
                 grenze = 60 if gesucht else 40
                 if len(anzeige) > grenze:
-                    st.caption(f"Zeige die {grenze} relevantesten von "
-                               f"{len(anzeige)} — such etwas genauer, um "
-                               "den Rest zu sehen."
-                               if gesucht else
-                               f"Zeige die {grenze} relevantesten von "
-                               f"{len(anzeige)}.")
+                    st.caption(f"Zeige {grenze} von {len(anzeige)}"
+                               + (" — such genauer für den Rest."
+                                  if gesucht else "."))
 
                 for i, (_, r) in enumerate(anzeige.head(grenze).iterrows()):
                     ci_datum = str(r["analysis_date"])
                     ci_name = str(r["Name"])
                     ci_norm = str(r["Name_norm"])
                     ci_zeit = str(r.get("Checkin_Zeit", "")).strip()
-
-                    st.markdown(f"**{ci_name}** · {datum_kurz(ci_datum)}"
-                               + (f" · {ci_zeit}" if ci_zeit else ""))
                     erklaerung = checkin_erklaerung(ci_norm, ci_datum)
-                    if erklaerung.get("text"):
-                        st.caption(f"↳ {erklaerung['text']}")
-
                     moeglich = _erlaubte_ziele(ci_datum, ci_norm)
-                    if not moeglich:
-                        st.caption("↳ Kein Fall zuordenbar — entweder hat er "
-                                   "an diesem Tag selbst mit Rabatt gespielt, "
-                                   "oder es gibt keinen offenen Fall davor.")
-                        st.markdown("")
-                        continue
 
-                    warnung = nachhol_warnung(ci_norm, ci_datum)
-                    if warnung:
-                        box(warnung, "warn")
-
-                    bester_label = r.get("_bester")
-                    bester_score = float(r.get("_rang", 0))
-                    if bester_label and bester_score >= 80:
-                        ziel_norm, ziel_datum = next(
-                            (zn, zd) for lbl, zn, zd, _m in moeglich
-                            if lbl == bester_label)
-                        if st.button(f"✓ Nachholung für {bester_label} "
-                                    f"({bester_score:.0f}%)",
-                                    key=f"ueb_q_{i}", type="primary",
-                                    use_container_width=True):
-                            if nachholung_speichern(ci_datum, ci_norm,
-                                                    ziel_datum, ziel_norm):
-                                st.toast("Zugeordnet.")
+                    with st.container(border=True):
+                        kopf, knopf = st.columns([3, 1])
+                        with kopf:
+                            st.markdown(
+                                f"**{ci_name}** · {datum_kurz(ci_datum)}"
+                                + (f" · {ci_zeit}" if ci_zeit else ""))
+                            # Nur erklären, was etwas erklärt. Der Satz
+                            # „keine passende Buchung an diesem Tag" stand
+                            # unter fast jedem Eintrag und sagte nichts,
+                            # was die Überschrift nicht schon sagt.
+                            if erklaerung.get("art") == "gespielt_ohne_rabatt":
+                                st.caption("↳ hat gespielt, aber ohne Rabatt — "
+                                           "vermutlich hat jemand mitbezahlt")
+                            elif erklaerung.get("art") == "aehnlicher_name":
+                                st.caption(f"↳ {erklaerung['text']}")
+                        with knopf:
+                            if st.button("🎁 Geschenk", key=f"ueb_g_{i}",
+                                         use_container_width=True,
+                                         help="Kein Fall dahinter — aus der "
+                                              "Liste nehmen, Vergütung bleibt."):
+                                geschenk_markieren(ci_datum, ci_norm, ci_name,
+                                                   erklaerung.get("art", ""))
                                 st.rerun()
 
-                    if moeglich:
+                        if not moeglich:
+                            st.caption("↳ Kein Fall zuordenbar — entweder "
+                                       "selbst mit Rabatt gespielt, oder kein "
+                                       "offener Fall davor.")
+                            continue
+
+                        warnung = nachhol_warnung(ci_norm, ci_datum)
+                        if warnung:
+                            box(warnung, "warn")
+
+                        bester_label = r.get("_bester")
+                        bester_score = float(r.get("_rang", 0))
+                        if bester_label and bester_score >= 80:
+                            ziel_norm, ziel_datum = next(
+                                (zn, zd) for lbl, zn, zd, _m in moeglich
+                                if lbl == bester_label)
+                            if st.button(f"✓ Nachholung für {bester_label} "
+                                        f"({bester_score:.0f}%)",
+                                        key=f"ueb_q_{i}", type="primary",
+                                        use_container_width=True):
+                                if nachholung_speichern(ci_datum, ci_norm,
+                                                        ziel_datum, ziel_norm):
+                                    st.toast("Zugeordnet.")
+                                    st.rerun()
+
                         with st.expander("Anderem Fall zuordnen"):
                             optionen = ["—"] + [lbl for lbl, *_r in moeglich]
                             wahl = st.selectbox(
@@ -9943,7 +10024,6 @@ def _wa_uebersicht():
                                                         ziel_datum, ziel_norm):
                                     st.toast("Zugeordnet.")
                                     st.rerun()
-                    st.markdown("")
 
 
 def _ev_wirkung_block(zeile):
@@ -10561,6 +10641,70 @@ def verbrauchte_checkins() -> dict:
         return {}
     return dict(zip(df["checkin_key"].astype(str),
                     df["fall_key"].astype(str)))
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def geschenk_checkins() -> dict:
+    """
+    Einzeln als Geschenk markierte Check-ins. → {checkin_key: grund}
+
+    Zwei Sorten Check-in erklären keinen offenen Fall und sollen die
+    Zuordnungsliste nicht verstopfen:
+
+      • Familie und Team — die stehen über `GESCHENK_NORM` fest.
+      • Der Mitspieler, für den jemand anderes alles bezahlt hat. Der
+        steht mit in der Buchung, aber der Rabatt lief über den Bucher.
+        Er checkt trotzdem ein, EGYM vergütet — und zuzuordnen gibt es
+        nichts. Diese Fälle lassen sich nicht am Namen erkennen, also
+        werden sie von Hand markiert.
+    """
+    df = loadsheet("geschenke", SHEET_SPALTEN["geschenke"])
+    if df.empty or "checkin_key" not in df.columns:
+        return {}
+    return {str(r["checkin_key"]): str(r.get("grund", ""))
+            for _, r in df.iterrows()}
+
+
+def geschenk_markieren(datum: str, name_norm: str, name: str,
+                       grund: str = "") -> bool:
+    """Einen Check-in als Geschenk ablegen."""
+    schluessel = checkin_schluessel(str(datum), str(name_norm))
+    df = loadsheet("geschenke", SHEET_SPALTEN["geschenke"])
+    if not df.empty and "checkin_key" in df.columns:
+        if schluessel in set(df["checkin_key"].astype(str)):
+            return True
+    neu = pd.DataFrame([{
+        "checkin_key": schluessel, "datum": str(datum), "name": str(name),
+        "grund": str(grund),
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+    }])
+    zusammen = pd.concat([df, neu], ignore_index=True) if not df.empty else neu
+    ok = savesheet(zusammen, "geschenke")
+    if ok:
+        cache_leeren("geschenke", funktionen=["geschenk_checkins"])
+    return ok
+
+
+def geschenk_loesen(checkin_key: str) -> bool:
+    """Markierung zurücknehmen — der Check-in taucht wieder auf."""
+    df = loadsheet("geschenke", SHEET_SPALTEN["geschenke"])
+    if df.empty or "checkin_key" not in df.columns:
+        return False
+    behalten = df[df["checkin_key"].astype(str) != str(checkin_key)]
+    if len(behalten) == len(df):
+        return False
+    ok = savesheet(behalten, "geschenke")
+    if ok:
+        cache_leeren("geschenke", funktionen=["geschenk_checkins"])
+    return ok
+
+
+def ist_geschenk(name_norm: str, datum: str, geschenke: dict = None) -> bool:
+    """Erklärt dieser Check-in nie einen offenen Fall?"""
+    if str(name_norm) in GESCHENK_NORM:
+        return True
+    liste = geschenke if geschenke is not None else geschenk_checkins()
+    return checkin_schluessel(str(datum), str(name_norm)) in liste
 
 
 def nachholung_speichern(checkin_datum: str, checkin_name: str,
