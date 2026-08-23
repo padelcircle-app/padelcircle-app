@@ -8554,8 +8554,45 @@ def checkins_von_am(name_norm: str, datum: str) -> int:
 
 
 @st.cache_data(ttl=600, show_spinner=False)
-def rabattierte_buchungen_am(name_norm: str, datum: str) -> int:
-    """Wie viele rabattierte Buchungen hat diese Person an dem Tag?"""
+def gleiche_person(mail_a, mail_b) -> bool:
+    """
+    Sind zwei Einträge mit demselben Namen dieselbe Person?
+
+    Playtomic lässt Vornamen als Anzeigenamen zu, und die sind nicht
+    eindeutig. Am 22.08. spielten drei verschiedene Menschen namens
+    „Noah": progamerkill21@…, noworf@… und n.gross1406@… — die App
+    hielt sie für einen, meldete eine „2. Buchung am Tag" und erzeugte
+    Fälle für Leute, die zu der Zeit gar nicht da waren.
+
+    Unterschieden wird über die E-Mail, die in den Rohdaten mitkommt.
+    Fehlt sie auf einer Seite, wird NICHT getrennt: Eine fehlende
+    Adresse ist kein Beweis für einen zweiten Menschen, und lieber
+    zwei Buchungen einer Person zusammenlassen als eine Person in zwei
+    zerlegen.
+
+    Nicht getrennt wird auch bei Apple-Relay-Adressen gegen eine echte:
+    „tobias.fischer51@gmail.com" und „jzmsdcpy9k@privaterelay.appleid.com"
+    sind mit hoher Wahrscheinlichkeit dieselbe Person mit zwei Logins.
+    Getrennt wird nur, wenn beide Adressen echt und verschieden sind.
+    """
+    a = str(mail_a or "").strip().lower()
+    b = str(mail_b or "").strip().lower()
+    if not a or not b or a == b:
+        return True
+    relay = "privaterelay.appleid.com"
+    if relay in a or relay in b:
+        return True
+    return False
+
+
+def rabattierte_buchungen_am(name_norm: str, datum: str,
+                             email: str = None) -> int:
+    """
+    Wie viele rabattierte Buchungen hat diese Person an dem Tag?
+
+    Mit `email` werden Namensvettern ausgeschlossen — siehe
+    `gleiche_person`. Ohne `email` bleibt es beim alten Verhalten.
+    """
     b = loadsheet("buchungen")
     if b.empty or "analysis_date" not in b.columns:
         return 0
@@ -8563,13 +8600,17 @@ def rabattierte_buchungen_am(name_norm: str, datum: str) -> int:
             (b["Name_norm"].astype(str) == str(name_norm))]
     if tag.empty or "Relevant" not in tag.columns:
         return 0
+    if email and "Email" in tag.columns:
+        tag = tag[tag["Email"].map(lambda m: gleiche_person(m, email))]
+        if tag.empty:
+            return 0
     schluessel = [k for k in ("Service_Zeit", "Court") if k in tag.columns]
     if schluessel:
         tag = tag.drop_duplicates(subset=schluessel)
     return int((tag["Relevant"].astype(str) == "Ja").sum())
 
 
-def ist_zweitbuchung(name_norm: str, datum: str) -> bool:
+def ist_zweitbuchung(name_norm: str, datum: str, email: str = None) -> bool:
     """
     Zweite rabattierte Buchung am selben Tag, obwohl eingecheckt wurde?
 
@@ -8583,7 +8624,7 @@ def ist_zweitbuchung(name_norm: str, datum: str) -> bool:
     die erste und einzige Buchung als Zweitbuchung ausgewiesen — was
     genau falsch herum ist, denn dann fehlt der Check-in schlicht.
     """
-    return (rabattierte_buchungen_am(name_norm, datum) >= 2
+    return (rabattierte_buchungen_am(name_norm, datum, email) >= 2
             and checkins_von_am(name_norm, datum) > 0)
 
 
@@ -9299,7 +9340,12 @@ def _wa_fall(r, i: int, datum: str):
 
     # Zweite rabattierte Buchung am selben Tag? Dann ist es kein
     # vergessener Check-in, sondern ein unbezahlter Platz.
-    zweitbuchung = ist_zweitbuchung(nn, datum)
+    #
+    # Die Adresse kommt aus der Buchungszeile selbst, nicht über
+    # `email_fuer(name)`: Der Namens-Nachschlag wäre bei genau den
+    # Namen mehrdeutig, um die es hier geht.
+    zeilen_mail = str(r.get("Email", "") or "").strip()
+    zweitbuchung = ist_zweitbuchung(nn, datum, zeilen_mail or None)
 
     status = ""
     if zweitbuchung:
