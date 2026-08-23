@@ -2926,6 +2926,37 @@ def sperre_nachholung_zuordnen(name_norm: str, name: str, fall_datum: str,
     return True
 
 
+def sperre_bezahlt(name_norm: str, name: str, fall_datum: str,
+                   betrag=None, notiz: str = "") -> bool:
+    """
+    Eine Sperre über eine Zahlung auflösen statt über einen Check-in.
+
+    Nicht jeder holt einen Check-in nach. Manche überweisen einfach die
+    Bearbeitungsgebühr — per PayPal, Überweisung oder bar. Vorher gab
+    es dafür keinen Weg: Fand die App keinen freien Check-in im
+    Nachhol-Fenster, blieb die Sperre stehen, obwohl die Sache
+    längst erledigt war.
+
+    Der Fall wechselt von „Gesperrt" auf „Bezahlt", die Zahl der
+    offenen Sperren sinkt um eins. Fällt sie damit auf null, entsteht
+    dieselbe Freigabe-Aufgabe wie beim nachgeholten Check-in — die App
+    kann den Wellpass-Zugang nicht selbst öffnen.
+
+    → True, wenn die Sperre danach ausgeglichen ist
+    """
+    vorher = len(gesperrt_faelle(name_norm))
+    if vorher == 0:
+        return False
+
+    als_behoben_markieren(name_norm, fall_datum, grund="bezahlt",
+                          betrag=betrag, notiz=notiz)
+
+    nachher = len(gesperrt_faelle(name_norm))
+    if nachher == 0:
+        freigabe_anlegen(name_norm, name, fall_datum)
+    return nachher < vorher
+
+
 def freigabe_anlegen(name_norm: str, name: str, letzte_sperre: str):
     """Eine offene Freigabe-Aufgabe vormerken."""
     sheet_zeile_setzen("freigaben", {
@@ -9653,7 +9684,7 @@ def _gesperrt_zeile(g, i: int):
                     unsafe_allow_html=True)
         st.caption(f"Spieltage: {g['Tage']}")
     with s2:
-        with st.popover("Check-in zuordnen", use_container_width=True):
+        with st.popover("Sperre auflösen", use_container_width=True):
             _sperre_zuordnen(nn, name, i)
 
 
@@ -9682,10 +9713,36 @@ def _sperre_zuordnen(nn: str, name: str, i: int):
     kandidaten = [k for k in nachhol_kandidaten(name, ziel, fenster=fenster)
                   if k[4] > 0]
 
-    st.caption("2 · Welcher Check-in wird dafür verwendet?")
+    st.caption("2 · Wie wird sie ausgeglichen?")
+    weg = st.radio("Weg", ["🔄 Nachgeholter Check-in", "💶 Bezahlt"],
+                   key=f"sp_weg_{i}", horizontal=True,
+                   label_visibility="collapsed")
+
+    # ── Bezahlt ─────────────────────────────────────────────────────────
+    if weg.endswith("Bezahlt"):
+        st.caption("Bearbeitungsgebühr erhalten — PayPal, Überweisung, bar.")
+        betrag = st.number_input(
+            "Betrag (€)", min_value=0.0, step=0.5, value=float(ADMIN_GEBUEHR),
+            key=f"sp_betrag_{i}",
+            help="Frei änderbar — mal kommt die volle Gebühr, mal nur der "
+                 "Platzanteil.")
+        notiz = st.text_input("Notiz (optional)", key=f"sp_notiz_{i}",
+                              placeholder="z. B. PayPal 14.08.")
+        if st.button("Als bezahlt eintragen", key=f"sp_bez_{i}",
+                     type="primary", use_container_width=True):
+            if sperre_bezahlt(nn, name, ziel, betrag=betrag, notiz=notiz):
+                st.toast(f"Bezahlt eingetragen — eine Sperre weniger "
+                         f"für {name}.")
+                st.rerun()
+            else:
+                st.warning("Konnte nicht eingetragen werden.")
+        return
+
+    # ── Nachgeholter Check-in ───────────────────────────────────────────
     if not kandidaten:
         st.caption(f"Kein freier Check-in in den {fenster} Tagen nach "
-                   f"dem {datum_kurz(ziel)} gefunden.")
+                   f"dem {datum_kurz(ziel)} gefunden. Falls er stattdessen "
+                   "bezahlt hat, oben auf „Bezahlt\" wechseln.")
         return
 
     for k, (anzeige, kand_norm, ci_datum, score, tage_danach) in enumerate(kandidaten[:8]):
