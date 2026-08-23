@@ -1141,7 +1141,7 @@ ABGELEITETE_CACHES = ("tages_kennzahlen", "verfuegbare_tage", "monats_kennzahlen
                       "circle_points_verlauf", "absagen_liste",
                       "absagen_ignoriert", "absagen_markierungen",
                       "wetter_daten", "wetter_korrelation", "wetter_hinweise",
-                      "geschenk_checkins")
+                      "geschenk_checkins", "falsche_zuordnungen")
 
 
 def _cache_funktion_leeren(name: str):
@@ -2924,6 +2924,88 @@ def sperre_nachholung_zuordnen(name_norm: str, name: str, fall_datum: str,
     if vorher > 0 and nachher == 0:
         freigabe_anlegen(name_norm, name, fall_datum)
     return True
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def falsche_zuordnungen() -> pd.DataFrame:
+    """
+    Nachholungen, die nach heutigem Wissen nicht stimmen können.
+
+    `eigener_anspruch()` schützt einen Check-in davor, einen fremden
+    Fall zu schliessen — aber nur in dem Moment, in dem die Zuordnung
+    angelegt wird. Wird danach eine Namensverknüpfung bestätigt, wird
+    ein Anspruch nachträglich sichtbar, den die App vorher nicht sehen
+    konnte. Die alte Zuordnung ist damit falsch, bleibt aber stehen.
+
+    Belegter Fall: Michael Gebhard checkte am 16.08. um 12:39 ein, 21
+    Minuten vor dem Event um 13:00, bei dem er mit Rabatt spielte. Sein
+    Check-in hing an einem älteren Fall. Ergebnis: der ältere Fall galt
+    als geklärt, obwohl ihn nie jemand bezahlt hat, und das Event stand
+    offen, obwohl es gedeckt war — zwei falsche Zahlen aus einer
+    einzigen Zuordnung.
+
+    → Name · Check-in-Datum · Fall-Datum · eigene Rabatte an dem Tag
+    """
+    df = loadsheet("checkin_zuordnung", SHEET_SPALTEN["checkin_zuordnung"])
+    if df.empty or "checkin_key" not in df.columns:
+        return pd.DataFrame()
+
+    zeilen = []
+    for _, r in df.iterrows():
+        ci_datum = str(r.get("checkin_datum", "") or "")
+        ci_name = str(r.get("checkin_name", "") or "")
+        if not ci_datum or not ci_name:
+            # Ältere Zeilen führen nur den Schlüssel „datum|name".
+            teile = str(r.get("checkin_key", "")).split("|")
+            if len(teile) != 2:
+                continue
+            ci_datum, ci_name = teile[0], teile[1]
+
+        eigene = eigener_anspruch(ci_name, ci_datum)
+        if eigene <= 0:
+            continue
+
+        fall_datum = str(r.get("fall_datum", "") or "")
+        if not fall_datum:
+            teile = str(r.get("fall_key", "")).split("|")
+            fall_datum = teile[0] if teile else ""
+
+        zeilen.append({
+            "Name": ci_name,
+            "Check-in am": ci_datum,
+            "gutgeschrieben auf": fall_datum,
+            "Fall": str(r.get("fall_name", "") or ""),
+            "eigene Rabatte an dem Tag": int(eigene),
+            "checkin_key": str(r.get("checkin_key", "")),
+            "fall_key": str(r.get("fall_key", "")),
+        })
+
+    if not zeilen:
+        return pd.DataFrame()
+    return pd.DataFrame(zeilen).sort_values("Check-in am", ascending=False)
+
+
+def zuordnung_zuruecknehmen(fall_key: str) -> bool:
+    """
+    Eine Nachholung auflösen: Der Check-in wird wieder frei, der Fall
+    geht wieder auf.
+
+    Bewusst über den Fall-Schlüssel — `zuordnung_zu_fall_loesen` räumt
+    dabei auch den Erledigt-Vermerk weg, sonst bliebe der Fall als
+    „Nachgeholt" stehen, obwohl ihn nichts mehr erklärt.
+    """
+    teile = str(fall_key).split("|")
+    if len(teile) != 2:
+        return False
+    fall_datum, fall_norm = teile[0], teile[1]
+    ok = zuordnung_zu_fall_loesen(fall_norm, fall_datum)
+    if ok:
+        cache_leeren("checkin_zuordnung", "corrections",
+                     funktionen=["falsche_zuordnungen", "verbrauchte_checkins",
+                                 "offene_fehler", "offene_je_tag",
+                                 "offene_checkins", "nachhol_kandidaten",
+                                 "anspruch_bilanz"])
+    return ok
 
 
 def sperre_bezahlt(name_norm: str, name: str, fall_datum: str,
@@ -9807,6 +9889,43 @@ def _wa_uebersicht():
     st.markdown("")
     st.markdown("---")
 
+    # ── Zuordnungen, die nicht mehr stimmen können ──────────────────────
+    falsch = falsche_zuordnungen()
+    if not falsch.empty:
+        st.markdown("##### ⚠️ Zuordnungen, die vermutlich nicht stimmen")
+        box("Diese Check-ins wurden einem älteren Fall gutgeschrieben — "
+            "aber ihr eigener Spieltag hat inzwischen selbst einen "
+            "Rabatt ohne Deckung. EGYM zahlt pro Person und Tag nur "
+            "einmal, also kann der Check-in nicht beides sein. Meist "
+            "wurde eine Namensverknüpfung erst nachträglich bestätigt, "
+            "und damit wurde ein Anspruch sichtbar, den die App beim "
+            "Zuordnen noch nicht sehen konnte.", "warn")
+
+        for i, (_, f) in enumerate(falsch.iterrows()):
+            with st.container(border=True):
+                z1, z2 = st.columns([3, 1])
+                with z1:
+                    st.markdown(f"**{f['Name']}** · Check-in am "
+                                f"{datum_kurz(str(f['Check-in am']))}")
+                    st.caption(
+                        f"↳ gutgeschrieben auf den Fall vom "
+                        f"{datum_kurz(str(f['gutgeschrieben auf']))} — "
+                        f"hat am {datum_kurz(str(f['Check-in am']))} aber "
+                        f"selbst {int(f['eigene Rabatte an dem Tag'])}× "
+                        "mit Rabatt gespielt")
+                with z2:
+                    if st.button("Zurücknehmen", key=f"fz_{i}",
+                                 use_container_width=True,
+                                 help="Der Check-in wird wieder frei, der "
+                                      "ältere Fall geht wieder auf."):
+                        if zuordnung_zuruecknehmen(str(f["fall_key"])):
+                            st.toast("Zuordnung aufgelöst.")
+                            st.rerun()
+                        else:
+                            st.warning("Konnte nicht aufgelöst werden.")
+        st.markdown("")
+        st.markdown("---")
+
     # ── Zu viele Check-ins ↔ Offene Fälle zuordnen ──────────────────────
     st.markdown("##### Zu viele Check-ins ↔ Offene Fälle")
     st.caption("Links die Check-ins ohne passende Buchung, rechts die "
@@ -9919,14 +10038,52 @@ def _wa_uebersicht():
             # sie sind geschenktes Geld, keine Arbeit.
             markiert = geschenk_checkins()
             if ueber_zeig.empty:
-                geschenke = ueber_zeig
-                arbeit = ueber_zeig
+                geschenke = ohne_daten = arbeit = ueber_zeig
             else:
                 ist_g = ueber_zeig.apply(
                     lambda r: ist_geschenk(str(r["Name_norm"]),
                                            str(r["analysis_date"]), markiert),
                     axis=1)
-                geschenke, arbeit = ueber_zeig[ist_g], ueber_zeig[~ist_g]
+                geschenke, rest = ueber_zeig[ist_g], ueber_zeig[~ist_g]
+
+                # ── Tage ohne Buchungsdaten abtrennen ───────────────────
+                #
+                # Der weitaus grösste Teil dieser Liste sind Check-ins von
+                # Tagen, für die nie Buchungen eingelesen wurden. Dort gibt
+                # es keine Buchung, zu der sie gehören könnten — nicht weil
+                # jemand etwas falsch gemacht hat, sondern weil die Daten
+                # fehlen. Gemessen am Prüfbestand waren das 12.815 von
+                # 13.167 Zeilen: eine Arbeitsliste, die zu 97 % aus
+                # unbearbeitbaren Zeilen bestand.
+                #
+                # Sie verschwinden nicht, sie stehen nur woanders — wer den
+                # fehlenden Tag nachlädt, findet sie danach in der Arbeit
+                # wieder.
+                tage_mit_daten = set(verfuegbare_tage())
+                fehlt = ~rest["analysis_date"].astype(str).isin(tage_mit_daten)
+                ohne_daten, arbeit = rest[fehlt], rest[~fehlt]
+
+            if not ohne_daten.empty:
+                fehlende_tage = sorted(
+                    set(ohne_daten["analysis_date"].astype(str)), reverse=True)
+                with st.expander(f"📭 {len(ohne_daten)} Check-ins an "
+                                 f"{len(fehlende_tage)} Tagen ohne "
+                                 "Buchungsdaten"):
+                    st.caption("Für diese Tage wurden nie Buchungen "
+                               "eingelesen — es gibt schlicht nichts, wozu "
+                               "diese Check-ins gehören könnten. Lädst du "
+                               "den Tag nach, tauchen sie oben wieder auf.")
+                    tab = ohne_daten[["Name", "analysis_date"]].copy()
+                    tab["analysis_date"] = tab["analysis_date"].astype(str).map(
+                        datum_kurz)
+                    tab.columns = ["Name", "Tag"]
+                    st.dataframe(tab.sort_values("Tag", ascending=False),
+                                 use_container_width=True, hide_index=True,
+                                 height=min(320, 60 + 35 * len(tab)))
+                    st.caption("Betroffene Tage: "
+                               + ", ".join(datum_kurz(t)
+                                           for t in fehlende_tage[:14])
+                               + (" …" if len(fehlende_tage) > 14 else ""))
 
             if not geschenke.empty:
                 wert = wellpass_wert_summe(
@@ -11321,6 +11478,54 @@ def modul_matching():
         box(f"<b>{len(vorschlaege)} Vorschläge</b> gefunden. "
             "Bestätigen heisst: die App merkt sich das dauerhaft.", "info")
 
+        # ── Sammelbestätigung für die eindeutigen Fälle ─────────────────
+        #
+        # Bei knapp hundert Namensvarianten ist einzelnes Durchklicken
+        # die eigentliche Arbeit. Eindeutig ist ein Vorschlag, wenn zwei
+        # Dinge zusammenkommen: hohe Namensähnlichkeit UND der
+        # Check-in-Name taucht in Playtomic nirgends als eigener Spieler
+        # auf. Das zweite ist das stärkere Argument — wer einen eigenen
+        # Playtomic-Account hat, ist ein anderer Mensch, egal wie ähnlich
+        # der Name klingt.
+        #
+        # Alles darunter bleibt einzeln zu entscheiden. Eine
+        # Sammelbestätigung, die auch Zweifelsfälle mitnimmt, wäre
+        # schlimmer als gar keine.
+        sicher = [v for v in vorschlaege
+                  if v["score"] >= 85 and not v.get("eigene_tage")]
+        rest = [v for v in vorschlaege if v not in sicher]
+
+        if len(sicher) >= 3:
+            with st.container(border=True):
+                st.markdown(f"**✓ {len(sicher)} davon sind eindeutig**")
+                st.caption("Hohe Namensähnlichkeit, und der Wellpass-Name "
+                           "kommt in Playtomic nicht als eigener Spieler vor.")
+                tab = pd.DataFrame([{
+                    "Playtomic": v["buchung"], "↔": "↔",
+                    "Wellpass": v["checkin"],
+                    "Sicherheit": f"{v['score']:.0f} %",
+                    "Tag": datum_kurz(v["tag"]),
+                } for v in sicher])
+                st.dataframe(tab, use_container_width=True, hide_index=True,
+                             height=min(400, 60 + 35 * len(tab)))
+
+                if st.button(f"Alle {len(sicher)} bestätigen",
+                             type="primary", use_container_width=True,
+                             key="mm_sammel"):
+                    mapping_mehrere_hinzufuegen(
+                        [(v["buchung_norm"], v["checkin_norm"], v["score"])
+                         for v in sicher])
+                    cache_leeren()
+                    st.toast(f"{len(sicher)} Verknüpfungen gemerkt.")
+                    st.rerun()
+                st.caption("Falsch bestätigt? Unter „Gelernte Zuordnungen\" "
+                           "lässt sich jede einzeln wieder lösen.")
+
+            if rest:
+                st.markdown("")
+                st.markdown(f"##### Die übrigen {len(rest)} einzeln")
+            vorschlaege = rest
+
         for i, v in enumerate(vorschlaege):
             sicherheit = ("lime" if v["score"] >= 85
                           else "warn" if v["score"] >= 70 else "err")
@@ -11894,6 +12099,112 @@ MODULE = [
 ]
 
 
+def _naechste_schritte(tage: list, nicht_angeschrieben: int,
+                       nachgeholt: int, frist_laeuft: int):
+    """
+    Der Arbeitsablauf als geordnete Liste — statt elf Kacheln absuchen.
+
+    Die Module sind nach Themen gebaut, gearbeitet wird aber der Reihe
+    nach: hochladen, anschreiben, Nachholungen abhaken, Zuordnungen
+    korrigieren, Namen zusammenführen, Sperren und Freigaben. Wer das
+    aus Kacheln zusammensuchen muss, springt.
+
+    Gezeigt wird nur, was wirklich ansteht, in genau dieser Reihenfolge,
+    und jede Zeile führt mit einem Klick dorthin, wo sie erledigt wird.
+    """
+    schritte = []
+
+    # 1 · Sind die Daten aktuell?
+    letzter = parse_date_safe(tage[0]) if tage else None
+    if letzter is not None:
+        rueckstand = (date.today() - letzter).days
+        if rueckstand > 1:
+            schritte.append({
+                "ic": "📦", "titel": f"Daten sind {rueckstand} Tage alt",
+                "text": "Neue Exporte aus Playtomic und EGYM hochladen.",
+                "art": "warn" if rueckstand <= 3 else "err",
+                "ziel": "daten", "knopf": "Hochladen"})
+
+    # 2 · Wer muss angeschrieben werden?
+    if nicht_angeschrieben:
+        schritte.append({
+            "ic": "📬", "titel": f"{nicht_angeschrieben} noch nicht "
+                                 "angeschrieben",
+            "text": "Wellpass vergessen — Nachricht raus.",
+            "art": "warn", "ziel": "whatsapp", "knopf": "Tagesarbeit"})
+
+    # 3 · Wer hat nachgeholt?
+    if nachgeholt:
+        schritte.append({
+            "ic": "🔄", "titel": f"{nachgeholt} haben nachgeholt",
+            "text": "Check-in zuordnen, dann ist der Fall erledigt.",
+            "art": "ok", "ziel": "whatsapp", "knopf": "Zuordnen"})
+
+    # 4 · Zuordnungen, die nicht mehr stimmen
+    try:
+        falsch = len(falsche_zuordnungen())
+    except Exception:
+        falsch = 0
+    if falsch:
+        schritte.append({
+            "ic": "⚠️", "titel": f"{falsch} Zuordnungen stimmen vermutlich "
+                                 "nicht",
+            "text": "Der Check-in wird an seinem eigenen Tag gebraucht.",
+            "art": "err", "ziel": "whatsapp", "knopf": "Prüfen"})
+
+    # 5 · Fristen
+    if frist_laeuft:
+        schritte.append({
+            "ic": "⏰", "titel": f"{frist_laeuft} Fristen abgelaufen",
+            "text": "Angeschrieben, aber nichts passiert — bezahlen "
+                    "lassen oder sperren.",
+            "art": "err", "ziel": "whatsapp", "knopf": "Ansehen"})
+
+    # 6 · Freigaben
+    try:
+        freigaben = len(offene_freigaben())
+    except Exception:
+        freigaben = 0
+    if freigaben:
+        schritte.append({
+            "ic": "🔓", "titel": f"{freigaben} warten auf Freigabe",
+            "text": "Keine offene Sperre mehr — Wellpass-Zugang bei EGYM "
+                    "wieder öffnen.",
+            "art": "warn", "ziel": "whatsapp", "knopf": "Freigeben"})
+
+    # 7 · Namensvarianten
+    try:
+        konflikte = len(mapping_konflikte())
+    except Exception:
+        konflikte = 0
+    if konflikte:
+        schritte.append({
+            "ic": "🔗", "titel": f"{konflikte} Verknüpfungen im Konflikt",
+            "text": "Beide Namen haben am selben Tag gespielt — das können "
+                    "nicht dieselben sein.",
+            "art": "err", "ziel": "matching", "knopf": "Klären"})
+
+    st.markdown("")
+    st.markdown("##### Was als Nächstes dran ist")
+    if not schritte:
+        box("✅ Nichts offen. Die Zahlen stehen im Dashboard, und unter "
+            "Analysen wartet der Rest.", "ok")
+        return
+
+    for nr, s in enumerate(schritte, 1):
+        with st.container(border=True):
+            links, rechts = st.columns([4, 1])
+            with links:
+                st.markdown(f"**{nr} · {s['ic']} {s['titel']}**")
+                st.caption(s["text"])
+            with rechts:
+                if st.button(s["knopf"], key=f"schritt_{nr}_{s['ziel']}",
+                             use_container_width=True,
+                             type="primary" if nr == 1 else "secondary"):
+                    st.session_state.modul = s["ziel"]
+                    st.rerun()
+
+
 def _kachel_badge(modul, offen_gesamt: int) -> str:
     if not modul["an"]:
         return '<div class="bg muted">bald</div>'
@@ -11958,27 +12269,7 @@ def command_center():
         except Exception:
             nachgeholt = frist_laeuft = nicht_angeschrieben = 0
 
-        if nachgeholt or nicht_angeschrieben or frist_laeuft:
-            st.markdown("")
-            st.markdown("##### Was heute ansteht")
-            a1, a2, a3 = st.columns(3)
-            with a1:
-                if nicht_angeschrieben:
-                    box(f"📬 <b>{nicht_angeschrieben}</b> Spieler noch nicht "
-                        "angeschrieben", "warn")
-                else:
-                    box("📬 Alle angeschrieben", "ok")
-            with a2:
-                if nachgeholt:
-                    box(f"🔄 <b>{nachgeholt}</b> haben nachgeholt — "
-                        "abhaken", "ok")
-                else:
-                    box("🔄 Keine neuen Nachholungen", "info")
-            with a3:
-                if frist_laeuft:
-                    box(f"⏰ <b>{frist_laeuft}</b> Fristen abgelaufen", "err")
-                else:
-                    box("⏰ Alle Fristen im Rahmen", "ok")
+        _naechste_schritte(tage, nicht_angeschrieben, nachgeholt, frist_laeuft)
 
         st.markdown("")
         c1, c2 = st.columns([1.2, 1])
