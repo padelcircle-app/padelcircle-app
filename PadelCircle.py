@@ -1707,8 +1707,43 @@ def _teilnehmer_liste(row, max_plaetze: int = 4) -> list:
     return out
 
 
+_CHECKIN_ZEIT_RE = re.compile(r"(\d{1,2}:\d{2})")
+
+
+def _datum_zeit_trennen(df: pd.DataFrame, spalte: str) -> pd.DataFrame:
+    """
+    Eine kombinierte Spalte wie „2026-08-25 | 22:30" in Datum und Zeit
+    aufteilen. Trennt am Strich, sonst an der Uhrzeit selbst — damit auch
+    „2026-08-25 22:30" oder „25.08.2026 22:30:15" durchgehen.
+    """
+    datum, zeit = [], []
+    for wert in df[spalte].fillna("").astype(str):
+        s = wert.strip()
+        treffer = _CHECKIN_ZEIT_RE.search(s)
+        zeit.append(treffer.group(1) if treffer else "")
+        if "|" in s:
+            d = s.split("|")[0]
+        elif treffer:
+            d = s[:treffer.start()]
+        else:
+            d = s
+        datum.append(d.strip(" |,;"))
+    df = df.drop(columns=[spalte])
+    df["Datum"] = datum
+    df["Zeit"] = zeit
+    return df
+
+
 def parse_checkins(datei) -> pd.DataFrame:
-    """EGYM-Wellpass Check-in-Export."""
+    """
+    EGYM-Wellpass Check-in-Export.
+
+    Das Backoffice liefert zwei Fassungen derselben Daten:
+      alt:  "Vor- & Nachname";"Datum";"Zeit"        → 2026-08-25 / 22:30
+      neu:  Mitglied;Datum & Uhrzeit (CEST);Status  → 2026-08-25 | 22:30
+    Beide werden hier auf Vor- & Nachname / Datum / Zeit vereinheitlicht,
+    damit der Rest der App nur ein einziges Format kennen muss.
+    """
     text = _text_lesen(datei)
     if not text:
         st.error("❌ Check-in-CSV: Encoding nicht erkannt.")
@@ -1718,7 +1753,8 @@ def parse_checkins(datei) -> pd.DataFrame:
     trenner = ";" if probe.count(";") > probe.count(",") else ","
     zeilen = text.strip().split("\n")
     kopf = next((i for i, z in enumerate(zeilen)
-                 if "Nachname" in z or ("Name" in z and "Datum" in z)), 0)
+                 if "Nachname" in z or "Mitglied" in z or "Member" in z
+                 or ("Name" in z and "Datum" in z)), 0)
 
     try:
         datei.seek(0)
@@ -1730,16 +1766,49 @@ def parse_checkins(datei) -> pd.DataFrame:
         st.error(f"❌ Check-in-CSV: {str(e)[:150]}")
         return pd.DataFrame()
 
-    um = {}
+    um, kombi_sp = {}, None
     for sp in df.columns:
         low = sp.lower()
-        if "nachname" in low or low == "name":
+        if ("nachname" in low or "mitglied" in low or "member" in low
+                or low == "name"):
             um[sp] = "Vor- & Nachname"
+        elif (("datum" in low or "date" in low)
+                and ("uhrzeit" in low or "zeit" in low or "time" in low)):
+            # „Datum & Uhrzeit (CEST)" — beides in einem Feld
+            kombi_sp = sp
         elif "datum" in low or "date" in low:
             um[sp] = "Datum"
         elif "zeit" in low or "time" in low:
             um[sp] = "Zeit"
-    return df.rename(columns=um) if um else df
+    if um:
+        df = df.rename(columns=um)
+    if kombi_sp:
+        df = _datum_zeit_trennen(df, kombi_sp)
+
+    # Die neue Fassung führt eine Status-Spalte. Bisher steht dort
+    # ausnahmslos „Eingecheckt". Alles andere ist unbekannt und wird
+    # gemeldet, statt stillschweigend als Check-in gezählt zu werden.
+    status_sp = next((s for s in df.columns
+                      if s.strip().lower() == "status"), None)
+    if status_sp is not None:
+        bekannt = ("eingecheckt", "checked in", "checked-in", "")
+        status = df[status_sp].fillna("").astype(str).str.strip()
+        fremd = ~status.str.lower().isin(bekannt)
+        if fremd.any():
+            teile = []
+            for wert, anzahl in status[fremd].value_counts().head(5).items():
+                bsp = df[fremd & (status == wert)].iloc[0]
+                name = str(bsp.get("Vor- & Nachname", "?"))
+                tag = str(bsp.get("Datum", "?"))
+                teile.append(f"„{wert}“ ({anzahl}×, z. B. {name} am {tag})")
+            st.warning(
+                "⚠️ Unbekannter Check-in-Status in der Wellpass-Datei: "
+                + "; ".join(teile)
+                + ". Diese Check-ins wurden trotzdem übernommen — "
+                "bitte kurz prüfen, ob sie zählen sollen.")
+        df = df.drop(columns=[status_sp])
+
+    return df
 
 
 def parse_kunden(datei) -> pd.DataFrame:
