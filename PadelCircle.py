@@ -9570,10 +9570,13 @@ def _wa_tagesarbeit():
     # Alle Tageszähler in EINEM Durchlauf statt einer pro Dropdown-Eintrag
     zaehler = offene_je_tag()
 
+    # Standardmäßig an: beim Öffnen zählt nur, was noch Arbeit macht.
+    # Saubere Tage lassen sich mit dem Haken jederzeit wieder einblenden.
     nur_offene = st.checkbox(
-        "Nur Tage mit offenen Fällen anzeigen", key="wa_nur_offene_tage",
-        help="Blendet Tage aus, die schon sauber sind — für den "
-             "Überblick beim Nacharbeiten mehrerer Tage.")
+        "Nur Tage mit offenen Fällen anzeigen", value=True,
+        key="wa_nur_offene_tage",
+        help="Ist voreingestellt — Tage ohne offene Fälle bleiben "
+             "ausgeblendet. Haken entfernen, um alle Tage zu sehen.")
     tage = [t for t in tage_alle if zaehler.get(str(t), 0) > 0] \
         if nur_offene else tage_alle
     if not tage:
@@ -9582,9 +9585,18 @@ def _wa_tagesarbeit():
 
     # Auswahl läuft direkt über den Widget-Wert — siehe Kommentar im
     # Dashboard. Mit einem separaten Index blieb das Datum stehen.
-    if ("wa_tag_wahl" not in st.session_state
-            or st.session_state.wa_tag_wahl not in tage):
-        st.session_state.wa_tag_wahl = tage[0]
+    # Arbeitsrichtung: ältester offener Tag zuerst, von dort vorwärts bis
+    # gestern. „tage" ist absteigend sortiert — der älteste steht hinten.
+    #
+    # Fällt der gewählte Tag aus der Liste, weil er gerade sauber geworden
+    # ist, stand hier früher tage[0]. Das ist der neueste Tag: wer den
+    # siebtletzten fertig gemacht hat, landete unvermittelt bei gestern.
+    # Stattdessen den ältesten der noch offenen neueren Tage nehmen —
+    # also genau den nächsten Tag in Arbeitsrichtung.
+    vorher = str(st.session_state.get("wa_tag_wahl") or "")
+    if vorher not in tage:
+        neuere = [str(t) for t in tage if vorher and str(t) > vorher]
+        st.session_state.wa_tag_wahl = min(neuere) if neuere else tage[-1]
 
     idx = tage.index(st.session_state.wa_tag_wahl)
 
