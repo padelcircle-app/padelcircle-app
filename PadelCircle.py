@@ -764,6 +764,12 @@ def _zu_dataframe(zeilen: list) -> pd.DataFrame:
 def loadsheet(name: str, cols=None) -> pd.DataFrame:
     """Ein Tabellenblatt aus dem gemeinsamen Abruf holen."""
     leer = pd.DataFrame(columns=cols) if cols else pd.DataFrame()
+
+    # Zuletzt selbst geschriebener Stand geht vor — siehe blatt_merken.
+    gemerkt = (st.session_state.get("_blatt_stand") or {}).get(name)
+    if gemerkt is not None:
+        return gemerkt.copy() if not gemerkt.empty else leer
+
     try:
         if name in LAZY_BLAETTER:
             # Grosse Blätter stehen nicht im Sammelabruf und werden
@@ -790,14 +796,65 @@ def loadsheet(name: str, cols=None) -> pd.DataFrame:
     return df.copy() if not df.empty else leer
 
 
+# Blätter, deren neuer Stand nach dem Schreiben im Speicher behalten
+# werden darf, statt die ganze Mappe zu verwerfen: die kleinen
+# Arbeitsblätter mit fester Spaltenliste — genau die, die im
+# Tagesablauf beschrieben werden.
+#
+# Die vier grossen abgeleiteten Blätter (buchungen, checkins, customers,
+# playtomic_raw) stehen bewusst NICHT hier. Sie entstehen beim Import,
+# tragen die Geldbeträge, und Google deutet Zahlen beim Schreiben
+# gelegentlich um — siehe betraege_verdaechtig(). Dort ist ein echter
+# Neuabruf die ehrlichere Antwort.
+OVERLAY_BLAETTER = frozenset(k for k, v in SHEET_SPALTEN.items() if v)
+
+
 def _blaetter_verwerfen():
     """
-    Alle Tabellendaten aus dem Cache werfen — Sammelabruf und die
-    einzeln geladenen grossen Blätter. Die Blattnamen bleiben stehen,
-    die ändern sich nur beim Anlegen eines neuen Blattes.
+    Alle Tabellendaten aus dem Cache werfen — Sammelabruf, die einzeln
+    geladenen grossen Blätter und die gemerkten Schreibstände. Die
+    Blattnamen bleiben stehen, die ändern sich nur beim Anlegen eines
+    neuen Blattes.
     """
     alle_blaetter.clear()
     _blatt_einzeln.clear()
+    st.session_state["_blatt_stand"] = {}
+
+
+def blatt_merken(name: str, df: pd.DataFrame) -> bool:
+    """
+    Den soeben geschriebenen Stand eines Arbeitsblattes im Speicher
+    behalten, statt die ganze Mappe zu verwerfen.
+
+    Vorher kostete jede Kleinigkeit — ein Fall als erledigt markiert,
+    eine Namensverknüpfung bestätigt, eine WhatsApp protokolliert —
+    einen kompletten Neuabruf von rund 290.000 Zellen. Dabei ist der
+    neue Inhalt bekannt: es ist genau das, was gerade geschrieben wurde.
+
+    Übergeben wird deshalb nicht der DataFrame aus dem Aufruf, sondern
+    das Ergebnis von _zu_dataframe() über die tatsächlich gesendeten
+    Zeilen. Nur so steht im Speicher dasselbe, was ein Neuabruf liefern
+    würde — inklusive der Typumwandlung durch numericise().
+
+    Gilt nur für die Sitzung und nur für OVERLAY_BLAETTER.
+    → True, wenn gemerkt; False, wenn der Aufrufer verwerfen muss
+    """
+    if name not in OVERLAY_BLAETTER:
+        return False
+    st.session_state.setdefault("_blatt_stand", {})[name] = df.copy()
+    return True
+
+
+def alles_neu_laden():
+    """
+    Wirklich alles neu holen — Tabellendaten und alle abgeleiteten
+    Auswertungen. Für die „Neu von Google laden"-Knöpfe, und für den
+    Fall, dass jemand direkt in der Tabelle etwas geändert hat.
+    """
+    _blaetter_verwerfen()
+    for fn_name in ABGELEITETE_CACHES:
+        _cache_funktion_leeren(fn_name)
+    st.session_state.name_mapping_cache = None
 
 
 def blatt_anlegen(name: str):
@@ -895,10 +952,21 @@ def savesheet_append(neu: pd.DataFrame, name: str, versuche: int = 3) -> bool:
 
     for versuch in range(versuche):
         try:
+            # Stand VOR dem Anhängen holen, solange er noch gilt
+            alt = loadsheet(name) if name in OVERLAY_BLAETTER else None
+
             ws.append_rows(zeilen, value_input_option="RAW",
                            insert_data_option="INSERT_ROWS",
                            table_range="A1")
-            _blaetter_verwerfen()
+
+            if alt is None:
+                _blaetter_verwerfen()
+            else:
+                # Über dieselbe Umwandlung wie beim Lesen, damit im
+                # Speicher steht, was ein Neuabruf liefern würde.
+                dazu = _zu_dataframe([kopf] + zeilen)
+                blatt_merken(name, pd.concat([alt, dazu], ignore_index=True)
+                             if not alt.empty else dazu)
             return True
         except Exception as e:
             if "429" in str(e) and versuch < versuche - 1:
@@ -957,7 +1025,14 @@ def savesheet(df: pd.DataFrame, name: str, versuche: int = 3) -> bool:
                     zeilen.append([_zellwert(v) for v in reihe])
 
                 ws.update(zeilen, value_input_option="RAW")
-            _blaetter_verwerfen()
+                gespeichert = _zu_dataframe(zeilen)
+            else:
+                gespeichert = pd.DataFrame()
+
+            # Der neue Inhalt ist bekannt — die Mappe muss dafür nicht
+            # komplett neu von Google geholt werden.
+            if not blatt_merken(name, gespeichert):
+                _blaetter_verwerfen()
             return True
 
         except Exception as e:
@@ -1202,14 +1277,19 @@ def _cache_funktion_leeren(name: str):
 
 def cache_leeren(*blaetter, funktionen=None):
     """
-    Datencaches leeren. Die Verbindung bleibt bestehen.
+    Abgeleitete Auswertungen leeren. Die Verbindung bleibt bestehen.
 
-    Die Tabellendaten liegen in einem gemeinsamen Abruf — der wird
-    immer komplett verworfen, das kostet nur eine Google-Anfrage.
-    Teuer sind die abgeleiteten Auswertungen: die werden nur geleert,
-    wenn sie von der Änderung überhaupt betroffen sind.
+    Die Tabellendaten selbst werden hier NICHT mehr verworfen. Dafür
+    sorgen savesheet() und savesheet_append(): die wissen genau, was
+    sie geschrieben haben, und legen den neuen Stand der kleinen
+    Arbeitsblätter direkt im Speicher ab (siehe blatt_merken). Früher
+    warf jede Kleinigkeit die ganze Mappe weg und zog beim nächsten
+    Klick rund 290.000 Zellen neu von Google — das waren die vier
+    Sekunden nach jedem Klick.
+
+    Wer wirklich alles frisch braucht — weil jemand direkt in der
+    Tabelle etwas geändert hat — nimmt alles_neu_laden().
     """
-    _blaetter_verwerfen()
 
     for fn_name in (ABGELEITETE_CACHES if funktionen is None else funktionen):
         _cache_funktion_leeren(fn_name)
@@ -6938,7 +7018,7 @@ Nummern werden automatisch umgewandelt: `0170…` → `+49170…`
             st.markdown("**Cache**")
             st.caption("Daten werden 30 Min zwischengespeichert, um Google zu schonen.")
             if st.button("🔄 Neu von Google laden", use_container_width=True):
-                cache_leeren()
+                alles_neu_laden()
                 st.toast("Cache geleert.")
                 st.rerun()
         with c2:
@@ -12309,7 +12389,7 @@ Single ab 16 / WE · **{euro(CONFIG['preis_single_prime'])}**
         c1, c2 = st.columns(2)
         with c1:
             if st.button("🔄 Alle Caches leeren", use_container_width=True):
-                cache_leeren()
+                alles_neu_laden()
                 st.toast("Geleert.")
                 st.rerun()
         with c2:
