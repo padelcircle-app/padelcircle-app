@@ -3017,6 +3017,40 @@ def gesperrt_faelle(name_norm: str) -> pd.DataFrame:
     return treffer.sort_values("datum", ascending=False)
 
 
+def gesperrte_ziele(ci_norm: str, ci_datum: str) -> pd.DataFrame:
+    """
+    Offene Sperren derselben Person, die dieser Check-in nachholen kann.
+
+    Ein mit „Gesperrt" geschlossener Fall gilt als erledigt und steht
+    deshalb NICHT in der Liste der offenen Fälle. Von der Check-in-Seite
+    aus war ein nachträglicher Check-in eines gesperrten Spielers damit
+    gar nicht zuzuordnen — dort stand nur „kein Fall zuordenbar",
+    obwohl genau dieser Check-in die Sperre auflöst.
+
+    Es gelten dieselben Regeln wie für jede Nachholung: der Check-in
+    muss NACH dem gesperrten Spieltag liegen, und wer am Tag des
+    Check-ins selbst mit Rabatt gespielt hat, braucht ihn für sich.
+
+    → dieselben Spalten wie gesperrt_faelle(), neueste zuerst
+    """
+    if eigener_anspruch(ci_norm, ci_datum):
+        return pd.DataFrame()
+
+    faelle = gesperrt_faelle(ci_norm)
+    if faelle.empty or "datum" not in faelle.columns:
+        return pd.DataFrame()
+
+    ci_d = parse_date_safe(ci_datum)
+    if ci_d is None:
+        return pd.DataFrame()
+
+    def davor(wert) -> bool:
+        d = parse_date_safe(str(wert))
+        return d is not None and d < ci_d
+
+    return faelle[faelle["datum"].map(davor)]
+
+
 def sperre_nachholung_zuordnen(name_norm: str, name: str, fall_datum: str,
                                checkin_datum: str, checkin_name: str) -> bool:
     """
@@ -10372,10 +10406,53 @@ def _wa_uebersicht():
                                                    erklaerung.get("art", ""))
                                 st.rerun()
 
+                        # ── Gesperrter Spieler ──────────────────────────
+                        #
+                        # Wer nach einer Sperre nachträglich eincheckt, ist
+                        # der häufigste Grund für einen überzähligen
+                        # Check-in — aber der gesperrte Fall gilt als
+                        # erledigt und stand deshalb in keiner Zielliste.
+                        # Hier direkt sichtbar machen und auflösbar machen,
+                        # statt den Spieler in einem anderen Reiter suchen
+                        # zu müssen.
+                        sperren = gesperrte_ziele(ci_norm, ci_datum)
+                        if not sperren.empty:
+                            n_sp = len(sperren)
+                            tage_txt = ", ".join(datum_kurz(str(d))
+                                                 for d in sperren["datum"])
+                            st.markdown(
+                                chip(f"🔒 {n_sp}× gesperrt",
+                                     "err" if n_sp > 1 else "warn"),
+                                unsafe_allow_html=True)
+                            st.caption(f"↳ gesperrte Spieltage: {tage_txt} — "
+                                       "dieser Check-in kann eine Sperre "
+                                       "auflösen.")
+
+                            paare = [(datum_kurz(str(r["datum"])), str(r["datum"]))
+                                     for _, r in sperren.iterrows()]
+                            if n_sp == 1:
+                                s_label, s_datum = paare[0]
+                            else:
+                                s_label = st.selectbox(
+                                    "Welcher gesperrte Spieltag?",
+                                    [l for l, _ in paare], key=f"ueb_spsel_{i}")
+                                s_datum = dict(paare)[s_label]
+                            if st.button(f"🔓 Sperre vom {s_label} auflösen",
+                                         key=f"ueb_sp_{i}", type="primary",
+                                         use_container_width=True):
+                                if sperre_nachholung_zuordnen(
+                                        ci_norm, ci_name, s_datum,
+                                        ci_datum, ci_name):
+                                    st.toast("Sperre aufgelöst.")
+                                    st.rerun()
+                                else:
+                                    st.warning("Konnte nicht zugeordnet werden.")
+
                         if not moeglich:
-                            st.caption("↳ Kein Fall zuordenbar — entweder "
-                                       "selbst mit Rabatt gespielt, oder kein "
-                                       "offener Fall davor.")
+                            if sperren.empty:
+                                st.caption("↳ Kein Fall zuordenbar — entweder "
+                                           "selbst mit Rabatt gespielt, oder "
+                                           "kein offener Fall davor.")
                             continue
 
                         warnung = nachhol_warnung(ci_norm, ci_datum)
