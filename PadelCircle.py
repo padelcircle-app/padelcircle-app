@@ -662,10 +662,56 @@ def get_sheet():
         return None
 
 
+# Grosse Blätter, die nur einzelne Module brauchen. Sie laufen an der
+# Sammelabfrage vorbei und werden erst geholt, wenn sie wirklich
+# gebraucht werden. playtomic_raw allein sind rund 40 % aller Zellen der
+# Mappe — im WhatsApp-Ablauf wird davon keine einzige angefasst.
+LAZY_BLAETTER = ("playtomic_raw",)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _blatt_namen() -> list:
+    """
+    Namen aller vorhandenen Tabellenblätter.
+
+    Lief früher als eigene Google-Anfrage vor JEDEM Abruf, nur um die
+    Namen zu erfahren. Die ändern sich praktisch nie — deshalb eigener
+    Cache mit langer Laufzeit. blatt_anlegen() leert ihn.
+    """
+    sheet = get_sheet()
+    return [ws.title for ws in sheet.worksheets()] if sheet else []
+
+
+def _werte_holen(sheet, namen: list) -> dict:
+    """
+    Werte mehrerer Blätter in einem Aufruf, mit Wiederholung beim
+    Google-Limit.
+
+    Wichtig: Bei einem Fehler wird eine Ausnahme ausgelöst statt leerer
+    Daten. Sonst hätte ein kurzzeitiges Limit eine leere Tabelle für
+    30 Minuten in den Cache gebrannt — die App hätte behauptet, es gäbe
+    keine Daten.
+    """
+    letzter_fehler = None
+    for versuch in range(3):
+        try:
+            antwort = sheet.values_batch_get(namen)
+            bereiche = antwort.get("valueRanges", [])
+            return {name: _zu_dataframe(bereich.get("values", []))
+                    for name, bereich in zip(namen, bereiche)}
+        except Exception as e:
+            letzter_fehler = e
+            if "429" in str(e) or "quota" in str(e).lower():
+                time.sleep(3 + versuch * 4)
+            else:
+                break
+    raise RuntimeError(f"Google-Abruf fehlgeschlagen: {letzter_fehler}")
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def alle_blaetter() -> dict:
     """
-    Alle Tabellenblätter in EINEM Google-Aufruf.
+    Alle laufend gebrauchten Tabellenblätter in EINEM Google-Aufruf.
 
     Vorher holte jedes loadsheet() sein Blatt einzeln — und weil gspread
     für worksheet(name) jedes Mal die Mappenstruktur mitlädt, waren das
@@ -673,44 +719,27 @@ def alle_blaetter() -> dict:
     jedes Mal wenn der Cache geleert wurde. Genau daran lief das
     Google-Limit auf.
 
-    Jetzt: eine Anfrage für die Struktur, eine für alle Werte.
-
-    Wichtig: Bei einem Fehler wird eine Ausnahme ausgelöst statt leerer
-    Daten. Sonst hätte ein kurzzeitiges Limit eine leere Tabelle für
-    30 Minuten in den Cache gebrannt — die App hätte behauptet, es gäbe
-    keine Daten.
+    Jetzt: die Blattnamen kommen aus dem eigenen Cache, dazu eine
+    einzige Anfrage für alle Werte — ohne die Blätter aus
+    LAZY_BLAETTER.
     """
     sheet = get_sheet()
     if sheet is None:
         return {}
 
-    letzter_fehler = None
-    for versuch in range(3):
-        try:
-            # Alle vorhandenen Blätter holen. Die vier grossen —
-            # buchungen, checkins, customers, playtomic_raw — entstehen
-            # erst beim Import und stehen deshalb nicht in SHEET_SPALTEN.
-            gesucht = [ws.title for ws in sheet.worksheets()]
-            if not gesucht:
-                return {}
+    gesucht = [n for n in _blatt_namen() if n not in LAZY_BLAETTER]
+    if not gesucht:
+        return {}
+    return _werte_holen(sheet, gesucht)
 
-            antwort = sheet.values_batch_get(gesucht)
-            bereiche = antwort.get("valueRanges", [])
 
-            blaetter = {}
-            for name, bereich in zip(gesucht, bereiche):
-                zeilen = bereich.get("values", [])
-                blaetter[name] = _zu_dataframe(zeilen)
-            return blaetter
-
-        except Exception as e:
-            letzter_fehler = e
-            if "429" in str(e) or "quota" in str(e).lower():
-                time.sleep(3 + versuch * 4)
-            else:
-                break
-
-    raise RuntimeError(f"Google-Abruf fehlgeschlagen: {letzter_fehler}")
+@st.cache_data(ttl=1800, show_spinner=False)
+def _blatt_einzeln(name: str) -> pd.DataFrame:
+    """Ein einzelnes grosses Blatt nachladen — siehe LAZY_BLAETTER."""
+    sheet = get_sheet()
+    if sheet is None:
+        return pd.DataFrame()
+    return _werte_holen(sheet, [name]).get(name, pd.DataFrame())
 
 
 def _zu_dataframe(zeilen: list) -> pd.DataFrame:
@@ -736,7 +765,18 @@ def loadsheet(name: str, cols=None) -> pd.DataFrame:
     """Ein Tabellenblatt aus dem gemeinsamen Abruf holen."""
     leer = pd.DataFrame(columns=cols) if cols else pd.DataFrame()
     try:
-        blaetter = alle_blaetter()
+        if name in LAZY_BLAETTER:
+            # Grosse Blätter stehen nicht im Sammelabruf und werden
+            # nur geholt, wenn sie wirklich gebraucht werden.
+            if name not in _blatt_namen():
+                blatt_anlegen(name)
+                return leer
+            df = _blatt_einzeln(name)
+        else:
+            df = alle_blaetter().get(name)
+            if df is None:
+                blatt_anlegen(name)
+                return leer
     except Exception:
         # Nicht gecacht — beim nächsten Durchlauf wird neu versucht.
         # Die Meldung nur einmal pro Seitenaufbau zeigen, sonst steht
@@ -747,11 +787,17 @@ def loadsheet(name: str, cols=None) -> pd.DataFrame:
                        "und die Seite neu laden.")
         return leer
 
-    df = blaetter.get(name)
-    if df is None:
-        blatt_anlegen(name)
-        return leer
     return df.copy() if not df.empty else leer
+
+
+def _blaetter_verwerfen():
+    """
+    Alle Tabellendaten aus dem Cache werfen — Sammelabruf und die
+    einzeln geladenen grossen Blätter. Die Blattnamen bleiben stehen,
+    die ändern sich nur beim Anlegen eines neuen Blattes.
+    """
+    alle_blaetter.clear()
+    _blatt_einzeln.clear()
 
 
 def blatt_anlegen(name: str):
@@ -761,19 +807,20 @@ def blatt_anlegen(name: str):
         return
     try:
         sheet.add_worksheet(title=name, rows=2000, cols=30)
-        alle_blaetter.clear()
+        _blatt_namen.clear()
+        _blaetter_verwerfen()
     except Exception:
         pass
 
 
 def _cache_zuruecksetzen():
     """Der gemeinsame Abruf ist die einzige Quelle — hier zurücksetzen."""
-    alle_blaetter.clear()
+    _blaetter_verwerfen()
 
 
 # loadsheet.clear() wird an vielen Stellen aufgerufen — auf den
 # gemeinsamen Abruf umbiegen, damit nichts ins Leere läuft.
-loadsheet.clear = lambda *a, **k: alle_blaetter.clear()
+loadsheet.clear = lambda *a, **k: _blaetter_verwerfen()
 
 
 def _zellwert(x) -> str:
@@ -851,7 +898,7 @@ def savesheet_append(neu: pd.DataFrame, name: str, versuche: int = 3) -> bool:
             ws.append_rows(zeilen, value_input_option="RAW",
                            insert_data_option="INSERT_ROWS",
                            table_range="A1")
-            alle_blaetter.clear()
+            _blaetter_verwerfen()
             return True
         except Exception as e:
             if "429" in str(e) and versuch < versuche - 1:
@@ -910,7 +957,7 @@ def savesheet(df: pd.DataFrame, name: str, versuche: int = 3) -> bool:
                     zeilen.append([_zellwert(v) for v in reihe])
 
                 ws.update(zeilen, value_input_option="RAW")
-            alle_blaetter.clear()
+            _blaetter_verwerfen()
             return True
 
         except Exception as e:
@@ -1158,11 +1205,11 @@ def cache_leeren(*blaetter, funktionen=None):
     Datencaches leeren. Die Verbindung bleibt bestehen.
 
     Die Tabellendaten liegen in einem gemeinsamen Abruf — der wird
-    immer komplett verworfen, das kostet nur zwei Google-Anfragen.
+    immer komplett verworfen, das kostet nur eine Google-Anfrage.
     Teuer sind die abgeleiteten Auswertungen: die werden nur geleert,
     wenn sie von der Änderung überhaupt betroffen sind.
     """
-    alle_blaetter.clear()
+    _blaetter_verwerfen()
 
     for fn_name in (ABGELEITETE_CACHES if funktionen is None else funktionen):
         _cache_funktion_leeren(fn_name)
