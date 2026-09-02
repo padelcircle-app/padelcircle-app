@@ -6842,20 +6842,40 @@ def zahlungs_slots(pdf: pd.DataFrame) -> list:
         nn = normalize_name(name)
         g = gruppen.setdefault((nn, str(datum), zeit), {
             "name": name, "name_norm": nn, "datum": datum, "zeit": zeit,
-            "minute": minute, "netto": 0.0, "zeilen": 0,
-            "erstattet": False, "frei": False})
-        g["netto"] += parse_betrag(r.get("Total"))
+            "minute": minute, "netto": 0.0, "gestellt": 0.0, "zeilen": 0,
+            "erstattet": False, "frei": False, "verfallen": False,
+            "bezahlt_zeilen": 0})
+
+        betrag = parse_betrag(r.get("Total"))
+        status = str(r.get("Payment status", "")).strip().lower()
         g["zeilen"] += 1
-        if str(r.get("Payment status", "")).strip().lower() == "refund":
-            g["erstattet"] = True
-        if str(r.get("Payment method", "")).strip().lower() == "free payment":
-            g["frei"] = True
+
+        if status == "voided":
+            # Der Anteil ist verfallen — die Person hat nicht gezahlt. Er
+            # zählt deshalb NICHT zum Netto. Der geforderte Betrag bleibt
+            # trotzdem wichtig: er sagt, was ein voller Anteil in diesem
+            # Slot gekostet hätte.
+            g["verfallen"] = True
+            g["gestellt"] += max(0.0, betrag)
+        else:
+            # Paid und Pending zählen beide. Pending heisst: gebucht,
+            # gespielt, nur noch nicht bezahlt — die Buchung steht.
+            g["netto"] += betrag
+            g["bezahlt_zeilen"] += 1
+            if betrag > 0:
+                g["gestellt"] += betrag
+            if status == "refund":
+                g["erstattet"] = True
+            if str(r.get("Payment method", "")).strip().lower() == "free payment":
+                g["frei"] = True
+
         # Die ausführlichste Schreibweise gewinnt als Anzeigename
         if len(name) > len(g["name"]):
             g["name"] = name
 
     for g in gruppen.values():
         g["netto"] = round(g["netto"], 2)
+        g["gestellt"] = round(g["gestellt"], 2)
     return sorted(gruppen.values(),
                   key=lambda g: (g["datum"], g["zeit"], g["name"]))
 
@@ -6868,18 +6888,30 @@ def _volle_anteile(slots: list) -> set:
     darüber Zahlungen für den ganzen Platz. Ohne diese Grenze würde 42 €
     als Rabatt auf 54 € gelten — und 54 € ist ein ganzer Court, kein
     Anteil.
+
+    Gezählt wird der GEFORDERTE Betrag, nicht der gezahlte. Ein verfallener
+    Anteil über 13,50 € sagt genauso viel über den Vollpreis wie ein
+    bezahlter. Ohne die Datei mit den offenen Posten fehlten diese
+    Vergleichswerte — und dann wurde ein Rabatt nicht mehr als solcher
+    erkannt.
     """
-    return {g["netto"] for g in slots if ANTEIL_MIN <= g["netto"] <= ANTEIL_MAX}
+    return {g["gestellt"] for g in slots
+            if ANTEIL_MIN <= g["gestellt"] <= ANTEIL_MAX}
 
 
 def slot_bewerten(g: dict, volle: set) -> tuple:
     """
     Was ist in diesem Slot passiert?
-    → („wellpass" | „vollzahler" | „storniert", Klartext für die Anzeige)
+    → („wellpass" | „vollzahler" | „unbezahlt" | „storniert", Klartext)
     """
     b = g["netto"]
     if b == 0 and g["frei"] and not g["erstattet"]:
         return "wellpass", f"0 € — Anteil lag unter {euro(WELLPASS_RABATT)}"
+    if b <= 0 and g["verfallen"] and g["bezahlt_zeilen"] == 0:
+        # Nur verfallene Zeilen: die Person stand im Slot, hat ihren
+        # Anteil aber nie gezahlt. Kein Wellpass-Fall — dafür war der
+        # geforderte Betrag der volle Preis.
+        return "unbezahlt", f"{euro(g['gestellt'])} offen, Anteil verfallen"
     if b <= 0:
         return "storniert", "netto 0 € nach Erstattung"
     voll = round(b + WELLPASS_RABATT, 2)
@@ -7034,8 +7066,13 @@ def _analysieren_zahlungen(pdf, cdf) -> bool:
 
         fehler = (rabatt and c is None and not team
                   and not ist_platzhalter(name))
-        listenpreis = (round(g["netto"] + WELLPASS_RABATT, 2) if rabatt
-                       else g["netto"])
+        if rabatt:
+            listenpreis = round(g["netto"] + WELLPASS_RABATT, 2)
+        elif art == "unbezahlt":
+            # Gezahlt wurde nichts, gefordert war der volle Anteil
+            listenpreis = g["gestellt"]
+        else:
+            listenpreis = g["netto"]
 
         buchungen_out.append({
             "Datum": str(g["datum"]),
@@ -7098,8 +7135,16 @@ def _analysieren_zahlungen(pdf, cdf) -> bool:
     return True
 
 
-def _verarbeiten_zahlungen(z_datei, c_datei) -> bool:
-    """Neuer Weg: Zahlungsdatei + Check-ins, ohne Buchungsexport."""
+def _verarbeiten_zahlungen(z_datei, c_datei, o_datei=None) -> bool:
+    """
+    Neuer Weg: Zahlungen + Check-ins, ohne Buchungsexport.
+
+    Die dritte Datei mit den offenen Posten gehört dazu. Ohne sie fehlen
+    alle Buchungen, die bei Spielende noch nicht bezahlt waren — und mit
+    ihnen die Vergleichswerte dafür, was ein voller Anteil kostet. Auf
+    dem Prüfbestand betraf das acht Personen, die sonst gar nicht
+    aufgetaucht wären.
+    """
     pdf = parse_playtomic(z_datei)
     if pdf.empty:
         return False
@@ -7108,8 +7153,21 @@ def _verarbeiten_zahlungen(z_datei, c_datei) -> bool:
         st.error("❌ Check-in-Datei konnte nicht gelesen werden.")
         return False
 
-    # Rohzeilen sichern — dieselbe Quelle wie beim alten Weg
+    # Rohzeilen sichern — dieselbe Quelle wie beim alten Weg. Nur die
+    # bezahlten haben eine Payment id; die offenen Posten würden sonst
+    # bei jedem Import erneut angehängt.
     append_rows(pdf, "playtomic_raw", id_spalte="Payment id")
+
+    if o_datei is not None:
+        odf = parse_playtomic(o_datei)
+        if odf.empty:
+            st.warning("⚠️ Die Datei mit den offenen Posten konnte nicht "
+                       "gelesen werden — gerechnet wird ohne sie.")
+        else:
+            gemeinsam = [c for c in odf.columns if c in pdf.columns]
+            pdf = pd.concat([pdf[gemeinsam], odf[gemeinsam]], ignore_index=True)
+            st.caption(f"Offene Posten mitgerechnet: {len(odf)} Zeilen.")
+
     return _analysieren_zahlungen(pdf, cdf)
 
 
@@ -7166,7 +7224,8 @@ def modul_daten():
 
         n1, n2 = st.columns(2)
         with n1:
-            z_datei = st.file_uploader("Zahlungen (.csv)", type=["csv"], key="up_z")
+            z_datei = st.file_uploader("Zahlungen · bezahlt (.csv)",
+                                       type=["csv"], key="up_z")
             if z_datei:
                 st.caption(f"✓ {z_datei.name}")
         with n2:
@@ -7175,15 +7234,24 @@ def modul_daten():
             if zc_datei:
                 st.caption(f"✓ {zc_datei.name}")
 
+        o_datei = st.file_uploader("Zahlungen · offene Posten (.csv)",
+                                   type=["csv"], key="up_zo")
+        if o_datei:
+            st.caption(f"✓ {o_datei.name}")
+        else:
+            st.caption("Wichtig: Buchungen, die bei Spielende noch nicht "
+                       "bezahlt waren, stehen nur hier. Ohne diese Datei "
+                       "fehlen sie in der Auswertung.")
+
         st.markdown("")
         if st.button("🔄 Abgleichen", type="primary", use_container_width=True,
                      disabled=not (z_datei and zc_datei), key="btn_zahl"):
             with st.spinner(lade_text("verarbeite")):
-                if _verarbeiten_zahlungen(z_datei, zc_datei):
+                if _verarbeiten_zahlungen(z_datei, zc_datei, o_datei):
                     st.rerun()
 
         if not (z_datei and zc_datei):
-            st.caption("Beide Dateien werden gebraucht.")
+            st.caption("Zahlungen und Check-ins werden gebraucht.")
 
         with st.expander("Wie gerechnet wird"):
             st.markdown(f"""
