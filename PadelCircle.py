@@ -13071,6 +13071,46 @@ def command_center():
 #   ▶️  MAIN
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _schnellnavigation(aktiv):
+    """
+    Zweiter Weg zwischen den Modulen, direkt im Inhalt.
+
+    Wer die Seitenleiste zuklappt, kam bisher nirgends mehr hin: der Pfeil
+    zum Wiederaufklappen sitzt in der Kopfzeile, die per CSS auf die dunkle
+    Seitenfarbe gesetzt wird, und war dadurch praktisch unsichtbar. Diese
+    Zeile löst das ohne Rückgriff auf Streamlit-Interna — sie ist immer da,
+    egal ob die Seitenleiste offen ist oder nicht.
+    """
+    offen = [m for m in MODULE if m["an"]]
+    namen = ["🏠  Übersicht"] + [f"{m['ic']}  {m['ti']}" for m in offen]
+    ids = [None] + [m["id"] for m in offen]
+    idx = ids.index(aktiv) if aktiv in ids else 0
+
+    # Der Schlüssel enthält das aktive Modul. Ändert es sich, baut Streamlit
+    # das Feld neu auf — sonst stünde dort noch die alte Auswahl und löste
+    # sofort einen Sprung zurück aus. Der Knopf hat bewusst ein anderes
+    # Präfix, sonst räumt die Schleife seinen eigenen Schlüssel weg.
+    wahl_key = f"topnav_wahl_{aktiv}"
+    for alt in [k for k in list(st.session_state)
+                if k.startswith("topnav_wahl_") and k != wahl_key]:
+        del st.session_state[alt]
+
+    n1, n2 = st.columns([1, 3])
+    with n1:
+        if st.button("🏠  Übersicht", use_container_width=True,
+                     key="nav_home_oben", disabled=aktiv is None):
+            st.session_state.modul = None
+            st.rerun()
+    with n2:
+        wahl = st.selectbox("Modul wechseln", namen, index=idx,
+                            label_visibility="collapsed", key=wahl_key)
+        ziel = ids[namen.index(wahl)]
+        if ziel != aktiv:
+            st.session_state.modul = ziel
+            st.rerun()
+    st.markdown("")
+
+
 def main():
     st.set_page_config(page_title=f"{CONFIG['name']} · Command Center",
                        page_icon="🔵", layout="wide",
@@ -13149,6 +13189,8 @@ def main():
         st.caption(f"{COURTS_GESAMT} Courts · {CONFIG['stadt']}")
 
     # ── Inhalt ──────────────────────────────────────────────────────────
+    _schnellnavigation(aktiv)
+
     if aktiv is None:
         command_center()
     else:
