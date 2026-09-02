@@ -13095,19 +13095,27 @@ def _schnellnavigation(aktiv):
                 if k.startswith("topnav_wahl_") and k != wahl_key]:
         del st.session_state[alt]
 
-    n1, n2 = st.columns([1, 3])
-    with n1:
-        if st.button("🏠  Übersicht", use_container_width=True,
-                     key="nav_home_oben", disabled=aktiv is None):
-            st.session_state.modul = None
-            st.rerun()
-    with n2:
-        wahl = st.selectbox("Modul wechseln", namen, index=idx,
-                            label_visibility="collapsed", key=wahl_key)
+    def _wechsel(wahl):
         ziel = ids[namen.index(wahl)]
         if ziel != aktiv:
             st.session_state.modul = ziel
             st.rerun()
+
+    if aktiv is None:
+        # Auf der Startseite wäre ein „Übersicht"-Knopf sinnlos — er stand
+        # nur ausgegraut herum und sah nach einem Fehler aus.
+        _wechsel(st.selectbox("Modul wechseln", namen, index=idx,
+                              label_visibility="collapsed", key=wahl_key))
+    else:
+        n1, n2 = st.columns([1, 3])
+        with n1:
+            if st.button("🏠  Übersicht", use_container_width=True,
+                         key="nav_home_oben"):
+                st.session_state.modul = None
+                st.rerun()
+        with n2:
+            _wechsel(st.selectbox("Modul wechseln", namen, index=idx,
+                                  label_visibility="collapsed", key=wahl_key))
     st.markdown("")
 
 
