@@ -6842,28 +6842,23 @@ def zahlungs_slots(pdf: pd.DataFrame) -> list:
         nn = normalize_name(name)
         g = gruppen.setdefault((nn, str(datum), zeit), {
             "name": name, "name_norm": nn, "datum": datum, "zeit": zeit,
-            "minute": minute, "netto": 0.0, "gestellt": 0.0, "zeilen": 0,
-            "erstattet": False, "frei": False, "verfallen": False,
-            "bezahlt_zeilen": 0})
+            "minute": minute, "netto": 0.0, "verfallen": 0.0, "zeilen": 0,
+            "erstattet": False, "frei": False, "bezahlt_zeilen": 0})
 
         betrag = parse_betrag(r.get("Total"))
         status = str(r.get("Payment status", "")).strip().lower()
         g["zeilen"] += 1
 
         if status == "voided":
-            # Der Anteil ist verfallen — die Person hat nicht gezahlt. Er
-            # zählt deshalb NICHT zum Netto. Der geforderte Betrag bleibt
-            # trotzdem wichtig: er sagt, was ein voller Anteil in diesem
-            # Slot gekostet hätte.
-            g["verfallen"] = True
-            g["gestellt"] += max(0.0, betrag)
+            # Verfallener Zahlungsanteil. Er bewegt kein Geld, nennt aber
+            # den Preis dieser Person für diesen Platz — und in dem Preis
+            # steckt der Wellpass-Rabatt bereits drin.
+            g["verfallen"] = max(g["verfallen"], max(0.0, betrag))
         else:
             # Paid und Pending zählen beide. Pending heisst: gebucht,
             # gespielt, nur noch nicht bezahlt — die Buchung steht.
             g["netto"] += betrag
             g["bezahlt_zeilen"] += 1
-            if betrag > 0:
-                g["gestellt"] += betrag
             if status == "refund":
                 g["erstattet"] = True
             if str(r.get("Payment method", "")).strip().lower() == "free payment":
@@ -6875,7 +6870,13 @@ def zahlungs_slots(pdf: pd.DataFrame) -> list:
 
     for g in gruppen.values():
         g["netto"] = round(g["netto"], 2)
-        g["gestellt"] = round(g["gestellt"], 2)
+        # Der Preis dieser Person für diesen Platz. Hat sie gezahlt oder
+        # schuldet sie noch etwas, gilt das Netto — Erstattungen sind da
+        # schon abgezogen. Steht nur ein verfallener Anteil da, gilt
+        # dieser: die Person hat gespielt, und ihr Rabatt ist in dem
+        # Betrag bereits eingerechnet.
+        g["preis"] = (g["netto"] if g["bezahlt_zeilen"]
+                      else round(g["verfallen"], 2))
     return sorted(gruppen.values(),
                   key=lambda g: (g["datum"], g["zeit"], g["name"]))
 
@@ -6889,34 +6890,38 @@ def _volle_anteile(slots: list) -> set:
     als Rabatt auf 54 € gelten — und 54 € ist ein ganzer Court, kein
     Anteil.
 
-    Gezählt wird der GEFORDERTE Betrag, nicht der gezahlte. Ein verfallener
-    Anteil über 13,50 € sagt genauso viel über den Vollpreis wie ein
-    bezahlter. Ohne die Datei mit den offenen Posten fehlten diese
+    Gezählt wird der Preis der Person, egal ob schon bezahlt. Ein noch
+    offener Anteil über 13,50 € sagt genauso viel über den Vollpreis wie
+    ein bezahlter. Ohne die Datei mit den offenen Posten fehlten diese
     Vergleichswerte — und dann wurde ein Rabatt nicht mehr als solcher
     erkannt.
     """
-    return {g["gestellt"] for g in slots
-            if ANTEIL_MIN <= g["gestellt"] <= ANTEIL_MAX}
+    return {g["preis"] for g in slots
+            if ANTEIL_MIN <= g["preis"] <= ANTEIL_MAX}
 
 
 def slot_bewerten(g: dict, volle: set) -> tuple:
     """
     Was ist in diesem Slot passiert?
-    → („wellpass" | „vollzahler" | „unbezahlt" | „storniert", Klartext)
+    → („wellpass" | „vollzahler" | „storniert", Klartext für die Anzeige)
+
+    Entscheidend ist der Preis der Person, nicht ob sie schon bezahlt
+    hat. Wer 1,50 € schuldet, hat den Rabatt bereits bekommen — der
+    steckt in der Zahl drin. Also hat er gespielt, also muss er
+    eingecheckt haben. Ob das Geld schon da ist, spielt für den Abgleich
+    keine Rolle.
     """
-    b = g["netto"]
+    b = g["preis"]
     if b == 0 and g["frei"] and not g["erstattet"]:
         return "wellpass", f"0 € — Anteil lag unter {euro(WELLPASS_RABATT)}"
-    if b <= 0 and g["verfallen"] and g["bezahlt_zeilen"] == 0:
-        # Nur verfallene Zeilen: die Person stand im Slot, hat ihren
-        # Anteil aber nie gezahlt. Kein Wellpass-Fall — dafür war der
-        # geforderte Betrag der volle Preis.
-        return "unbezahlt", f"{euro(g['gestellt'])} offen, Anteil verfallen"
     if b <= 0:
-        return "storniert", "netto 0 € nach Erstattung"
+        # Storniert, oder ein Nullbetrag ohne Zahlungsart — daraus lässt
+        # sich kein Rabatt ablesen.
+        return "storniert", "kein Betrag übrig"
     voll = round(b + WELLPASS_RABATT, 2)
     if b <= ANTEIL_MAX - WELLPASS_RABATT and voll in volle:
-        return "wellpass", f"{euro(b)} statt {euro(voll)}"
+        offen = "" if g["bezahlt_zeilen"] else " (noch offen)"
+        return "wellpass", f"{euro(b)} statt {euro(voll)}{offen}"
     return "vollzahler", ""
 
 
@@ -7066,13 +7071,8 @@ def _analysieren_zahlungen(pdf, cdf) -> bool:
 
         fehler = (rabatt and c is None and not team
                   and not ist_platzhalter(name))
-        if rabatt:
-            listenpreis = round(g["netto"] + WELLPASS_RABATT, 2)
-        elif art == "unbezahlt":
-            # Gezahlt wurde nichts, gefordert war der volle Anteil
-            listenpreis = g["gestellt"]
-        else:
-            listenpreis = g["netto"]
+        listenpreis = (round(g["preis"] + WELLPASS_RABATT, 2) if rabatt
+                       else g["preis"])
 
         buchungen_out.append({
             "Datum": str(g["datum"]),
