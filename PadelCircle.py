@@ -4891,6 +4891,36 @@ def css_laden():
  }}
  .block-container {{ padding-top:2.2rem; padding-bottom:3rem; max-width:1240px; }}
  #MainMenu, footer, [data-testid="stToolbar"], [data-testid="stDecoration"] {{ display:none !important; }}
+ /* Pfeil zum Wiederaufklappen der Seitenleiste.
+    Er sitzt in der Kopfzeile, und die steht oben auf der dunklen
+    Seitenfarbe — dadurch war er praktisch unsichtbar. Wer die
+    Seitenleiste einmal zugeklappt hatte, kam an das Menü nicht mehr
+    heran und konnte zwischen den Modulen nicht mehr wechseln.
+    Streamlit hat die Kennung zwischen den Versionen umbenannt, deshalb
+    beide. */
+ [data-testid="stSidebarCollapsedControl"],
+ [data-testid="collapsedControl"] {{
+  background: {C['ink2']} !important;
+  border: 1px solid {C['volt']} !important;
+  border-radius: 10px !important;
+  padding: .3rem !important;
+  box-shadow: 0 2px 10px rgba(0,0,0,.5) !important;
+  opacity: 1 !important;
+  visibility: visible !important;
+ }}
+ [data-testid="stSidebarCollapsedControl"] svg,
+ [data-testid="collapsedControl"] svg,
+ [data-testid="stSidebarCollapsedControl"] button,
+ [data-testid="collapsedControl"] button {{
+  color: {C['volt']} !important;
+  fill: {C['volt']} !important;
+ }}
+ [data-testid="stSidebarCollapsedControl"]:hover,
+ [data-testid="collapsedControl"]:hover {{
+  background: {C['ink3']} !important;
+ }}
+ /* Auch der Zuklapp-Pfeil INNERHALB der Seitenleiste soll sichtbar sein */
+ [data-testid="stSidebarCollapseButton"] svg {{ color: {C['dim']} !important; }}
  /* Schriftart nur auf Text-Elemente, niemals pauschal auf span/div —
     sonst werden Icon-Ligaturen zerstört. */
  h1,h2,h3,h4,h5,h6, p, li, td, th, label,
