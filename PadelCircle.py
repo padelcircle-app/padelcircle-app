@@ -6745,6 +6745,344 @@ def _analysieren(bdf, cdf, pdf=None, zahlungen_index=None) -> bool:
     return True
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#   💳  ABGLEICH OHNE BUCHUNGSDATEI  —  nur Zahlungen + Check-ins
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# Playtomic liefert seit Ende August keinen Buchungsexport mehr. Der Abgleich
+# läuft deshalb allein über die Zahlungsdatei und das EGYM-Protokoll — und ist
+# dabei genauer als der alte Weg:
+#
+#   • Jede Zahlungszeile nennt die Person selbst. Das Raten, wer den Rabatt
+#     getragen hat (_wellpass_traeger), entfällt vollständig.
+#   • Der Rabatt ist ein fester Betrag. Wer ihn bekommen hat, zahlt genau so
+#     viel weniger — das ist rechenbar statt geschätzt. Beleg an echten Daten:
+#     1,50 → 13,50 · 4,50 → 16,50 · 6,00 → 18,00. Jeder Rabattpreis plus 12 €
+#     ergibt einen Anteil, den es in derselben Datei wirklich gibt. 7 € dagegen
+#     nicht — 19 € kommt nirgends vor, 7 € ist ein voller Anteil.
+#   • Die Spielzeit steht in der Zeile. Der Check-in liegt im Median sechs
+#     Minuten davor, 96 % im Fenster −45…+30 Minuten. Zeitnähe wird damit zum
+#     zweiten Beleg, den der alte Weg gar nicht hatte.
+#
+# Entscheidend ist die Netto-Rechnung: Playtomic bucht Korrekturen als eigene
+# Erstattungszeile mit negativem Betrag. Wer 6 € zahlt, 6 € zurückbekommt und
+# dann 1,50 € zahlt, hat EINEN Anspruch über 1,50 € — nicht drei Fälle. Ohne
+# das Verrechnen sahen neun Personen so aus, als hätten sie an einem Tag
+# mehrfach Wellpass genutzt.
+
+WELLPASS_RABATT = 12.0                 # fester Nachlass je Person und Buchung
+ANTEIL_MIN, ANTEIL_MAX = 9.0, 22.0     # plausibler Anteil EINER Person
+CHECKIN_FENSTER = (-45, 30)            # Minuten um den Spielbeginn
+ZAHL_SKUS = ("User booking registration", "Open match registration")
+
+
+def _slot_zeit(wert) -> tuple:
+    """„31/08/2026 19:00" → (date, „19:00", Minuten seit Mitternacht)."""
+    d = parse_datetime_safe(wert)
+    if d is None:
+        return (None, "", -1)
+    return (d.date(), d.strftime("%H:%M"), d.hour * 60 + d.minute)
+
+
+def zahlungs_slots(pdf: pd.DataFrame) -> list:
+    """
+    Zahlungszeilen zu Person-und-Slot-Gruppen verdichten.
+
+    Erstattungen werden abgezogen statt als eigene Zeile gezählt. Zurück
+    kommt je Person und Spielzeit ein Eintrag mit dem tatsächlich
+    gezahlten Netto-Betrag.
+    """
+    if pdf is None or pdf.empty:
+        return []
+    if not {"User name", "Service date", "Total"} <= set(pdf.columns):
+        return []
+
+    hat_sku = "Product SKU" in pdf.columns
+    gruppen = {}
+    for _, r in pdf.iterrows():
+        if hat_sku and str(r.get("Product SKU", "")).strip() not in ZAHL_SKUS:
+            continue
+        datum, zeit, minute = _slot_zeit(r.get("Service date"))
+        if datum is None:
+            continue
+        name = str(r.get("User name", "")).strip()
+        if not name or name == "-":
+            continue
+
+        nn = normalize_name(name)
+        g = gruppen.setdefault((nn, str(datum), zeit), {
+            "name": name, "name_norm": nn, "datum": datum, "zeit": zeit,
+            "minute": minute, "netto": 0.0, "zeilen": 0,
+            "erstattet": False, "frei": False})
+        g["netto"] += parse_betrag(r.get("Total"))
+        g["zeilen"] += 1
+        if str(r.get("Payment status", "")).strip().lower() == "refund":
+            g["erstattet"] = True
+        if str(r.get("Payment method", "")).strip().lower() == "free payment":
+            g["frei"] = True
+        # Die ausführlichste Schreibweise gewinnt als Anzeigename
+        if len(name) > len(g["name"]):
+            g["name"] = name
+
+    for g in gruppen.values():
+        g["netto"] = round(g["netto"], 2)
+    return sorted(gruppen.values(),
+                  key=lambda g: (g["datum"], g["zeit"], g["name"]))
+
+
+def _volle_anteile(slots: list) -> set:
+    """
+    Welche Beträge kommen als voller Personenanteil vor?
+
+    Nur was zwischen 9 und 22 € liegt. Darunter stehen Rabattpreise,
+    darüber Zahlungen für den ganzen Platz. Ohne diese Grenze würde 42 €
+    als Rabatt auf 54 € gelten — und 54 € ist ein ganzer Court, kein
+    Anteil.
+    """
+    return {g["netto"] for g in slots if ANTEIL_MIN <= g["netto"] <= ANTEIL_MAX}
+
+
+def slot_bewerten(g: dict, volle: set) -> tuple:
+    """
+    Was ist in diesem Slot passiert?
+    → („wellpass" | „vollzahler" | „storniert", Klartext für die Anzeige)
+    """
+    b = g["netto"]
+    if b == 0 and g["frei"] and not g["erstattet"]:
+        return "wellpass", f"0 € — Anteil lag unter {euro(WELLPASS_RABATT)}"
+    if b <= 0:
+        return "storniert", "netto 0 € nach Erstattung"
+    voll = round(b + WELLPASS_RABATT, 2)
+    if b <= ANTEIL_MAX - WELLPASS_RABATT and voll in volle:
+        return "wellpass", f"{euro(b)} statt {euro(voll)}"
+    return "vollzahler", ""
+
+
+def _namensteil_passt(a: str, b: str) -> bool:
+    """Zwei Namensteile: gleich, eine Initiale, oder klare Abkürzung."""
+    if a == b:
+        return True
+    if len(a) == 1 or len(b) == 1:
+        return b.startswith(a) or a.startswith(b)
+    kurz, lang = (a, b) if len(a) < len(b) else (b, a)
+    return len(kurz) >= 4 and lang.startswith(kurz)
+
+
+def namen_decken_sich(a: str, b: str) -> bool:
+    """
+    Jeder Teil des kürzeren Namens braucht im längeren einen Partner.
+
+    So wird „Kim S" → Kim Kilian Schneider ein Treffer, „Marco Polo" →
+    Marc Abholz aber keiner. Ohne diese Prüfung schnappte sich eine
+    zweite Anspruchszeile den Check-in eines Fremden.
+    """
+    ta, tb = str(a).split(), str(b).split()
+    if not ta or not tb:
+        return False
+    kurz, lang = (ta, tb) if len(ta) <= len(tb) else (tb, ta)
+    rest = list(lang)
+    for teil in kurz:
+        treffer = next((r for r in rest if _namensteil_passt(teil, r)), None)
+        if treffer is None:
+            return False
+        rest.remove(treffer)
+    return True
+
+
+def _checkins_aufbereiten(cdf: pd.DataFrame) -> list:
+    """Check-in-Tabelle in eine Liste mit Minutenangabe."""
+    if cdf is None or cdf.empty or "Vor- & Nachname" not in cdf.columns:
+        return []
+    out = []
+    for _, r in cdf.iterrows():
+        d = parse_date_safe(r.get("Datum"))
+        if d is None:
+            continue
+        zeit = str(r.get("Zeit", "") or "").strip()
+        std = stunde_aus_zeit(zeit)
+        try:
+            minute = int(zeit.split(":")[0]) * 60 + int(zeit.split(":")[1])
+        except (ValueError, IndexError):
+            minute = std * 60 if std >= 0 else -1
+        name = str(r.get("Vor- & Nachname", "")).strip()
+        out.append({"name": name, "name_norm": normalize_name(name),
+                    "datum": d, "zeit": zeit, "minute": minute,
+                    "benutzt": False})
+    return out
+
+
+def _passenden_checkin(g: dict, checkins: list, nur_gleicher_name: bool) -> tuple:
+    """
+    Bester noch freier Check-in zu diesem Anspruch.
+    → (Check-in oder None, Punktzahl, Minutenabstand)
+    """
+    beste = None
+    for c in checkins:
+        if c["benutzt"] or c["datum"] != g["datum"]:
+            continue
+        if c["minute"] < 0 or g["minute"] < 0:
+            continue
+        abstand = c["minute"] - g["minute"]
+        if not (CHECKIN_FENSTER[0] <= abstand <= CHECKIN_FENSTER[1]):
+            continue
+        if nur_gleicher_name and c["name_norm"] != g["name_norm"]:
+            continue
+        punkte = max(fuzz.token_set_ratio(g["name_norm"], c["name_norm"]),
+                     fuzz.partial_ratio(g["name_norm"], c["name_norm"]))
+        deckt = namen_decken_sich(g["name_norm"], c["name_norm"])
+        rang = (punkte + (12 if deckt else 0), -abs(abstand))
+        if beste is None or rang > beste[0]:
+            beste = (rang, c, punkte, deckt, abstand)
+    if beste is None:
+        return (None, 0.0, 0)
+    _rang, c, punkte, deckt, abstand = beste
+    if not nur_gleicher_name and not (deckt and punkte >= 70):
+        return (None, punkte, abstand)
+    return (c, punkte, abstand)
+
+
+def _analysieren_zahlungen(pdf, cdf) -> bool:
+    """
+    Wellpass-Abgleich allein aus Zahlungen und Check-ins.
+
+    Schreibt in dieselben Blätter wie _analysieren(), damit WhatsApp
+    Reminder, Dashboard und Analysen unverändert weiterlaufen. Was aus
+    der Zahlungsdatei nicht hervorgeht — Court, Spieldauer, Mitspieler —
+    bleibt leer, statt geraten zu werden.
+    """
+    slots = zahlungs_slots(pdf)
+    if not slots:
+        st.error("❌ In der Zahlungsdatei stehen keine auswertbaren Buchungen.")
+        return False
+
+    checkins = _checkins_aufbereiten(cdf)
+    if not checkins:
+        st.error("❌ Für diesen Zeitraum sind keine Check-ins lesbar.")
+        return False
+
+    volle = _volle_anteile(slots)
+    bewertet = [(g, *slot_bewerten(g, volle)) for g in slots]
+    ansprueche = [(g, txt) for g, art, txt in bewertet if art == "wellpass"]
+
+    # Erst die namensgleichen Treffer, dann die Schreibvarianten auf dem,
+    # was übrig bleibt. Andernfalls nimmt eine Abkürzung wie „Maximilian
+    # Hetz" den Check-in weg, der eindeutig zu Maximilian Gruber gehört.
+    treffer = {}
+    for nur_gleich in (True, False):
+        for i, (g, _txt) in enumerate(ansprueche):
+            if i in treffer:
+                continue
+            c, punkte, abstand = _passenden_checkin(g, checkins, nur_gleich)
+            if c is None:
+                continue
+            c["benutzt"] = True
+            treffer[i] = (c, punkte, abstand, nur_gleich)
+
+    balken = st.progress(0.0)
+    status = st.empty()
+    mapping = mapping_laden()
+
+    buchungen_out, checkins_out = [], []
+    for i, (g, art, txt) in enumerate(bewertet):
+        if art == "storniert":
+            continue
+        balken.progress((i + 1) / len(bewertet))
+
+        idx = next((k for k, (ag, _t) in enumerate(ansprueche) if ag is g), None)
+        c, punkte, abstand, exakt = treffer.get(idx, (None, 0.0, 0, False))
+        nn, name = g["name_norm"], g["name"]
+        team = nn in TEAM_NORM
+        rabatt = art == "wellpass"
+        # Über eine bestätigte Verknüpfung zählt der Check-in ebenfalls
+        if c is None and nn in mapping:
+            ziel = mapping[nn]
+            gname = str(ziel["checkin_name"] if isinstance(ziel, dict) else ziel)
+            c = next((x for x in checkins if x["datum"] == g["datum"]
+                      and x["name_norm"] == gname and not x["benutzt"]), None)
+            if c is not None:
+                c["benutzt"] = True
+
+        fehler = (rabatt and c is None and not team
+                  and not ist_platzhalter(name))
+        listenpreis = (round(g["netto"] + WELLPASS_RABATT, 2) if rabatt
+                       else g["netto"])
+
+        buchungen_out.append({
+            "Datum": str(g["datum"]),
+            "Name": name,
+            "Name_norm": nn,
+            "Email": email_fuer(name) or "",
+            "Court": "",                    # steht nicht in der Zahlungsdatei
+            "Service_Zeit": g["zeit"],
+            "Dauer": 0,
+            "Listenpreis": listenpreis,
+            "Bezahlt": g["netto"],
+            "Betrag": g["netto"],
+            "Plaetze": 1,
+            "Wellpass_Rabatte": 1 if rabatt else 0,
+            "Teilnehmer": 1,
+            "Checkin_Zeit": c["zeit"] if c else "",
+            "Relevant": "Ja" if rabatt else "Nein",
+            "Event": "Nein", "Event_Name": "", "Event_Id": "",
+            "Event_Courts": 0, "Event_Unklar": "Nein",
+            "Check-in": "Ja" if c else "Nein",
+            "Team": "Ja" if team else "Nein",
+            "Fehler": "Ja" if fehler else "Nein",
+            "Quelle": "zahlungen",          # unterscheidet die alte Rechnung
+            "Rabatt_Grund": txt,
+            "analysis_date": g["datum"].strftime("%Y-%m-%d"),
+        })
+
+    for c in checkins:
+        checkins_out.append({
+            "Datum": str(c["datum"]),
+            "Name": c["name"],
+            "Name_norm": c["name_norm"],
+            "Checkin_Zeit": c["zeit"],
+            "Gespielt": "Ja" if c["benutzt"] else "Nein",
+            "analysis_date": c["datum"].strftime("%Y-%m-%d"),
+        })
+
+    balken.progress(1.0)
+    status.empty()
+
+    neu_b = append_rows(pd.DataFrame(buchungen_out), "buchungen",
+                        ["analysis_date", "Name_norm", "Service_Zeit", "Court"],
+                        aktualisieren=True)
+    neu_c = append_rows(pd.DataFrame(checkins_out), "checkins",
+                        ["analysis_date", "Name_norm", "Checkin_Zeit"],
+                        aktualisieren=True)
+    cache_leeren()
+
+    offen = sum(1 for b in buchungen_out if b["Fehler"] == "Ja")
+    mit = sum(1 for b in buchungen_out if b["Relevant"] == "Ja"
+              and b["Check-in"] == "Ja")
+    ohne_anspruch = sum(1 for c in checkins_out if c["Gespielt"] == "Nein")
+    tage = sorted({b["analysis_date"] for b in buchungen_out})
+
+    st.success(
+        f"✅ {len(tage)} Tage · {len(ansprueche)} Wellpass-Ansprüche · "
+        f"{mit} mit Check-in · **{offen} ohne** · "
+        f"{ohne_anspruch} Check-ins ohne Anspruch "
+        f"({neu_b} neue Buchungszeilen, {neu_c} neue Check-in-Zeilen)")
+    return True
+
+
+def _verarbeiten_zahlungen(z_datei, c_datei) -> bool:
+    """Neuer Weg: Zahlungsdatei + Check-ins, ohne Buchungsexport."""
+    pdf = parse_playtomic(z_datei)
+    if pdf.empty:
+        return False
+    cdf = parse_checkins(c_datei)
+    if cdf.empty:
+        st.error("❌ Check-in-Datei konnte nicht gelesen werden.")
+        return False
+
+    # Rohzeilen sichern — dieselbe Quelle wie beim alten Weg
+    append_rows(pdf, "playtomic_raw", id_spalte="Payment id")
+    return _analysieren_zahlungen(pdf, cdf)
+
+
 def tage_entfernen(tage: list) -> dict:
     """
     Buchungen, Check-ins und Zahlungen einzelner Tage löschen.
@@ -6785,13 +7123,64 @@ def tage_entfernen(tage: list) -> dict:
 def modul_daten():
     head("Daten-Zentrale", "Playtomic · Wellpass · Kunden")
 
-    t1, t2, t3 = st.tabs(["📊 Buchungen + Check-ins", "👥 Kundenliste", "🗂 Bestand"])
+    t0, t1, t2, t3 = st.tabs(["💳 Zahlungen + Check-ins",
+                              "📊 Buchungen + Check-ins (alt)",
+                              "👥 Kundenliste", "🗂 Bestand"])
 
-    # ── Haupt-Upload ────────────────────────────────────────────────────
+    # ── Neuer Weg: ohne Buchungsexport ──────────────────────────────────
+    with t0:
+        box("Der Weg für alle neuen Tage. Playtomic liefert keinen "
+            "Buchungsexport mehr — gebraucht werden nur noch die Zahlungsdatei "
+            "und das Check-in-Protokoll. Wer den Rabatt bekommen hat, steht "
+            "namentlich in den Zahlungen; geraten wird nichts mehr.", "info")
+
+        n1, n2 = st.columns(2)
+        with n1:
+            z_datei = st.file_uploader("Zahlungen (.csv)", type=["csv"], key="up_z")
+            if z_datei:
+                st.caption(f"✓ {z_datei.name}")
+        with n2:
+            zc_datei = st.file_uploader("Wellpass Check-ins (.csv)",
+                                        type=["csv"], key="up_zc")
+            if zc_datei:
+                st.caption(f"✓ {zc_datei.name}")
+
+        st.markdown("")
+        if st.button("🔄 Abgleichen", type="primary", use_container_width=True,
+                     disabled=not (z_datei and zc_datei), key="btn_zahl"):
+            with st.spinner(lade_text("verarbeite")):
+                if _verarbeiten_zahlungen(z_datei, zc_datei):
+                    st.rerun()
+
+        if not (z_datei and zc_datei):
+            st.caption("Beide Dateien werden gebraucht.")
+
+        with st.expander("Wie gerechnet wird"):
+            st.markdown(f"""
+**Der Wellpass-Rabatt ist fest: {euro(WELLPASS_RABATT)} je Person und Buchung.**
+Wer weniger als den vollen Anteil gezahlt hat, genau um diesen Betrag, hat den
+Rabatt bekommen — das ist gerechnet, nicht geschätzt.
+
+- `1,50 €` statt `13,50 €` · `4,50 €` statt `16,50 €` · `6,00 €` statt `18,00 €`
+- `0 €`, wenn der Anteil ohnehin unter {euro(WELLPASS_RABATT)} lag
+
+**Erstattungen werden verrechnet.** Wer 6 € zahlt, 6 € zurückbekommt und dann
+1,50 € zahlt, hat einen Anspruch über 1,50 € — nicht drei Fälle.
+
+**Der Check-in muss zeitlich passen.** Gesucht wird im Fenster
+{CHECKIN_FENSTER[0]} bis +{CHECKIN_FENSTER[1]} Minuten um den Spielbeginn.
+Im Schnitt checken Spieler sechs Minuten vorher ein.
+
+Was die Zahlungsdatei nicht hergibt — Court, Spieldauer, Mitspieler — bleibt
+leer. Lieber eine Lücke als eine geratene Zahl.
+""")
+
+    # ── Alter Weg mit Buchungsexport ────────────────────────────────────
     with t1:
-        box("Die App vergleicht den Listenpreis jeder Buchung mit dem tatsächlich "
-            "gezahlten Betrag. Die Lücke verrät, wie viele Wellpass-Rabatte drin "
-            "steckten. Danach prüft sie, wer davon wirklich eingecheckt hat.", "info")
+        box("Der bisherige Weg, für Tage mit Buchungsexport. Die App vergleicht "
+            "den Listenpreis jeder Buchung mit dem tatsächlich gezahlten Betrag. "
+            "Die Lücke verrät, wie viele Wellpass-Rabatte drin steckten. Danach "
+            "prüft sie, wer davon wirklich eingecheckt hat.", "info")
 
         c1, c2 = st.columns(2)
         with c1:
