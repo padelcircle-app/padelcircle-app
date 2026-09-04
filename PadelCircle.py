@@ -6878,7 +6878,13 @@ def _analysieren(bdf, cdf, pdf=None, zahlungen_index=None) -> bool:
 
 WELLPASS_RABATT = 12.0                 # fester Nachlass je Person und Buchung
 ANTEIL_MIN, ANTEIL_MAX = 9.0, 22.0     # plausibler Anteil EINER Person
-CHECKIN_FENSTER = (-45, 30)            # Minuten um den Spielbeginn
+# Minuten um den Spielbeginn, in denen ein Check-in zu einem Anteil
+# passt. Gemessen an 115 namensgleichen Paaren vom 26.–31.08.: die
+# meisten scannen kurz vorher, aber ein Teil erst beim Rausgehen — bis
+# zu zwei Stunden nach Spielbeginn, also am Ende einer Doppelstunde.
+# Mit -45/+30 fielen 7 dieser 115 durch und galten faelschlich als
+# vergessener Check-in.
+CHECKIN_FENSTER = (-60, 120)
 ZAHL_SKUS = ("User booking registration", "Open match registration")
 
 
@@ -7159,8 +7165,13 @@ def _analysieren_zahlungen(pdf, cdf) -> bool:
             "Service_Zeit": g["zeit"],
             "Dauer": 0,
             "Listenpreis": listenpreis,
+            # „Bezahlt" ist das Geld, das wirklich geflossen ist.
+            # „Betrag" ist der Anteil dieser Person — bei einem noch
+            # offenen Anteil also der geschuldete. Sonst klaffte die
+            # Anzeige auseinander: 0,00 € gezahlt „statt 13,50 €" sieht
+            # nach 13,50 € Rabatt aus, obwohl es 12,00 € sind.
             "Bezahlt": g["netto"],
-            "Betrag": g["netto"],
+            "Betrag": g["preis"],
             "Plaetze": 1,
             "Wellpass_Rabatte": 1 if rabatt else 0,
             "Teilnehmer": 1,
