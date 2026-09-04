@@ -317,7 +317,6 @@ ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
 OEFFNUNGSSTUNDEN = CONFIG["oeffnung_bis"] - CONFIG["oeffnung_von"]                  # 18
-KAPAZITAET_TAG  = COURTS_GESAMT * OEFFNUNGSSTUNDEN                                  # 108 Court-Stunden
 
 MONATE_DE = ["Januar", "Februar", "März", "April", "Mai", "Juni",
              "Juli", "August", "September", "Oktober", "November", "Dezember"]
@@ -365,21 +364,6 @@ GRUND_UNBEKANNT = {
 def grund_info(schluessel) -> dict:
     """Zu einem gespeicherten Grund die Beschreibung holen."""
     return ERLEDIGT_GRUENDE.get(str(schluessel).strip(), GRUND_UNBEKANNT)
-
-
-def court_preis(zeitpunkt: datetime, single: bool = False) -> float:
-    """Listenpreis für einen Slot — für Auslastungs- und Potenzialrechnungen."""
-    ist_we = zeitpunkt.weekday() >= 5
-    stunde = zeitpunkt.hour
-    if single:
-        if ist_we or stunde >= 16:
-            return CONFIG["preis_single_prime"]
-        return CONFIG["preis_single_tag"]
-    if ist_we or stunde >= 16:
-        return CONFIG["preis_double_prime"]
-    if stunde >= 12:
-        return CONFIG["preis_double_mittag"]
-    return CONFIG["preis_double_frueh"]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -530,17 +514,6 @@ def euro(val) -> str:
         return f"{float(val):,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".")
     except (TypeError, ValueError):
         return "0,00 €"
-
-
-def euro_kurz(val) -> str:
-    """1234.5 → '1,2k €'  ·  für enge Kacheln"""
-    try:
-        v = float(val)
-    except (TypeError, ValueError):
-        return "0 €"
-    if abs(v) >= 1000:
-        return f"{v/1000:.1f}k €".replace(".", ",")
-    return f"{v:.0f} €"
 
 
 def prozent(teil, ganz) -> float:
@@ -876,11 +849,6 @@ def blatt_anlegen(name: str):
         _blaetter_verwerfen()
     except Exception:
         pass
-
-
-def _cache_zuruecksetzen():
-    """Der gemeinsame Abruf ist die einzige Quelle — hier zurücksetzen."""
-    _blaetter_verwerfen()
 
 
 # loadsheet.clear() wird an vielen Stellen aufgerufen — auf den
@@ -2163,13 +2131,6 @@ def email_aehnlichkeit(mail: str, name: str) -> float:
 
 def _initialen(name: str) -> str:
     return "".join(p[0].lower() for p in name.split() if p)
-
-
-def _initialen_passen(a: str, b: str) -> bool:
-    ia, ib = _initialen(a), _initialen(b)
-    if not ia or not ib:
-        return False
-    return ia == ib or ia in ib or ib in ia
 
 
 def _lautschrift(name: str) -> str:
@@ -3494,23 +3455,6 @@ def erledigte_faelle() -> pd.DataFrame:
     return df.sort_values("_ts", ascending=False)
 
 
-def checkin_bewertung(checkins_tag: pd.DataFrame) -> dict:
-    """
-    Wertet die Check-ins eines Tages aus.
-
-    EGYM vergütet pro Person und Tag nur einmal. Checkt jemand
-    zweimal ein, ist der zweite Check-in für dich wertlos.
-
-    → {"verguetet": n, "doppelt": n, "namen": {name_norm: anzahl}}
-    """
-    if checkins_tag.empty or "Name_norm" not in checkins_tag.columns:
-        return {"verguetet": 0, "doppelt": 0, "namen": {}}
-    zaehl = checkins_tag["Name_norm"].astype(str).value_counts().to_dict()
-    verguetet = len(zaehl)
-    doppelt = int(sum(v - 1 for v in zaehl.values()))
-    return {"verguetet": verguetet, "doppelt": doppelt, "namen": zaehl}
-
-
 @st.cache_data(ttl=600, show_spinner=False)
 def offene_checkins(datum_str: str) -> pd.DataFrame:
     """
@@ -3797,29 +3741,6 @@ def alle_checkins_ohne_buchung() -> pd.DataFrame:
         df = df[[str(n) not in belegt.get(str(t), set()) for t, n
                  in zip(df["analysis_date"], df["Name_norm"])]]
     return df
-
-
-def zu_viele_checkins_uebersicht() -> pd.DataFrame:
-    """
-    Alle Check-ins ohne passende Buchung, über alle Tage — pro Person
-    zusammengefasst. Wer hier öfter auftaucht, checkt regelmässig ein,
-    ohne dass eine Buchung dazu gefunden wird.
-    """
-    ueber = alle_checkins_ohne_buchung()
-    if ueber.empty:
-        return pd.DataFrame()
-
-    zeilen = []
-    for nn, teil in ueber.groupby("Name_norm"):
-        tage_sortiert = sorted(teil["analysis_date"].astype(str))
-        zeilen.append({
-            "Name": teil["Name"].iloc[-1] if "Name" in teil.columns else nn,
-            "Name_norm": nn,
-            "Zu viele Check-ins": len(teil),
-            "Tage": ", ".join(datum_kurz(t) for t in tage_sortiert),
-        })
-    df = pd.DataFrame(zeilen)
-    return df.sort_values(["Zu viele Check-ins", "Name"], ascending=[False, True])
 
 
 def sauber_serie(tage: list) -> int:
@@ -11968,26 +11889,6 @@ def nachholung_quelle(fall_name: str, fall_datum: str) -> dict:
     z = treffer.iloc[0]
     return {"checkin_datum": str(z["checkin_datum"]),
             "checkin_name": str(z["checkin_name"])}
-
-
-def nachholung_loesen(checkin_datum: str, checkin_name: str):
-    """Eine Zuordnung wieder aufheben."""
-    df = loadsheet("checkin_zuordnung", SHEET_SPALTEN["checkin_zuordnung"])
-    if df.empty or "checkin_key" not in df.columns:
-        return
-    ck = checkin_schluessel(checkin_datum, checkin_name)
-    treffer = df[df["checkin_key"].astype(str) == ck]
-    df = df[df["checkin_key"].astype(str) != ck]
-    savesheet(df, "checkin_zuordnung")
-    # Zugehörigen Fall wieder öffnen
-    if not treffer.empty:
-        behebung_zuruecknehmen(str(treffer.iloc[0]["fall_name"]),
-                               str(treffer.iloc[0]["fall_datum"]))
-    cache_leeren("checkin_zuordnung", "corrections",
-                 funktionen=("offene_fehler", "offene_je_tag",
-                             "verbrauchte_checkins", "offene_checkins",
-                             "offene_checkins_zeitraum", "zuordnung_vorschlag",
-                             "nachhol_kandidaten", "nachholung_quelle"))
 
 
 @st.cache_data(ttl=600, show_spinner=False)

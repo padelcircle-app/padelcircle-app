@@ -1,0 +1,20 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Zugangsdaten — dürfen NIE ins Repo.
+# Die Secrets liegen in Streamlit Cloud unter Settings → Secrets.
+.streamlit/secrets.toml
+secrets.toml
+*service-account*.json
+*credentials*.json
+
+# Exporte aus Playtomic und EGYM — enthalten Kundendaten
+bookings-download*.csv
+Checkins*.csv
+880ac6b8-*.csv
