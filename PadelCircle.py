@@ -25,6 +25,7 @@ import urllib.parse
 import time
 import random
 import re
+import unicodedata
 import secrets
 import json
 import hashlib
@@ -399,8 +400,15 @@ def normalize_name(name) -> str:
     except (TypeError, ValueError):
         pass
     s = str(name).strip().lower()
+    # Erst die deutschen Umlaute ausschreiben — so schreibt man sie auch
+    # von Hand, und „Müller" soll „Mueller" finden.
     for a, b in (("ä", "ae"), ("ö", "oe"), ("ü", "ue"), ("ß", "ss"), ("-", " ")):
         s = s.replace(a, b)
+    # Alles andere an Akzenten fällt weg. Playtomic hatte „Michael Múller"
+    # mit Akut, EGYM „Michael Müller" mit Umlaut — die beiden trafen sich
+    # nie, und der Fall galt als vergessener Check-in.
+    s = "".join(z for z in unicodedata.normalize("NFKD", s)
+                if not unicodedata.combining(z))
     return re.sub(r"\s+", " ", s).strip()
 
 
@@ -7008,13 +7016,24 @@ def slot_bewerten(g: dict, volle: set) -> tuple:
 
 
 def _namensteil_passt(a: str, b: str) -> bool:
-    """Zwei Namensteile: gleich, eine Initiale, oder klare Abkürzung."""
+    """
+    Zwei Namensteile: gleich, eine Initiale, oder klare Abkürzung.
+
+    Dazu eine enge Ähnlichkeitsschwelle für Schreibweisen, die sich nur
+    in einem Zeichen unterscheiden: „muller" und „mueller" entstehen aus
+    demselben Namen, wenn Playtomic ihn mit Akut und EGYM mit Umlaut
+    schreibt. Die Schwelle liegt bei 90 — damit kommen muller/mueller
+    (92) und koeller/koellner (93) durch, muller/miller (83) und
+    bentele/bendele (86) aber nicht. Die Bentele sind zwei Menschen.
+    """
     if a == b:
         return True
     if len(a) == 1 or len(b) == 1:
         return b.startswith(a) or a.startswith(b)
     kurz, lang = (a, b) if len(a) < len(b) else (b, a)
-    return len(kurz) >= 4 and lang.startswith(kurz)
+    if len(kurz) >= 4 and lang.startswith(kurz):
+        return True
+    return len(kurz) >= 5 and fuzz.ratio(a, b) >= 90
 
 
 def namen_decken_sich(a: str, b: str) -> bool:
@@ -7060,9 +7079,18 @@ def _checkins_aufbereiten(cdf: pd.DataFrame) -> list:
     return out
 
 
-def _passenden_checkin(g: dict, checkins: list, nur_gleicher_name: bool) -> tuple:
+def _passenden_checkin(g: dict, checkins: list, nur_gleicher_name: bool,
+                       mit_fenster: bool = True) -> tuple:
     """
     Bester noch freier Check-in zu diesem Anspruch.
+
+    Ohne Zeitfenster zählt nur noch: gleicher Tag, passender Name. Das
+    ist zulässig, weil EGYM pro Person und Tag ohnehin nur einmal
+    vergütet — wer an einem Tag einen Anspruch und einen Check-in hat,
+    ist eindeutig, egal um welche Uhrzeit. Michael Müller buchte 18:00,
+    spielte zwei Stunden und scannte um 20:03 beim Rausgehen: +123
+    Minuten, drei mehr als das Fenster erlaubt.
+
     → (Check-in oder None, Punktzahl, Minutenabstand)
     """
     beste = None
@@ -7072,7 +7100,7 @@ def _passenden_checkin(g: dict, checkins: list, nur_gleicher_name: bool) -> tupl
         if c["minute"] < 0 or g["minute"] < 0:
             continue
         abstand = c["minute"] - g["minute"]
-        if not (CHECKIN_FENSTER[0] <= abstand <= CHECKIN_FENSTER[1]):
+        if mit_fenster and not (CHECKIN_FENSTER[0] <= abstand <= CHECKIN_FENSTER[1]):
             continue
         if nur_gleicher_name and c["name_norm"] != g["name_norm"]:
             continue
@@ -7085,8 +7113,11 @@ def _passenden_checkin(g: dict, checkins: list, nur_gleicher_name: bool) -> tupl
     if beste is None:
         return (None, 0.0, 0)
     _rang, c, punkte, deckt, abstand = beste
-    if not nur_gleicher_name and not (deckt and punkte >= 70):
-        return (None, punkte, abstand)
+    if not nur_gleicher_name:
+        # Ohne Zeitnähe muss der Name umso deutlicher passen
+        grenze = 70 if mit_fenster else 90
+        if not (deckt and punkte >= grenze):
+            return (None, punkte, abstand)
     return (c, punkte, abstand)
 
 
@@ -7116,12 +7147,17 @@ def _analysieren_zahlungen(pdf, cdf) -> bool:
     # Erst die namensgleichen Treffer, dann die Schreibvarianten auf dem,
     # was übrig bleibt. Andernfalls nimmt eine Abkürzung wie „Maximilian
     # Hetz" den Check-in weg, der eindeutig zu Maximilian Gruber gehört.
+    # Reihenfolge nach Sicherheit: gleicher Name und passende Uhrzeit
+    # zuerst, dann gleicher Name zu beliebiger Uhrzeit desselben Tages,
+    # danach erst die Schreibvarianten.
     treffer = {}
-    for nur_gleich in (True, False):
+    for nur_gleich, mit_fenster in ((True, True), (True, False),
+                                    (False, True), (False, False)):
         for i, (g, _txt) in enumerate(ansprueche):
             if i in treffer:
                 continue
-            c, punkte, abstand = _passenden_checkin(g, checkins, nur_gleich)
+            c, punkte, abstand = _passenden_checkin(g, checkins, nur_gleich,
+                                                    mit_fenster)
             if c is None:
                 continue
             c["benutzt"] = True
