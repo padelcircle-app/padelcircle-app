@@ -6893,7 +6893,9 @@ ANTEIL_MIN, ANTEIL_MAX = 9.0, 22.0     # plausibler Anteil EINER Person
 # Mit -45/+30 fielen 7 dieser 115 durch und galten faelschlich als
 # vergessener Check-in.
 CHECKIN_FENSTER = (-60, 120)
-ZAHL_SKUS = ("User booking registration", "Open match registration")
+TURNIER_SKU = "Tournament registration"
+ZAHL_SKUS = ("User booking registration", "Open match registration",
+             TURNIER_SKU)
 
 
 def _slot_zeit(wert) -> tuple:
@@ -6933,7 +6935,10 @@ def zahlungs_slots(pdf: pd.DataFrame) -> list:
         g = gruppen.setdefault((nn, str(datum), zeit), {
             "name": name, "name_norm": nn, "datum": datum, "zeit": zeit,
             "minute": minute, "netto": 0.0, "verfallen": 0.0, "zeilen": 0,
-            "erstattet": False, "frei": False, "bezahlt_zeilen": 0})
+            "erstattet": False, "frei": False, "bezahlt_zeilen": 0,
+            "turnier": False})
+        if hat_sku and str(r.get("Product SKU", "")).strip() == TURNIER_SKU:
+            g["turnier"] = True
 
         betrag = parse_betrag(r.get("Total"))
         status = str(r.get("Payment status", "")).strip().lower()
@@ -6990,10 +6995,35 @@ def _volle_anteile(slots: list) -> set:
             if ANTEIL_MIN <= g["preis"] <= ANTEIL_MAX}
 
 
-def slot_bewerten(g: dict, volle: set) -> tuple:
+def turnier_vollpreise(slots: list) -> dict:
+    """
+    Je Turnier der volle Teilnahmepreis.
+
+    Turnierpreise sind nicht fest — mal länger, mal kürzer, mal anders
+    kalkuliert. Ein fester Rabattbetrag wie die 12 € bei normalen
+    Buchungen hilft hier nicht weiter. Was aber immer gilt: innerhalb
+    desselben Turniers zahlen alle denselben Preis, ausser denen mit
+    Wellpass. Der höchste gezahlte Preis ist also der volle, alles
+    darunter ist rabattiert.
+
+    Zahlen alle dasselbe, gibt es keinen Vergleich — dann wird auch
+    niemand als Wellpass gewertet, statt es zu raten.
+
+    → {(datum, zeit): voller Preis}
+    """
+    preise = {}
+    for g in slots:
+        if not g.get("turnier"):
+            continue
+        k = (g["datum"], g["zeit"])
+        preise[k] = max(preise.get(k, 0.0), g["preis"])
+    return preise
+
+
+def slot_bewerten(g: dict, volle: set, turniere: dict = None) -> tuple:
     """
     Was ist in diesem Slot passiert?
-    → („wellpass" | „vollzahler" | „storniert", Klartext für die Anzeige)
+    → („wellpass" | „vollzahler" | „storniert", Klartext, voller Preis)
 
     Entscheidend ist der Preis der Person, nicht ob sie schon bezahlt
     hat. Wer 1,50 € schuldet, hat den Rabatt bereits bekommen — der
@@ -7002,17 +7032,28 @@ def slot_bewerten(g: dict, volle: set) -> tuple:
     keine Rolle.
     """
     b = g["preis"]
+
+    if g.get("turnier"):
+        # Turnier: nicht der feste Rabatt zählt, sondern der Vergleich
+        # mit den anderen Teilnehmern desselben Turniers.
+        voll = (turniere or {}).get((g["datum"], g["zeit"]), 0.0)
+        if voll > 0 and b < voll:
+            return ("wellpass",
+                    f"{euro(b)} statt {euro(voll)} — Turnier", voll)
+        return "vollzahler", "", b
+
     if b == 0 and g["frei"] and not g["erstattet"]:
-        return "wellpass", f"0 € — Anteil lag unter {euro(WELLPASS_RABATT)}"
+        return ("wellpass", f"0 € — Anteil lag unter {euro(WELLPASS_RABATT)}",
+                round(b + WELLPASS_RABATT, 2))
     if b <= 0:
         # Storniert, oder ein Nullbetrag ohne Zahlungsart — daraus lässt
         # sich kein Rabatt ablesen.
-        return "storniert", "kein Betrag übrig"
+        return "storniert", "kein Betrag übrig", 0.0
     voll = round(b + WELLPASS_RABATT, 2)
     if b <= ANTEIL_MAX - WELLPASS_RABATT and voll in volle:
         offen = "" if g["bezahlt_zeilen"] else " (noch offen)"
-        return "wellpass", f"{euro(b)} statt {euro(voll)}{offen}"
-    return "vollzahler", ""
+        return "wellpass", f"{euro(b)} statt {euro(voll)}{offen}", voll
+    return "vollzahler", "", b
 
 
 def _namensteil_passt(a: str, b: str) -> bool:
@@ -7141,8 +7182,9 @@ def _analysieren_zahlungen(pdf, cdf) -> bool:
         return False
 
     volle = _volle_anteile(slots)
-    bewertet = [(g, *slot_bewerten(g, volle)) for g in slots]
-    ansprueche = [(g, txt) for g, art, txt in bewertet if art == "wellpass"]
+    turniere = turnier_vollpreise(slots)
+    bewertet = [(g, *slot_bewerten(g, volle, turniere)) for g in slots]
+    ansprueche = [(g, txt) for g, art, txt, _v in bewertet if art == "wellpass"]
 
     # Erst die namensgleichen Treffer, dann die Schreibvarianten auf dem,
     # was übrig bleibt. Andernfalls nimmt eine Abkürzung wie „Maximilian
@@ -7168,7 +7210,7 @@ def _analysieren_zahlungen(pdf, cdf) -> bool:
     mapping = mapping_laden()
 
     buchungen_out, checkins_out = [], []
-    for i, (g, art, txt) in enumerate(bewertet):
+    for i, (g, art, txt, vollpreis) in enumerate(bewertet):
         if art == "storniert":
             continue
         balken.progress((i + 1) / len(bewertet))
@@ -7189,8 +7231,10 @@ def _analysieren_zahlungen(pdf, cdf) -> bool:
 
         fehler = (rabatt and c is None and not team
                   and not ist_platzhalter(name))
-        listenpreis = (round(g["preis"] + WELLPASS_RABATT, 2) if rabatt
-                       else g["preis"])
+        # Den vollen Preis liefert slot_bewerten mit — bei normalen
+        # Buchungen Anteil + 12 €, beim Turnier der Preis der anderen
+        # Teilnehmer desselben Turniers.
+        listenpreis = vollpreis
 
         buchungen_out.append({
             "Datum": str(g["datum"]),
