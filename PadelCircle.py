@@ -6263,6 +6263,68 @@ def _als_rohcheckins(tage=None) -> pd.DataFrame:
     })
 
 
+def _tage_nach_methode(tage=None) -> tuple:
+    """
+    Welche Tage stammen aus dem Buchungsexport, welche aus dem
+    Zahlungs-Abgleich?
+
+    Erkennungsmerkmal ist der Court: den kennt nur der alte Weg. Die
+    Unterscheidung ist zwingend, weil _als_rohbuchungen() die Personen
+    einer Uhrzeit über den Court wieder zu Buchungen gruppiert. Fehlt er,
+    landen alle Spieler eines Zeitfensters in EINER Buchung — und dort
+    ist nach vier Teilnehmern Schluss. Gemessen am Prüfbestand gingen so
+    124 von 452 Personen verloren, weil auf sechs Courts gleichzeitig
+    gespielt wird.
+
+    → (Tage mit Buchungsexport, Tage aus dem Zahlungs-Abgleich)
+    """
+    b = loadsheet("buchungen")
+    if b.empty or "analysis_date" not in b.columns:
+        return [], []
+    if tage:
+        b = b[b["analysis_date"].astype(str).isin({str(t) for t in tage})]
+    if b.empty:
+        return [], []
+
+    if "Court" in b.columns:
+        hat_court = b["Court"].astype(str).str.strip().ne("")
+    else:
+        hat_court = pd.Series(False, index=b.index)
+
+    mit = sorted(set(b.loc[hat_court, "analysis_date"].astype(str)))
+    ohne = sorted(set(b.loc[~hat_court, "analysis_date"].astype(str)) - set(mit))
+    return mit, ohne
+
+
+def _neu_berechnen_zahlungen(tage: list) -> bool:
+    """
+    Tage aus dem Zahlungs-Abgleich neu rechnen — aus playtomic_raw und
+    den gespeicherten Check-ins.
+
+    Genau dafür behält der neue Weg jede Zahlungszeile in
+    playtomic_raw: ändert sich eine Regel — Rabatthöhe, Zeitfenster,
+    Namenslogik —, lässt sich jeder Tag damit neu rechnen, ohne die CSV
+    noch einmal hochzuladen.
+    """
+    raw = loadsheet("playtomic_raw")
+    if raw.empty or "Service date" not in raw.columns:
+        st.error("❌ Keine gespeicherten Zahlungszeilen zum Neuberechnen.")
+        return False
+
+    menge = {str(t) for t in tage}
+    passt = raw["Service date"].map(lambda w: str(_slot_zeit(w)[0]) in menge)
+    pdf = raw[passt]
+    if pdf.empty:
+        st.error("❌ Für diese Tage stehen keine Zahlungszeilen im Bestand.")
+        return False
+
+    cdf = _als_rohcheckins(tage)
+    if cdf.empty:
+        st.error("❌ Für diesen Zeitraum sind keine Check-ins gespeichert.")
+        return False
+    return _analysieren_zahlungen(pdf, cdf)
+
+
 def neu_berechnen(tage=None) -> bool:
     """
     Die Auswertung aus den gespeicherten Daten neu rechnen.
@@ -6275,6 +6337,20 @@ def neu_berechnen(tage=None) -> bool:
     und zugeordnete Nachholungen. Die stehen in eigenen Blättern und
     werden hier nicht angefasst.
     """
+    # Tage aus dem Zahlungs-Abgleich müssen über ihren eigenen Weg
+    # gerechnet werden — die alte Rückrechnung verlöre dort ein Viertel
+    # der Personen. Siehe _tage_nach_methode().
+    mit_court, ohne_court = _tage_nach_methode(tage)
+    if ohne_court:
+        erfolg_z = _neu_berechnen_zahlungen(ohne_court)
+        if not mit_court:
+            if erfolg_z:
+                cache_leeren()
+            return erfolg_z
+        if not erfolg_z:
+            return False
+        tage = mit_court
+
     roh_b = _als_rohbuchungen(tage)
     roh_c = _als_rohcheckins(tage)
     if roh_b.empty:
