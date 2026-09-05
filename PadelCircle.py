@@ -10541,65 +10541,6 @@ def _wa_fall(r, i: int, datum: str):
     st.markdown("")
 
 
-def _wa_erledigt_heute(datum: str):
-    """
-    Was an diesem Tag schon erledigt ist — und wodurch.
-
-    Ohne das verschwindet ein Fall einfach. Lina Schafran stand am
-    27.08. nicht mehr in der Liste, weil ihr Check-in vom 30.08. ihn
-    geschlossen hatte — nur stand das nirgends, und das Suchen danach
-    hat einen Abend gekostet. Rechts steht seit jeher, wohin ein
-    überzähliger Check-in gegangen ist; links fehlte die
-    Gegenrichtung: woher die Deckung für diesen Fall kam.
-    """
-    alle = erledigte_faelle()
-    if alle.empty or "datum" not in alle.columns:
-        return
-    heute = alle[alle["datum"].astype(str) == str(datum)]
-    if heute.empty:
-        return
-
-    hinfaellig = hinfaellige_fall_keys()
-    fremd = sum(1 for _, r in heute.iterrows()
-                if str(r.get("grund", "")) == "nachgeholt"
-                and str((nachholung_quelle(str(r["name_norm"]), str(datum))
-                         or {}).get("checkin_datum", datum)) != str(datum))
-    titel = f"✓ {len(heute)} an diesem Tag bereits erledigt"
-    if fremd:
-        titel += f"  ·  {fremd} durch einen Check-in von einem anderen Tag"
-
-    with st.expander(titel):
-        for _, r in heute.iterrows():
-            grund = str(r.get("grund", ""))
-            info = grund_info(grund)
-            tot = checkin_schluessel(str(datum),
-                                     str(r["name_norm"])) in hinfaellig
-            zeile = (f"**{r['Name']}**  "
-                     + chip(f"{info['icon']} {info['kurz']}", "soft"))
-            if tot:
-                zeile += "  " + chip("⚠️ hinfällig", "err")
-            st.markdown(zeile, unsafe_allow_html=True)
-
-            if grund == "nachgeholt":
-                q = nachholung_quelle(str(r["name_norm"]), str(datum))
-                if q:
-                    anderer = str(q["checkin_datum"]) != str(datum)
-                    st.caption(
-                        "↳ gedeckt durch den Check-in vom "
-                        f"{datum_kurz(q['checkin_datum'])} "
-                        f"({q['checkin_name']})"
-                        + ("  ·  anderer Tag" if anderer else ""))
-            elif str(r.get("notiz", "")).strip():
-                st.caption("↳ " + str(r["notiz"]).strip())
-
-            if tot:
-                st.caption("⚠️ Dieser Check-in wird inzwischen an seinem "
-                           "eigenen Spieltag gebraucht — der Fall steht "
-                           "oben wieder offen.")
-        st.caption("Zum Auflösen oder Wiederöffnen: Reiter „Erledigt“ "
-                   "beziehungsweise „Zuordnung prüfen“.")
-
-
 def _wa_tagesarbeit():
     """Ein Tag, alle Fälle — mit den überzähligen Check-ins daneben."""
     tage_alle = verfuegbare_tage()
@@ -10740,10 +10681,6 @@ def _wa_tagesarbeit():
 
             for i, (_, r) in enumerate(offen.iterrows()):
                 _wa_fall(r, i, datum)
-
-        # Auch bei einem sauberen Tag: nachvollziehbar bleibt es nur,
-        # wenn dasteht, wodurch die Fälle geschlossen wurden.
-        _wa_erledigt_heute(datum)
 
     with rechts:
         _wa_seitenspalte(datum, offen)
