@@ -6933,6 +6933,7 @@ def _analysieren(bdf, cdf, pdf=None, zahlungen_index=None) -> bool:
 
 WELLPASS_RABATT = 12.0                 # fester Nachlass je Person und Buchung
 ANTEIL_MIN, ANTEIL_MAX = 9.0, 22.0     # plausibler Anteil EINER Person
+VOLLPREIS_MIN_ZAHL = 2                 # ein einmaliger Preis beweist nichts
 # Minuten um den Spielbeginn, in denen ein Check-in zu einem Anteil
 # passt. Gemessen an 115 namensgleichen Paaren vom 26.–31.08.: die
 # meisten scannen kurz vorher, aber ein Teil erst beim Rausgehen — bis
@@ -7044,23 +7045,66 @@ def zahlungs_slots(pdf: pd.DataFrame) -> list:
                   key=lambda g: (g["datum"], g["zeit"], g["name"]))
 
 
-def _volle_anteile(slots: list) -> set:
+def _volle_anteile(slots: list) -> dict:
     """
-    Welche Beträge kommen als voller Personenanteil vor?
+    Welche Beträge kommen als voller Personenanteil vor — je Uhrzeit.
 
     Nur was zwischen 9 und 22 € liegt. Darunter stehen Rabattpreise,
     darüber Zahlungen für den ganzen Platz. Ohne diese Grenze würde 42 €
     als Rabatt auf 54 € gelten — und 54 € ist ein ganzer Court, kein
     Anteil.
 
+    Verglichen wird mit denen, die zur SELBEN Zeit gespielt haben, nicht
+    mit dem ganzen Bestand. Am 28.08. um 15:00 liefen drei Courts: einer
+    zu 12,50 €, einer zu 8,00 € und einer, auf dem alle vier Wellpass
+    hatten und je 0,50 € zahlten. Über alle Tage gesehen sah 8,00 € nach
+    einem Rabatt auf 20,00 € aus — und 20,00 € kam im gesamten Bestand
+    genau EIN Mal vor, an einem anderen Court zu einer anderen Zeit.
+    Aus drei Vollzahlern wurden so drei offene Fälle.
+
+    Um 15:00 gibt es kein 20,00 €. Dort ist 8,00 € der volle Anteil, und
+    0,50 € + 12 € = 12,50 € steht direkt daneben — beides richtig
+    erkannt, sobald man nur die Mitspieler derselben Uhrzeit befragt.
+
+    Die Uhrzeit allein reicht aber nicht. Am 31.08. um 16:30 zahlten
+    vier Leute je 1,50 € — ein ganzer Court voller Wellpass-Spieler. Die
+    13,50 € zum Vergleich stehen dort nirgends, und trotzdem ist 1,50 €
+    zweifelsfrei ein Rabattpreis: 13,50 € kommt im Bestand 102 Mal vor.
+
+    Deshalb zählt beides. Ein Anteil gilt als rabattiert, wenn Anteil
+    + 12 € entweder zur selben Uhrzeit vorkommt — dann steht der Beweis
+    direkt daneben, auch bei seltenen Preisen wie 14,50 € oder 13,00 € —
+    oder wenn dieser Vollpreis im Bestand mindestens zweimal auftaucht.
+    Ein Preis, den es genau EIN Mal gibt, taugt nicht als Beweis. Genau
+    daran lag es: 20,00 € gibt es ein einziges Mal, an einem anderen
+    Court zu einer anderen Zeit.
+
     Gezählt wird der Preis der Person, egal ob schon bezahlt. Ein noch
     offener Anteil über 13,50 € sagt genauso viel über den Vollpreis wie
-    ein bezahlter. Ohne die Datei mit den offenen Posten fehlten diese
-    Vergleichswerte — und dann wurde ein Rabatt nicht mehr als solcher
-    erkannt.
+    ein bezahlter.
+
+    → {(datum, zeit): {Preise dieser Uhrzeit}, None: {häufige Preise}}
     """
-    return {g["preis"] for g in slots
-            if ANTEIL_MIN <= g["preis"] <= ANTEIL_MAX}
+    zaehler, je_zeit = {}, {}
+    for g in slots:
+        if not (ANTEIL_MIN <= g["preis"] <= ANTEIL_MAX):
+            continue
+        zaehler[g["preis"]] = zaehler.get(g["preis"], 0) + 1
+        je_zeit.setdefault((g["datum"], g["zeit"]), set()).add(g["preis"])
+    je_zeit[None] = {p for p, n in zaehler.items() if n >= VOLLPREIS_MIN_ZAHL}
+    return je_zeit
+
+
+def vergleichspreise(volle, datum, zeit) -> set:
+    """
+    Die Vollpreise, an denen ein Anteil zu messen ist.
+
+    Die Mitspieler derselben Uhrzeit plus die Preise, die im Bestand
+    oft genug vorkommen, um als Beweis zu taugen.
+    """
+    if not isinstance(volle, dict):
+        return volle or set()
+    return (volle.get((datum, zeit)) or set()) | (volle.get(None) or set())
 
 
 def turnier_vollpreise(slots: list) -> dict:
@@ -7088,7 +7132,7 @@ def turnier_vollpreise(slots: list) -> dict:
     return preise
 
 
-def slot_bewerten(g: dict, volle: set, turniere: dict = None) -> tuple:
+def slot_bewerten(g: dict, volle, turniere: dict = None) -> tuple:
     """
     Was ist in diesem Slot passiert?
     → (Art, Klartext, voller Preis, eigener Anteil)
@@ -7100,6 +7144,7 @@ def slot_bewerten(g: dict, volle: set, turniere: dict = None) -> tuple:
     keine Rolle.
     """
     b = g["preis"]
+    volle = vergleichspreise(volle, g["datum"], g["zeit"])
 
     if g["bezahlt_zeilen"] == 0:
         # Alle Zeilen dieser Person verfallen: der Zahlungsanteil wurde
