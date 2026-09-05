@@ -7277,6 +7277,26 @@ def _analysieren_zahlungen(pdf, cdf) -> bool:
     neu_c = append_rows(pd.DataFrame(checkins_out), "checkins",
                         ["analysis_date", "Name_norm", "Checkin_Zeit"],
                         aktualisieren=True)
+
+    # Selbst erkannte Schreibvarianten festhalten. Ohne das bleibt von
+    # so einem Treffer keine Spur: „Zuordnung prüfen" sucht die Buchung
+    # über exakte Namensgleichheit oder eine bestätigte Verknüpfung und
+    # fand deshalb nichts, obwohl der Abgleich beide längst verbunden
+    # hatte. Jens B. ↔ Jens Bilinsky stand so in drei Ansichten
+    # unterschiedlich da.
+    varianten = []
+    for i, (g, _txt) in enumerate(ansprueche):
+        c, punkte, _ab, exakt = treffer.get(i, (None, 0.0, 0, False))
+        if c is None or exakt:
+            continue
+        if g["name_norm"] == c["name_norm"] or g["name_norm"] in mapping:
+            continue
+        varianten.append((g["name_norm"], c["name_norm"], punkte))
+    if varianten:
+        mapping_mehrere_hinzufuegen(varianten)
+        st.caption(f"{len(varianten)} Schreibweisen selbst zugeordnet — "
+                   "nachzusehen im Name-Abgleich.")
+
     cache_leeren()
 
     offen = sum(1 for b in buchungen_out if b["Fehler"] == "Ja")
