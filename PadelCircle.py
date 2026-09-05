@@ -98,10 +98,13 @@ CONFIG = {
     # ZWEI verschiedene Zahlen, die nichts miteinander zu tun haben:
     #
     #   wellpass_brutto — was EGYM DIR pro Check-in zahlt: 13,00 €,
-    #                     davon 95 % = 12,35 €.
+    #                     davon 95 % = 12,35 €. Ein fester Wert; es gibt
+    #                     bewusst keine Satz-Historie und keine
+    #                     Einstellung dafür. Ändert EGYM etwas, hier
+    #                     eine Zahl ändern.
     #   wellpass_abzug  — was PLAYTOMIC dem Spieler vom Platzpreis
-    #                     abzieht: 12,00 €. Nur damit wird der Abgleich
-    #                     gerechnet.
+    #                     abzieht: 12,00 €. NUR damit wird der Check-in-
+    #                     Abgleich gerechnet.
     #
     # Die beiden waren verwechselt: als EGYM-Satz stand ab dem
     # 04.08.2026 eine Senkung auf 12,00 € — das war in Wahrheit der
@@ -109,12 +112,6 @@ CONFIG = {
     # (11,40 € statt 12,35 € pro Check-in).
     "wellpass_brutto":     13.00,
     "wellpass_anteil":      0.95,
-    # Ändert EGYM den Satz, hier einen Eintrag ergänzen — über
-    # Einstellungen → EGYM-Vergütung geht es auch ohne Code. Alte Monate
-    # rechnen weiter mit ihrem Satz, sonst stimmt rückwirkend nichts.
-    "wellpass_saetze": [
-        {"ab": "2000-01-01", "brutto": 13.00},
-    ],
     # Was Playtomic pro Wellpass-Spieler vom Platzpreis abzieht.
     # NICHT dasselbe wie wellpass_brutto — das ist die Vergütung von EGYM.
     # Der Abzug hat sich im Betrieb schon geändert (13,00 € → 12,00 €),
@@ -284,45 +281,22 @@ LOADING = {
 WELLPASS_WERT   = round(CONFIG["wellpass_brutto"] * CONFIG["wellpass_anteil"], 2)
 
 
-def wellpass_saetze() -> list:
-    """Satz-Historie, aufsteigend nach Datum. Über Einstellungen änderbar."""
-    roh = einstellung("wellpass_saetze", CONFIG["wellpass_saetze"])
-    saetze = []
-    if isinstance(roh, (list, tuple)):
-        for x in roh:
-            if not isinstance(x, dict):
-                continue
-            try:
-                ab, brutto = str(x["ab"]), float(x["brutto"])
-            except (KeyError, TypeError, ValueError):
-                continue
-            if ab and brutto > 0:
-                saetze.append({"ab": ab, "brutto": brutto})
-    if not saetze:
-        saetze = list(CONFIG["wellpass_saetze"])
-    return sorted(saetze, key=lambda x: x["ab"])
+def wellpass_wert_am(datum=None) -> float:
+    """
+    Was EGYM dir pro Check-in zahlt: 13,00 € brutto, davon 95 %.
 
-
-def wellpass_brutto_am(datum) -> float:
-    """Was EGYM an diesem Tag pro Check-in zahlt."""
-    tag = str(datum)[:10]
-    gueltig = CONFIG["wellpass_brutto"]
-    for satz in wellpass_saetze():
-        if tag >= satz["ab"]:
-            gueltig = satz["brutto"]
-        else:
-            break
-    return float(gueltig)
-
-
-def wellpass_wert_am(datum) -> float:
-    """Was davon bei dir ankommt — 95 %."""
-    return round(wellpass_brutto_am(datum) * CONFIG["wellpass_anteil"], 2)
+    Ein fester Wert, kein Datum im Spiel. Früher lag hier eine
+    Satz-Historie mit eigener Einstellung — darin war der
+    Playtomic-Rabatt von 12,00 € als EGYM-Satz eingetragen, und damit
+    war jeder Euro-Betrag der App zu klein. Das Datum bleibt als
+    Parameter stehen, weil viele Aufrufer es mitgeben.
+    """
+    return WELLPASS_WERT
 
 
 def wellpass_wert_summe(datumsliste) -> float:
-    """Summe über mehrere Tage, jeder mit dem Satz seiner Zeit."""
-    return round(sum(wellpass_wert_am(d) for d in datumsliste), 2)
+    """Summe über mehrere Tage."""
+    return round(len(list(datumsliste)) * WELLPASS_WERT, 2)
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -13110,60 +13084,6 @@ def modul_einstellungen():
             cache_leeren()
             st.toast("Gespeichert.")
             st.rerun()
-
-        st.markdown("---")
-        st.markdown("##### EGYM-Vergütung")
-        st.caption("Was EGYM pro Check-in zahlt. Ändert sich der Satz, wird "
-                   "er ab dem angegebenen Tag verwendet — ältere Monate "
-                   "rechnen weiter mit ihrem alten Satz, sonst wären "
-                   "rückwirkend alle Zahlen falsch.")
-
-        saetze = wellpass_saetze()
-        st.dataframe(pd.DataFrame([{
-            "Gültig ab": datum_kurz(x["ab"]) if x["ab"] > "2001" else "Beginn",
-            "EGYM zahlt": euro(x["brutto"]),
-            f"davon {CONFIG['wellpass_anteil']*100:.0f} % für dich":
-                euro(round(x["brutto"] * CONFIG["wellpass_anteil"], 2)),
-        } for x in saetze]), use_container_width=True, hide_index=True)
-
-        st.caption(f"Aktuell gültig: {euro(wellpass_wert_am(date.today()))} "
-                   "pro Check-in")
-
-        with st.expander("Neuen Satz eintragen"):
-            sp1, sp2 = st.columns(2)
-            with sp1:
-                ab = st.date_input("Gültig ab", value=date.today(),
-                                   key="satz_ab", format="DD.MM.YYYY")
-            with sp2:
-                brutto = st.number_input("EGYM zahlt (brutto) in €",
-                                         min_value=1.0, max_value=50.0,
-                                         value=float(wellpass_brutto_am(
-                                             date.today())),
-                                         step=0.5, format="%.2f",
-                                         key="satz_brutto")
-            st.caption(f"Für dich: "
-                       f"{euro(round(brutto * CONFIG['wellpass_anteil'], 2))} "
-                       "pro Check-in")
-            if st.button("Satz hinzufügen", type="primary", key="satz_neu"):
-                neue = [x for x in saetze if x["ab"] != str(ab)]
-                neue.append({"ab": str(ab), "brutto": float(brutto)})
-                einstellung_setzen("wellpass_saetze",
-                                   sorted(neue, key=lambda x: x["ab"]))
-                cache_leeren()
-                st.toast("Satz gespeichert.")
-                st.rerun()
-
-            if len(saetze) > 1:
-                weg = st.selectbox("Satz entfernen",
-                                   [x["ab"] for x in saetze[1:]],
-                                   format_func=datum_kurz, key="satz_weg")
-                if st.button("Entfernen", key="satz_loeschen"):
-                    einstellung_setzen(
-                        "wellpass_saetze",
-                        [x for x in saetze if x["ab"] != weg])
-                    cache_leeren()
-                    st.toast("Entfernt.")
-                    st.rerun()
 
         st.markdown("---")
         st.markdown("##### Wellpass-Abzug")
