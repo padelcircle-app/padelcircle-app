@@ -6879,7 +6879,7 @@ def zahlungs_slots(pdf: pd.DataFrame) -> list:
             "name": name, "name_norm": nn, "datum": datum, "zeit": zeit,
             "minute": minute, "netto": 0.0, "verfallen": 0.0, "zeilen": 0,
             "erstattet": False, "frei": False, "bezahlt_zeilen": 0,
-            "turnier": False})
+            "turnier": False, "plaetze": [], "erstattungen": []})
         if hat_sku and str(r.get("Product SKU", "")).strip() == TURNIER_SKU:
             g["turnier"] = True
 
@@ -6892,14 +6892,26 @@ def zahlungs_slots(pdf: pd.DataFrame) -> list:
             # den Preis dieser Person für diesen Platz — und in dem Preis
             # steckt der Wellpass-Rabatt bereits drin.
             g["verfallen"] = max(g["verfallen"], max(0.0, betrag))
+        elif status == "refund":
+            # Erstattungen heben eine frühere Zahlung auf, sie sind kein
+            # eigener Platz. Gegengerechnet wird weiter unten.
+            g["netto"] += betrag
+            g["bezahlt_zeilen"] += 1
+            g["erstattet"] = True
+            g["erstattungen"].append(round(-betrag, 2))
         else:
             # Paid und Pending zählen beide. Pending heisst: gebucht,
             # gespielt, nur noch nicht bezahlt — die Buchung steht.
+            #
+            # Jede Zeile ist ein PLATZ, keine Teilsumme. Wer für Gäste
+            # mitzahlt, hat mehrere. Sie werden deshalb einzeln behalten
+            # statt addiert — sonst verschluckt der Gastbetrag den
+            # eigenen Rabatt.
+            frei = str(r.get("Payment method", "")).strip().lower() == "free payment"
             g["netto"] += betrag
             g["bezahlt_zeilen"] += 1
-            if status == "refund":
-                g["erstattet"] = True
-            if str(r.get("Payment method", "")).strip().lower() == "free payment":
+            g["plaetze"].append({"betrag": round(betrag, 2), "frei": frei})
+            if frei:
                 g["frei"] = True
 
         # Die ausführlichste Schreibweise gewinnt als Anzeigename
@@ -6908,6 +6920,15 @@ def zahlungs_slots(pdf: pd.DataFrame) -> list:
 
     for g in gruppen.values():
         g["netto"] = round(g["netto"], 2)
+        # Erstattungen gegen die passende Zahlung aufrechnen. Was danach
+        # übrig bleibt, sind die tatsächlich belegten Plätze. Marco Polo
+        # zahlte 6 €, bekam 6 € zurück und zahlte dann 1,50 € — das ist
+        # EIN Platz zu 1,50 €, nicht drei.
+        for betrag in g["erstattungen"]:
+            treffer = next((i for i, pl in enumerate(g["plaetze"])
+                            if abs(pl["betrag"] - betrag) < 0.005), None)
+            if treffer is not None:
+                g["plaetze"].pop(treffer)
         # Der Preis dieser Person für diesen Platz. Hat sie gezahlt oder
         # schuldet sie noch etwas, gilt das Netto — Erstattungen sind da
         # schon abgezogen. Steht nur ein verfallener Anteil da, gilt
@@ -6966,7 +6987,7 @@ def turnier_vollpreise(slots: list) -> dict:
 def slot_bewerten(g: dict, volle: set, turniere: dict = None) -> tuple:
     """
     Was ist in diesem Slot passiert?
-    → („wellpass" | „vollzahler" | „storniert", Klartext, voller Preis)
+    → (Art, Klartext, voller Preis, eigener Anteil)
 
     Entscheidend ist der Preis der Person, nicht ob sie schon bezahlt
     hat. Wer 1,50 € schuldet, hat den Rabatt bereits bekommen — der
@@ -6982,7 +7003,7 @@ def slot_bewerten(g: dict, volle: set, turniere: dict = None) -> tuple:
         # Faellen vom 26.-31.08. hat KEIN einziger an dem Tag
         # eingecheckt. Anders als bei „Pending", wo das Geld nur noch
         # aussteht — dort wurde gespielt.
-        return "storniert", "Zahlungsanteil verfallen", 0.0
+        return "storniert", "Zahlungsanteil verfallen", 0.0, 0.0
 
     if g.get("turnier"):
         # Turnier: nicht der feste Rabatt zählt, sondern der Vergleich
@@ -6990,21 +7011,36 @@ def slot_bewerten(g: dict, volle: set, turniere: dict = None) -> tuple:
         voll = (turniere or {}).get((g["datum"], g["zeit"]), 0.0)
         if voll > 0 and b < voll:
             return ("wellpass",
-                    f"{euro(b)} statt {euro(voll)} — Turnier", voll)
-        return "vollzahler", "", b
+                    f"{euro(b)} statt {euro(voll)} — Turnier", voll, b)
+        return "vollzahler", "", b, b
 
-    if b == 0 and g["frei"] and not g["erstattet"]:
-        return ("wellpass", f"0 € — Anteil lag unter {euro(WELLPASS_RABATT)}",
-                round(b + WELLPASS_RABATT, 2))
-    if b <= 0:
-        # Storniert, oder ein Nullbetrag ohne Zahlungsart — daraus lässt
-        # sich kein Rabatt ablesen.
-        return "storniert", "kein Betrag übrig", 0.0
-    voll = round(b + WELLPASS_RABATT, 2)
-    if b <= ANTEIL_MAX - WELLPASS_RABATT and voll in volle:
-        offen = "" if g["bezahlt_zeilen"] else " (noch offen)"
-        return "wellpass", f"{euro(b)} statt {euro(voll)}{offen}", voll
-    return "vollzahler", "", b
+    # Jeder Platz einzeln prüfen. Wer für Gäste mitzahlt, hat mehrere
+    # Zeilen im selben Slot — der eigene Rabatt darf nicht im Gastbetrag
+    # untergehen. Benjamin Hörchner zahlte am 26.08. um 11:00 seinen
+    # eigenen Platz mit 0 € über Wellpass und den Gast mit 9 €; addiert
+    # sah er aus wie ein Vollzahler.
+    for platz in g["plaetze"]:
+        pb = platz["betrag"]
+        if platz["frei"] and pb == 0:
+            return ("wellpass", "0 € — eigener Anteil über Wellpass gedeckt",
+                    round(WELLPASS_RABATT, 2), 0.0)
+        if 0 < pb <= ANTEIL_MAX - WELLPASS_RABATT:
+            voll = round(pb + WELLPASS_RABATT, 2)
+            if voll in volle:
+                return "wellpass", f"{euro(pb)} statt {euro(voll)}", voll, pb
+
+    if not g["plaetze"]:
+        # Kein bezahlter Platz übrig — bleibt nur ein noch offener.
+        bv = g["verfallen"]
+        if 0 < bv <= ANTEIL_MAX - WELLPASS_RABATT:
+            voll = round(bv + WELLPASS_RABATT, 2)
+            if voll in volle:
+                return ("wellpass", f"{euro(bv)} statt {euro(voll)} (noch offen)",
+                        voll, bv)
+        return "storniert", "kein Betrag übrig", 0.0, 0.0
+
+    kleinster = min(pl["betrag"] for pl in g["plaetze"])
+    return "vollzahler", "", kleinster, kleinster
 
 
 def _namensteil_passt(a: str, b: str) -> bool:
@@ -7135,7 +7171,8 @@ def _analysieren_zahlungen(pdf, cdf) -> bool:
     volle = _volle_anteile(slots)
     turniere = turnier_vollpreise(slots)
     bewertet = [(g, *slot_bewerten(g, volle, turniere)) for g in slots]
-    ansprueche = [(g, txt) for g, art, txt, _v in bewertet if art == "wellpass"]
+    ansprueche = [(g, txt) for g, art, txt, _v, _a in bewertet
+                  if art == "wellpass"]
 
     # Erst die namensgleichen Treffer, dann die Schreibvarianten auf dem,
     # was übrig bleibt. Andernfalls nimmt eine Abkürzung wie „Maximilian
@@ -7161,7 +7198,7 @@ def _analysieren_zahlungen(pdf, cdf) -> bool:
     mapping = mapping_laden()
 
     buchungen_out, checkins_out = [], []
-    for i, (g, art, txt, vollpreis) in enumerate(bewertet):
+    for i, (g, art, txt, vollpreis, eigen) in enumerate(bewertet):
         if art == "storniert":
             continue
         balken.progress((i + 1) / len(bewertet))
@@ -7201,8 +7238,11 @@ def _analysieren_zahlungen(pdf, cdf) -> bool:
             # offenen Anteil also der geschuldete. Sonst klaffte die
             # Anzeige auseinander: 0,00 € gezahlt „statt 13,50 €" sieht
             # nach 13,50 € Rabatt aus, obwohl es 12,00 € sind.
+            # „Bezahlt" ist das Geld, das diese Person insgesamt
+            # bewegt hat — auch für Gäste. „Betrag" ist ihr EIGENER
+            # Anteil an diesem Platz.
             "Bezahlt": g["netto"],
-            "Betrag": g["preis"],
+            "Betrag": eigen,
             "Plaetze": 1,
             "Wellpass_Rabatte": 1 if rabatt else 0,
             "Teilnehmer": 1,
