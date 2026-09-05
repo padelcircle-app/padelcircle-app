@@ -3222,6 +3222,22 @@ def sperre_nachholung_zuordnen(name_norm: str, name: str, fall_datum: str,
     return True
 
 
+def _selbe_person(checkin_name: str, fall_name: str) -> bool:
+    """
+    Meinen Check-in-Name und Fall-Name denselben Menschen?
+
+    „Kartal" steht in Playtomic, „Necmettin Kartal" bei EGYM — über die
+    bestätigte Verknüpfung ist das eine Person.
+    """
+    if str(checkin_name) == str(fall_name):
+        return True
+    for buchung_name, z in mapping_laden().items():
+        gname = str(z["checkin_name"] if isinstance(z, dict) else z)
+        if gname == str(checkin_name) and str(buchung_name) == str(fall_name):
+            return True
+    return False
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def falsche_zuordnungen() -> pd.DataFrame:
     """
@@ -3262,9 +3278,22 @@ def falsche_zuordnungen() -> pd.DataFrame:
             continue
 
         fall_datum = str(r.get("fall_datum", "") or "")
-        if not fall_datum:
-            teile = str(r.get("fall_key", "")).split("|")
-            fall_datum = teile[0] if teile else ""
+        fall_name = str(r.get("fall_name", "") or "")
+        if not fall_datum or not fall_name:
+            teile = str(r.get("fall_key", "")).split("|", 1)
+            if len(teile) == 2:
+                fall_datum = fall_datum or teile[0]
+                fall_name = fall_name or teile[1]
+
+        # Der eigene Anspruch IST der Fall, den diese Zuordnung
+        # geschlossen hat: derselbe Mensch, derselbe Tag. Dann deckt der
+        # Check-in genau das, wofür er da ist — kein Widerspruch.
+        # „Kartal" checkte am 26.08. als „Necmettin Kartal" ein und
+        # spielte am 26.08.; das ist die Normallage, nicht der Fehler.
+        # Ein echter Widerspruch braucht zwei verschiedene Tage oder
+        # zwei verschiedene Menschen.
+        if ci_datum == fall_datum and _selbe_person(ci_name, fall_name):
+            continue
 
         zeilen.append({
             "Name": ci_name,
@@ -12158,6 +12187,16 @@ def nachholung_speichern(checkin_datum: str, checkin_name: str,
     """
     ck = checkin_schluessel(checkin_datum, checkin_name)
     fk = checkin_schluessel(fall_datum, fall_name)
+
+    # Nachgeholt wird nach dem Spiel, nie davor. Ein Check-in, der vor
+    # dem Spieltag liegt, kann diesen Tag nicht erklären — wer am 26.
+    # eincheckt, hat damit nicht den 27. abgedeckt.
+    ci_d, fa_d = parse_date_safe(checkin_datum), parse_date_safe(fall_datum)
+    if ci_d and fa_d and ci_d < fa_d:
+        st.error(f"❌ Der Check-in vom {datum_kurz(checkin_datum)} liegt vor "
+                 f"dem Spieltag {datum_kurz(fall_datum)} — nachgeholt wird "
+                 "nach dem Spiel, nicht davor.")
+        return False
 
     schon_vergeben = verbrauchte_checkins().get(ck)
     if schon_vergeben and schon_vergeben != fk:
