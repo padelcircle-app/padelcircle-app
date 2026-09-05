@@ -10327,8 +10327,50 @@ def _wa_seitenspalte(datum: str, offen_heute: pd.DataFrame):
         elif abstand != 0:
             st.caption(f"↳ {erklaerung['text']}")
 
+        # ── Gesperrter Spieler ──────────────────────────────────────
+        #
+        # Ein mit „Gesperrt" geschlossener Fall gilt als erledigt und
+        # steht deshalb in keiner Zielliste. Wer nach einer Sperre
+        # nachtraeglich eincheckt, war hier also nicht zuzuordnen — man
+        # musste ihn im Reiter Uebersicht suchen. Hier steht es jetzt
+        # da, wo man ohnehin arbeitet.
+        #
+        # Zugeordnet wird weiterhin per Klick. Faellt damit die letzte
+        # Sperre weg, legt sperre_nachholung_zuordnen() von selbst die
+        # Freigabe-Aufgabe an — den Wellpass-Zugang oeffnet EGYM, nicht
+        # diese App.
+        sperren = gesperrte_ziele(ci_norm, ci_datum)
+        if not sperren.empty:
+            n_sp = len(sperren)
+            st.markdown(chip(f"🔒 {n_sp}× gesperrt",
+                             "err" if n_sp > 1 else "warn"),
+                        unsafe_allow_html=True)
+            st.caption("↳ gesperrte Spieltage: "
+                       + ", ".join(datum_kurz(str(d))
+                                   for d in sperren["datum"])
+                       + " — dieser Check-in kann eine Sperre auflösen.")
+            paare = [(datum_kurz(str(z["datum"])), str(z["datum"]))
+                     for _, z in sperren.iterrows()]
+            if n_sp == 1:
+                s_label, s_datum = paare[0]
+            else:
+                s_label = st.selectbox("Welcher gesperrte Spieltag?",
+                                       [l for l, _ in paare],
+                                       key=f"uez_spsel_{datum}_{i}")
+                s_datum = dict(paare)[s_label]
+            if st.button(f"🔓 Sperre vom {s_label} auflösen",
+                         key=f"uez_sp_{datum}_{i}", type="primary",
+                         use_container_width=True):
+                if sperre_nachholung_zuordnen(ci_norm, ci_name, s_datum,
+                                              ci_datum, ci_name):
+                    st.toast("Sperre aufgelöst.")
+                    st.rerun()
+                else:
+                    st.warning("Konnte nicht zugeordnet werden.")
+
         alle_ziele = {**ziele, **ziele_alt}
         if not alle_ziele:
+            st.markdown("")
             continue
 
         if bester_score >= 80 and bester_key in ziele:
