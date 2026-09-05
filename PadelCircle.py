@@ -2829,11 +2829,44 @@ def tag_details(datum_str: str) -> pd.DataFrame:
     return df[df["analysis_date"].astype(str) == str(datum_str)].copy()
 
 
+def hinfaellige_fall_keys() -> set:
+    """
+    Fälle, deren Nachholung nach heutigem Stand nicht mehr gelten kann.
+
+    Ein Check-in schliesst genau einen Fall. Braucht ihn sein eigener
+    Spieltag inzwischen selbst, ist die ältere Zuordnung hinfällig und
+    der ältere Fall wieder offen — sofort, nicht erst wenn du in
+    „Zuordnung prüfen" auf Zurücknehmen klickst.
+
+    Lina Schafran ist der Fall, an dem das aufgefallen ist: Sie spielte
+    am 27.08. und am 30.08., eingecheckt hat sie nur am 30.08. Damals
+    galt ihr 0-€-Platz am 30.08. nicht als Anspruch, der Check-in war
+    also überzählig und wurde dem offenen Fall vom 27.08.
+    gutgeschrieben. Seit die Rechnung den 0-€-Platz richtig erkennt,
+    gehört der Check-in seinem eigenen Tag — und der 27.08. ist wieder
+    offen. Stünde er weiter als erledigt da, wären zwei Fälle mit einer
+    einzigen Vergütung geschlossen.
+    """
+    try:
+        falsch = falsche_zuordnungen()
+    except Exception:
+        return set()
+    if falsch.empty or "fall_key" not in falsch.columns:
+        return set()
+    return set(falsch["fall_key"].astype(str))
+
+
 def behobene_keys() -> set:
     corr = loadsheet("corrections", SHEET_SPALTEN["corrections"])
     if corr.empty or "key" not in corr.columns:
         return set()
-    return set(corr.loc[corr["behoben"].map(is_true), "key"].astype(str))
+    keys = set(corr.loc[corr["behoben"].map(is_true), "key"].astype(str))
+    # corrections führt „name_datum", die Zuordnung „datum|name" —
+    # dieselbe Sache in zwei Schreibweisen, hier umgerechnet.
+    hin = {f"{teile[1]}_{teile[0]}" for teile in
+           (k.split("|", 1) for k in hinfaellige_fall_keys())
+           if len(teile) == 2}
+    return keys - hin
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -11768,13 +11801,21 @@ def modul_whatsapp():
             box("Noch nichts als erledigt markiert.", "info")
         else:
             st.caption(f"{len(erledigt)} erledigte Fälle · neueste zuerst")
+            # Nachholungen, deren Check-in inzwischen an seinem eigenen
+            # Spieltag gebraucht wird. Der Fall zählt schon wieder als
+            # offen — hier steht, warum.
+            hinfaellig = hinfaellige_fall_keys()
             for i, (_, r) in enumerate(erledigt.head(60).iterrows()):
                 e1, e2, e3 = st.columns([2.4, 1.4, 1.2])
                 with e1:
                     info = grund_info(r.get("grund", ""))
                     label = f"{info['icon']} {info['kurz']}"
-                    st.markdown(f"**{r['Name']}**  {chip(label, 'soft')}",
-                                unsafe_allow_html=True)
+                    tot = checkin_schluessel(str(r["datum"]),
+                                             str(r["name_norm"])) in hinfaellig
+                    st.markdown(
+                        f"**{r['Name']}**  {chip(label, 'soft')}"
+                        + (("  " + chip("⚠️ hinfällig", "err")) if tot else ""),
+                        unsafe_allow_html=True)
                     # Bei Nachholungen zeigen, welcher Check-in den Fall
                     # geschlossen hat — damit nachvollziehbar bleibt,
                     # dass jeder Check-in nur einmal verwendet wurde.
@@ -11785,6 +11826,13 @@ def modul_whatsapp():
                             st.caption(f"↳ Check-in vom "
                                        f"{datum_kurz(quelle['checkin_datum'])} "
                                        f"({quelle['checkin_name']})")
+                        if tot:
+                            st.caption(
+                                "⚠️ Dieser Check-in wird inzwischen an "
+                                "seinem eigenen Spieltag gebraucht — die "
+                                "Nachholung gilt nicht mehr, der Fall ist "
+                                "wieder offen. In „Zuordnung prüfen“ "
+                                "kannst du sie sauber zurücknehmen.")
                 with e2:
                     wann = (r["_ts"].strftime("%d.%m. %H:%M")
                             if pd.notna(r.get("_ts")) else "")
@@ -11957,8 +12005,12 @@ def verbrauchte_checkins() -> dict:
     df = loadsheet("checkin_zuordnung", SHEET_SPALTEN["checkin_zuordnung"])
     if df.empty or "checkin_key" not in df.columns:
         return {}
-    return dict(zip(df["checkin_key"].astype(str),
-                    df["fall_key"].astype(str)))
+    # Hinfällige Zuordnungen geben den Check-in wieder frei — sonst
+    # bliebe er an einem Fall hängen, der gar nicht mehr geschlossen ist.
+    hin = hinfaellige_fall_keys()
+    return {ck: fk for ck, fk in zip(df["checkin_key"].astype(str),
+                                     df["fall_key"].astype(str))
+            if fk not in hin}
 
 
 @st.cache_data(ttl=300, show_spinner=False)
