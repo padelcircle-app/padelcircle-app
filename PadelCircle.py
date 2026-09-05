@@ -2483,6 +2483,27 @@ def standort_start() -> str:
 
 
 @st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=900, show_spinner=False)
+def court_daten_da() -> bool:
+    """
+    Gibt es überhaupt Buchungszeilen mit Court-Angabe?
+
+    Der Zahlungs-Abgleich kennt weder Court noch Spieldauer — die stehen
+    nur im Buchungsexport. Auswertungen, die darauf aufbauen (Auslastung,
+    Events, Türöffner), haben ohne sie nichts zu zeigen. Sie werden
+    deshalb ausgeblendet, statt eine leere Ansicht mit einer
+    irreführenden Meldung stehen zu lassen — „noch keine Buchungsdaten"
+    stimmte ja nicht, die Daten sind da, nur ohne Court.
+
+    Sobald wieder ein Buchungsexport eingelesen wird, sind sie von selbst
+    zurück.
+    """
+    b = loadsheet("buchungen")
+    if b.empty or "Court" not in b.columns:
+        return False
+    return bool(b["Court"].astype(str).str.strip().ne("").any())
+
+
 def belegte_slots(von: str = None, bis: str = None) -> pd.DataFrame:
     """
     Jede Buchung einmal, aufgelöst nach Court.
@@ -8752,21 +8773,16 @@ def _dash_einnahmen():
 
 def modul_dashboard():
     head("Business Dashboard", "Umsatz · Auslastung · Abgleich")
-    t1, t2, t3, t4, t5, t6 = st.tabs(["📅 Tag", "💰 Einnahmen", "📈 Monat",
-                                      "📊 Auslastung", "⚖️ Monatsabgleich",
-                                      "🌦 Wetter"])
-    with t1:
-        _dash_tag()
-    with t2:
-        _dash_einnahmen()
-    with t3:
-        _dash_monat()
-    with t4:
-        _dash_auslastung()
-    with t5:
-        _dash_abgleich()
-    with t6:
-        _dash_wetter()
+    # „Auslastung" braucht Court und Spieldauer — siehe court_daten_da().
+    seiten = [("📅 Tag", _dash_tag), ("💰 Einnahmen", _dash_einnahmen),
+              ("📈 Monat", _dash_monat)]
+    if court_daten_da():
+        seiten.append(("📊 Auslastung", _dash_auslastung))
+    seiten += [("⚖️ Monatsabgleich", _dash_abgleich), ("🌦 Wetter", _dash_wetter)]
+
+    for reiter, (_titel, zeigen) in zip(st.tabs([t for t, _ in seiten]), seiten):
+        with reiter:
+            zeigen()
 
 
 def _dash_wetter():
@@ -11474,13 +11490,16 @@ def modul_analysen():
         st.caption(f"Datengrundlage: {datum_kurz(str(von))} bis "
                    f"{datum_kurz(str(bis))} · {(bis - von).days} Tage")
 
-    t1, t2, t3 = st.tabs(["🔁 Bindung", "🤝 Netzwerk", "💶 Wirtschaftlichkeit"])
-    with t1:
-        _an_bindung()
-    with t2:
-        _an_netzwerk()
-    with t3:
-        _an_wellpass()
+    # „Netzwerk" wertet aus, wer mit wem auf dem Platz stand — dafür
+    # braucht es den Court.
+    seiten = [("🔁 Bindung", _an_bindung)]
+    if court_daten_da():
+        seiten.append(("🤝 Netzwerk", _an_netzwerk))
+    seiten.append(("💶 Wirtschaftlichkeit", _an_wellpass))
+
+    for reiter, (_titel, zeigen) in zip(st.tabs([t for t, _ in seiten]), seiten):
+        with reiter:
+            zeigen()
 
 
 def modul_events():
@@ -13255,7 +13274,17 @@ def main():
         except Exception:
             hat_daten = True
 
+        # Events braucht Playtomics OPEN_PLAY-Kennzeichnung, die nur im
+        # Buchungsexport steht. Ohne Court-Daten ist das Modul leer —
+        # dann gar nicht erst anbieten. Siehe court_daten_da().
+        try:
+            mit_court = court_daten_da()
+        except Exception:
+            mit_court = True
+
         for modul in MODULE:
+            if modul["id"] == "events" and not mit_court:
+                continue
             beschriftung = f"{modul['ic']}  {modul['ti']}"
 
             if not modul["an"]:
