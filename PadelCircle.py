@@ -10012,16 +10012,46 @@ def _wa_seitenspalte(datum: str, offen_heute: pd.DataFrame):
         st.caption(f"letzte {rueck} Tage · eingecheckt, aber keiner "
                    "Buchung zugeordnet")
 
-    ueber = offene_checkins_zeitraum(von, bis)
+    ueber = offene_checkins_zeitraum(von, bis, mit_verbrauchten=True)
 
     if ueber.empty:
         box("✅ Keine überzähligen Check-ins in diesem Zeitraum.", "ok")
         return
 
+    # Die bereits verrechneten bleiben sichtbar, stehen aber hinten.
+    # Sagt jemand „ich habe doch eingecheckt", ist so nachzuvollziehen,
+    # welchem Tag sein Check-in gutgeschrieben wurde.
+    zugeteilt = ueber[ueber["_zugeordnet"].astype(str) != ""]
+    ueber = ueber[ueber["_zugeordnet"].astype(str) == ""]
+
     st.markdown(f'<div class="pc-zahl">{len(ueber)}</div>'
                 f'<div class="pc-zahl-sub">offen · '
-                f'{euro(len(ueber) * wellpass_wert_am(datum))} bereits vergütet</div>',
-                unsafe_allow_html=True)
+                f'{euro(len(ueber) * wellpass_wert_am(datum))} bereits vergütet'
+                + (f' · {len(zugeteilt)} bereits zugeordnet'
+                   if len(zugeteilt) else '')
+                + '</div>', unsafe_allow_html=True)
+
+    if len(zugeteilt):
+        with st.expander(f"✓ {len(zugeteilt)} bereits einem Tag zugeordnet"):
+            st.caption("Diese Check-ins haben einen älteren Fall geschlossen. "
+                       "Sie sind aufgebraucht — hier stehen sie nur zum "
+                       "Nachschlagen.")
+            for _, z in zugeteilt.sort_values(
+                    "analysis_date", ascending=False).iterrows():
+                ziel = str(z["_zugeordnet"])
+                zeit = str(z.get("Checkin_Zeit", "")).strip()
+                st.markdown(
+                    f'<div class="pc-uez"><div class="nm">{z["Name"]}'
+                    f'&nbsp; {chip("zugeordnet zu " + datum_kurz(ziel), "lime")}'
+                    f'</div><div class="mt">Check-in '
+                    f'{datum_kurz(str(z["analysis_date"]))}'
+                    + (f' · {zeit}' if zeit else '') + '</div></div>',
+                    unsafe_allow_html=True)
+
+    if ueber.empty:
+        box("✅ Alle überzähligen Check-ins dieses Zeitraums sind zugeordnet.",
+            "ok")
+        return
     st.markdown("")
 
     # Zuordnungsziele: offene Fälle des gewählten Tages UND die davor.
@@ -11982,10 +12012,18 @@ def nachholung_quelle(fall_name: str, fall_datum: str) -> dict:
 
 
 @st.cache_data(ttl=600, show_spinner=False)
-def offene_checkins_zeitraum(von: date, bis: date) -> pd.DataFrame:
+def offene_checkins_zeitraum(von: date, bis: date,
+                             mit_verbrauchten: bool = False) -> pd.DataFrame:
     """
     Alle Check-ins in einem Zeitraum, die keiner Buchung zugeordnet
-    werden konnten und noch nicht als Nachholung verbraucht sind.
+    werden konnten.
+
+    Mit mit_verbrauchten=True bleiben auch die drin, die bereits einen
+    älteren Fall geschlossen haben — erkennbar an der Spalte
+    „_zugeordnet" mit dem Tag, dem sie gutgeschrieben wurden. Ohne sie
+    verschwanden sie spurlos aus der Liste: Sagt jemand „ich habe doch
+    eingecheckt", war nicht mehr zu sehen, dass sein Check-in längst
+    woanders verrechnet ist.
     """
     c = loadsheet("checkins")
     if c.empty or "analysis_date" not in c.columns:
@@ -12003,17 +12041,28 @@ def offene_checkins_zeitraum(von: date, bis: date) -> pd.DataFrame:
         return df
 
     verbraucht = verbrauchte_checkins()
-    if verbraucht:
-        df["_key"] = df.apply(
-            lambda r: checkin_schluessel(str(r["analysis_date"]),
-                                         str(r["Name_norm"])), axis=1)
+    df["_key"] = df.apply(
+        lambda r: checkin_schluessel(str(r["analysis_date"]),
+                                     str(r["Name_norm"])), axis=1)
+    if mit_verbrauchten:
+        def _ziel(k):
+            wert = verbraucht.get(k)
+            return str(wert).split("|", 1)[0] if wert else ""
+        df["_zugeordnet"] = df["_key"].map(_ziel)
+    elif verbraucht:
         df = df[~df["_key"].isin(verbraucht.keys())]
 
     belegt = mapping_belegte_checkins()
     if belegt and not df.empty:
-        df = df[~df.apply(
+        gedeckt = df.apply(
             lambda r: str(r["Name_norm"]) in belegt.get(
-                str(r["analysis_date"]), set()), axis=1)]
+                str(r["analysis_date"]), set()), axis=1)
+        if mit_verbrauchten:
+            # Über eine Verknüpfung gedeckt zählt genauso als zugeordnet
+            df.loc[gedeckt & (df["_zugeordnet"] == ""), "_zugeordnet"] = \
+                df.loc[gedeckt & (df["_zugeordnet"] == ""), "analysis_date"]
+        else:
+            df = df[~gedeckt]
 
     return df.drop_duplicates(subset=["analysis_date", "Name_norm"])
 
