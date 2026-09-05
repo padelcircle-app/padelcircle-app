@@ -1975,7 +1975,8 @@ def parse_kunden(datei) -> pd.DataFrame:
 #   🔍  NAME-MATCHING
 # ══════════════════════════════════════════════════════════════════════════════
 
-def mapping_laden() -> dict:
+def mapping_roh() -> dict:
+    """Alle gespeicherten Verknüpfungen — auch die unmöglichen."""
     cached = st.session_state.get("name_mapping_cache")
     if cached is not None:
         return cached
@@ -1993,6 +1994,21 @@ def mapping_laden() -> dict:
     return mapping
 
 
+def mapping_laden() -> dict:
+    """
+    Die Verknüpfungen, die angewandt werden dürfen.
+
+    Gleicher Nachname, anderer Vorname wird hier ausgesiebt — egal wer
+    die Zuordnung einmal bestätigt hat und egal wie oft sie gespeichert
+    ist. Sie bleibt in der Tabelle stehen und taucht im Name-Abgleich
+    unter „Konflikte" auf, damit sie sichtbar und löschbar ist; wirken
+    tut sie nirgends mehr.
+    """
+    return {b: z for b, z in mapping_roh().items()
+            if not namen_sind_verschiedene_personen(
+                str(b), str(z["checkin_name"] if isinstance(z, dict) else z))}
+
+
 def mapping_speichern(mapping: dict):
     zeilen = [{
         "buchung_name": b,
@@ -2008,7 +2024,13 @@ def mapping_speichern(mapping: dict):
 
 
 def mapping_hinzufuegen(buchung_name: str, checkin_name: str, confidence=100):
-    m = mapping_laden()
+    if namen_sind_verschiedene_personen(str(buchung_name), str(checkin_name)):
+        st.error(f"❌ „{buchung_name}“ und „{checkin_name}“ "
+                 "sind zwei verschiedene Menschen — gleicher Nachname, "
+                 "anderer Vorname. Diese Verknüpfung wird nicht "
+                 "gespeichert.")
+        return False
+    m = mapping_roh()
     m[buchung_name] = {
         "checkin_name": checkin_name,
         "confidence": confidence,
@@ -2016,6 +2038,7 @@ def mapping_hinzufuegen(buchung_name: str, checkin_name: str, confidence=100):
         "confirmed_by": "manuell",
     }
     mapping_speichern(m)
+    return True
 
 
 def mapping_mehrere_hinzufuegen(paare: list):
@@ -2028,9 +2051,13 @@ def mapping_mehrere_hinzufuegen(paare: list):
     """
     if not paare:
         return
-    m = mapping_laden()
+    m = mapping_roh()
     jetzt = datetime.now().isoformat()
     for buchung_name, checkin_name, confidence in paare:
+        # Gleicher Nachname, anderer Vorname kommt gar nicht erst rein.
+        if namen_sind_verschiedene_personen(str(buchung_name),
+                                            str(checkin_name)):
+            continue
         m[buchung_name] = {
             "checkin_name": checkin_name,
             "confidence": confidence,
@@ -2041,7 +2068,7 @@ def mapping_mehrere_hinzufuegen(paare: list):
 
 
 def mapping_entfernen(buchung_name: str):
-    m = mapping_laden()
+    m = mapping_roh()
     m.pop(buchung_name, None)
     mapping_speichern(m)
 
@@ -2852,15 +2879,20 @@ def mapping_gedeckt_je_tag() -> dict:
         # der Check-in längst Kevin gehörte. EGYM vergütet einmal.
         frei = (gruppe[gruppe["Gespielt"].astype(str) != "Ja"]
                 if hat_gespielt else gruppe)
-        namen = set(frei["Name_norm"].astype(str))
+        vorrat = frei["Name_norm"].astype(str).value_counts().to_dict()
         for checkin_name, buchungs_namen in rueck.items():
-            if checkin_name not in namen:
+            anzahl = int(vorrat.get(checkin_name, 0))
+            if not anzahl:
                 continue
             # Ein Check-in, der schon einen älteren Fall geschlossen hat,
             # steht hier nicht mehr zur Verfügung.
             if checkin_schluessel(tag, checkin_name) in verbraucht:
                 continue
-            gedeckt.setdefault(tag, set()).update(buchungs_namen)
+            # Ein Check-in deckt EINEN Fall, nie zwei. Zeigen mehrere
+            # Verknüpfungen auf denselben Wellpass-Namen, kommt nur so
+            # viel durch, wie an dem Tag wirklich eingecheckt wurde.
+            gedeckt.setdefault(tag, set()).update(
+                sorted(buchungs_namen)[:anzahl])
 
     return gedeckt
 
@@ -7095,6 +7127,30 @@ def namen_decken_sich(a: str, b: str) -> bool:
     return True
 
 
+def namen_sind_verschiedene_personen(a: str, b: str) -> bool:
+    """
+    Gleicher Nachname, anderer Vorname — das sind zwei Menschen.
+
+    Kevin und Lina Schafran spielen zusammen, Marie und Gunter Weber
+    wären derselbe Fall. Eine Verknüpfung zwischen ihnen darf es unter
+    keinen Umständen geben: sonst checkt einer ein und der andere
+    bekommt seinen offenen Fall stillschweigend geschlossen.
+
+    Die Regel greift nur, wenn beide Namen mindestens zwei Teile haben
+    und die Nachnamen zusammenpassen. „Kartal" → Necmettin Kartal
+    bleibt erlaubt (nur ein Teil), „Fridtjof Spohler" → Ole Fridtjof
+    Spohler ebenso: dort findet der Vorname im anderen Namen einen
+    Partner. „Lina" findet in „Kevin Schafran" keinen.
+    """
+    ta, tb = str(a).split(), str(b).split()
+    if len(ta) < 2 or len(tb) < 2:
+        return False
+    if not _namensteil_passt(ta[-1], tb[-1]):
+        return False
+    kurz, lang = (ta, tb) if len(ta) <= len(tb) else (tb, ta)
+    return not any(_namensteil_passt(kurz[0], teil) for teil in lang[:-1])
+
+
 def _checkins_aufbereiten(cdf: pd.DataFrame) -> list:
     """Check-in-Tabelle in eine Liste mit Minutenangabe."""
     if cdf is None or cdf.empty or "Vor- & Nachname" not in cdf.columns:
@@ -7141,6 +7197,10 @@ def _passenden_checkin(g: dict, checkins: list, nur_gleicher_name: bool,
         if mit_fenster and not (CHECKIN_FENSTER[0] <= abstand <= CHECKIN_FENSTER[1]):
             continue
         if nur_gleicher_name and c["name_norm"] != g["name_norm"]:
+            continue
+        # Gleicher Nachname, anderer Vorname: niemals. Kevin und Lina
+        # Schafran spielen zusammen — Kevins Check-in gehört Kevin.
+        if namen_sind_verschiedene_personen(g["name_norm"], c["name_norm"]):
             continue
         punkte = max(fuzz.token_set_ratio(g["name_norm"], c["name_norm"]),
                      fuzz.partial_ratio(g["name_norm"], c["name_norm"]))
@@ -12413,7 +12473,7 @@ def mapping_konflikte() -> list:
 
     → [{buchung, checkin, art, hinweis, tage}, …]
     """
-    mapping = mapping_laden()
+    mapping = mapping_roh()
     if not mapping:
         return []
 
@@ -12423,6 +12483,19 @@ def mapping_konflikte() -> list:
                            else ziel)
         tage_b = spieltage_von(str(buchung_name))
         tage_c = spieltage_von(checkin_name)
+
+        # Gleicher Nachname, anderer Vorname: zwei Menschen. Wirkt
+        # ohnehin nicht mehr, gehört aber hierher — sonst steht die
+        # Zeile unsichtbar in der Tabelle und niemand räumt sie weg.
+        if namen_sind_verschiedene_personen(str(buchung_name), checkin_name):
+            konflikte.append({
+                "buchung": str(buchung_name), "checkin": checkin_name,
+                "art": "hart", "tage": sorted(tage_b | tage_c, reverse=True),
+                "hinweis": ("Gleicher Nachname, anderer Vorname — das sind "
+                            "zwei Menschen. Die Verknüpfung ist bereits "
+                            "ausser Kraft, hier kannst du sie löschen."),
+            })
+            continue
 
         if not tage_c:
             continue    # Name existiert nur bei EGYM — alles in Ordnung
