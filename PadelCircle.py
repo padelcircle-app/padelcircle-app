@@ -7271,11 +7271,6 @@ def _verarbeiten_zahlungen(z_datei, c_datei, o_datei=None) -> bool:
         st.error("❌ Check-in-Datei konnte nicht gelesen werden.")
         return False
 
-    # Rohzeilen sichern — dieselbe Quelle wie beim alten Weg. Nur die
-    # bezahlten haben eine Payment id; die offenen Posten würden sonst
-    # bei jedem Import erneut angehängt.
-    append_rows(pdf, "playtomic_raw", id_spalte="Payment id")
-
     if o_datei is not None:
         odf = parse_playtomic(o_datei)
         if odf.empty:
@@ -7285,6 +7280,13 @@ def _verarbeiten_zahlungen(z_datei, c_datei, o_datei=None) -> bool:
             gemeinsam = [c for c in odf.columns if c in pdf.columns]
             pdf = pd.concat([pdf[gemeinsam], odf[gemeinsam]], ignore_index=True)
             st.caption(f"Offene Posten mitgerechnet: {len(odf)} Zeilen.")
+
+    # Rohzeilen sichern — beide Dateien, erst nach dem Zusammenführen.
+    # Sonst fehlten beim späteren „Neu berechnen" genau die offenen und
+    # stornierten Zeilen, und der Tag käme anders heraus als beim Import.
+    # Die bezahlten Zeilen tragen eine Payment id, die offenen nicht —
+    # dort entdoppelt append_rows über den Zeilen-Fingerabdruck.
+    append_rows(pdf, "playtomic_raw", id_spalte="Payment id")
 
     return _analysieren_zahlungen(pdf, cdf)
 
