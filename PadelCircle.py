@@ -10646,8 +10646,16 @@ def _wa_pruefen():
         "zugerechnet hat — und auf welchem Weg. Reine Kontrollansicht: "
         "Nichts davon lässt sich hier ändern.", "info")
 
-    datum = st.selectbox("Tag", tage, format_func=datum_lang,
-                         key="pruef_tag")
+    # Denselben Tag vorwählen wie in der Tagesarbeit. Sonst wechselt man
+    # den Reiter und schaut unbemerkt einen anderen Tag an — und wundert
+    # sich, warum ein Fall dort nicht auftaucht.
+    vorgabe = str(st.session_state.get("wa_tag_wahl") or "")
+    for alt_key in [k for k in list(st.session_state)
+                    if k.startswith("pruef_tag_") and k != f"pruef_tag_{vorgabe}"]:
+        del st.session_state[alt_key]
+    idx = tage.index(vorgabe) if vorgabe in tage else 0
+    datum = st.selectbox("Tag", tage, index=idx, format_func=datum_lang,
+                         key=f"pruef_tag_{vorgabe}")
 
     df = checkin_zuordnungen(datum)
     if df.empty:
