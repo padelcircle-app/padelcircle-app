@@ -386,7 +386,8 @@ def normalize_name(name) -> str:
     s = str(name).strip().lower()
     # Erst die deutschen Umlaute ausschreiben — so schreibt man sie auch
     # von Hand, und „Müller" soll „Mueller" finden.
-    for a, b in (("ä", "ae"), ("ö", "oe"), ("ü", "ue"), ("ß", "ss"), ("-", " ")):
+    for a, b in (("ä", "ae"), ("ö", "oe"), ("ü", "ue"), ("ß", "ss"),
+                 ("-", " "), (".", " ")):
         s = s.replace(a, b)
     # Alles andere an Akzenten fällt weg. Playtomic hatte „Michael Múller"
     # mit Akut, EGYM „Michael Müller" mit Umlaut — die beiden trafen sich
@@ -6974,6 +6975,14 @@ def slot_bewerten(g: dict, volle: set, turniere: dict = None) -> tuple:
     keine Rolle.
     """
     b = g["preis"]
+
+    if g["bezahlt_zeilen"] == 0:
+        # Alle Zeilen dieser Person verfallen: der Zahlungsanteil wurde
+        # storniert, gespielt hat sie nicht. Gemessen an neun solchen
+        # Faellen vom 26.-31.08. hat KEIN einziger an dem Tag
+        # eingecheckt. Anders als bei „Pending", wo das Geld nur noch
+        # aussteht — dort wurde gespielt.
+        return "storniert", "Zahlungsanteil verfallen", 0.0
 
     if g.get("turnier"):
         # Turnier: nicht der feste Rabatt zählt, sondern der Vergleich
