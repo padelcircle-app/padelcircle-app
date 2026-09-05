@@ -2839,10 +2839,20 @@ def mapping_gedeckt_je_tag() -> dict:
         rueck.setdefault(gname, []).append(str(buchung_name))
 
     verbraucht = verbrauchte_checkins()
+    hat_gespielt = "Gespielt" in c.columns
 
     gedeckt = {}
     for tag, gruppe in c.groupby(c["analysis_date"].astype(str)):
-        namen = set(gruppe["Name_norm"].astype(str))
+        # Nur Check-ins, die noch niemandem gehören. Einer, den der
+        # Abgleich schon einer gleichnamigen Buchung zugeschlagen hat,
+        # kann nicht zusätzlich einen zweiten Fall decken. Kevin und
+        # Lina Schafran spielten am 27.08. um 16:00 zusammen, beide über
+        # Wellpass — eingecheckt hat nur Kevin. Eine Verknüpfung
+        # „Lina → Kevin" liess Linas Fall lautlos verschwinden, obwohl
+        # der Check-in längst Kevin gehörte. EGYM vergütet einmal.
+        frei = (gruppe[gruppe["Gespielt"].astype(str) != "Ja"]
+                if hat_gespielt else gruppe)
+        namen = set(frei["Name_norm"].astype(str))
         for checkin_name, buchungs_namen in rueck.items():
             if checkin_name not in namen:
                 continue
