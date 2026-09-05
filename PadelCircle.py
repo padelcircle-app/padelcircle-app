@@ -6934,6 +6934,23 @@ def _analysieren(bdf, cdf, pdf=None, zahlungen_index=None) -> bool:
 WELLPASS_RABATT = 12.0                 # fester Nachlass je Person und Buchung
 ANTEIL_MIN, ANTEIL_MAX = 9.0, 22.0     # plausibler Anteil EINER Person
 VOLLPREIS_MIN_ZAHL = 2                 # ein einmaliger Preis beweist nichts
+
+# ── Preisliste: GANZER Court je Stunde ───────────────────────────────
+# (Grenze in Stunden, Preis) — gilt bis unter diese Stunde.
+# Angefangene Zeit wird anteilig berechnet: 11:00–13:00 auf dem Double
+# kostet 28 € (11–12) plus 32 € (12–13) = 60 €.
+#
+# Damit ist der volle Personenanteil RECHENBAR statt geraten. Genau
+# daran lag der Fehler vom 28.08.: 8,00 € sah nach einem Rabatt auf
+# 20,00 € aus, ist aber schlicht der Viertelanteil eines Double-Courts
+# von 15:00 bis 16:00 — 32 € durch vier.
+COURT_PREISE = {
+    "double": ((12, 28.0), (16, 32.0), (24, 36.0)),
+    "single": ((16, 18.0), (24, 22.0)),
+}
+COURT_PREISE_WE = {"double": ((24, 36.0),), "single": ((24, 22.0),)}
+COURT_SPIELER = {"double": 4, "single": 2}
+COURT_DAUERN = (60, 90, 120)
 # Minuten um den Spielbeginn, in denen ein Check-in zu einem Anteil
 # passt. Gemessen an 115 namensgleichen Paaren vom 26.–31.08.: die
 # meisten scannen kurz vorher, aber ein Teil erst beim Rausgehen — bis
@@ -7045,6 +7062,68 @@ def zahlungs_slots(pdf: pd.DataFrame) -> list:
                   key=lambda g: (g["datum"], g["zeit"], g["name"]))
 
 
+def _stundensatz(typ: str, stunde: int, wochenende: bool) -> float:
+    tabelle = (COURT_PREISE_WE if wochenende else COURT_PREISE)[typ]
+    for bis, preis in tabelle:
+        if stunde < bis:
+            return preis
+    return tabelle[-1][1]
+
+
+def courtpreis(start: int, dauer: int, typ: str, wochenende: bool) -> float:
+    """Was der ganze Court kostet — über die Zeitfenster hinweg."""
+    summe, m = 0.0, int(start)
+    ende = int(start) + int(dauer)
+    while m < ende:
+        bis = min(ende, (m // 60 + 1) * 60)
+        summe += _stundensatz(typ, (m // 60) % 24, wochenende) * (bis - m) / 60.0
+        m = bis
+    return round(summe, 2)
+
+
+def moegliche_anteile(datum, minute: int) -> frozenset:
+    """
+    Alle Personen-Anteile, die zu dieser Startzeit rechnerisch möglich
+    sind — Single und Double, 60/90/120 Minuten, und darin jeder Anteil
+    von einem Viertel bis zum ganzen Court. Wer für Gäste mitzahlt,
+    zahlt ein Vielfaches seines eigenen Anteils.
+
+    An diesen Zahlen misst sich, ob ein Betrag ein voller Anteil ist
+    oder ein rabattierter. Gegen die echten Zahlungen vom 26.–31.08.
+    erklärt das Modell 589 von 597 Plätzen; die acht übrigen sind
+    Turnier-Startgelder, die über den Turniervergleich laufen.
+    """
+    if datum is None or minute is None or minute < 0:
+        return frozenset()
+    wochenende = datum.weekday() >= 5
+    out = set()
+    for typ, spieler in COURT_SPIELER.items():
+        for dauer in COURT_DAUERN:
+            preis = courtpreis(minute, dauer, typ, wochenende)
+            for n in range(1, spieler + 1):
+                out.add(round(preis * n / spieler, 2))
+    return frozenset(out)
+
+
+def _beobachtete_anteile(slots: list) -> dict:
+    """
+    Was zu jeder Uhrzeit tatsächlich gezahlt wurde — alle Beträge.
+
+    Damit lässt sich bei einem 0-€-Platz nachsehen, auf welchem Court
+    die Person stand. Am 27.08. um 11:00 zahlten drei Leute je 7,00 € —
+    das ist der Viertelanteil eines Double-Courts für eine Stunde am
+    Vormittag. necmettin kartal zahlte dort 0,00 €, sein Rabatt war
+    also 7,00 € und nicht die vollen 12,00 €.
+
+    → {(datum, zeit): {Beträge}}
+    """
+    out = {}
+    for g in slots:
+        for pl in g["plaetze"]:
+            out.setdefault((g["datum"], g["zeit"]), set()).add(pl["betrag"])
+    return out
+
+
 def _volle_anteile(slots: list) -> dict:
     """
     Welche Beträge kommen als voller Personenanteil vor — je Uhrzeit.
@@ -7132,7 +7211,8 @@ def turnier_vollpreise(slots: list) -> dict:
     return preise
 
 
-def slot_bewerten(g: dict, volle, turniere: dict = None) -> tuple:
+def slot_bewerten(g: dict, volle, turniere: dict = None,
+                  beobachtet: dict = None) -> tuple:
     """
     Was ist in diesem Slot passiert?
     → (Art, Klartext, voller Preis, eigener Anteil)
@@ -7168,15 +7248,40 @@ def slot_bewerten(g: dict, volle, turniere: dict = None) -> tuple:
     # untergehen. Benjamin Hörchner zahlte am 26.08. um 11:00 seinen
     # eigenen Platz mit 0 € über Wellpass und den Gast mit 9 €; addiert
     # sah er aus wie ein Vollzahler.
+    # Was an dieser Startzeit rechnerisch ein voller Anteil sein KANN.
+    # Steht der Betrag da drin, ist er der volle Anteil — dann half kein
+    # Wellpass, egal wie klein er aussieht. Steht Betrag + 12 € darin,
+    # ist er ein Rabattpreis. Nur wenn beides nicht greift, entscheidet
+    # der Vergleich mit dem, was andere gezahlt haben.
+    anteile = moegliche_anteile(g["datum"], g.get("minute", -1))
+
     for platz in g["plaetze"]:
         pb = platz["betrag"]
         if platz["frei"] and pb == 0:
+            # Wellpass deckt BIS ZU 12 €, nicht immer 12 €. Bei
+            # Christopher Gordy waren es 8 €, bei necmettin kartal 7 €.
+            # Der volle Anteil ist der grösste mögliche, den 12 € noch
+            # ganz decken.
+            deckbar = [a for a in anteile if a <= WELLPASS_RABATT]
+            # Am genauesten wird es, wenn einer der möglichen Anteile
+            # zur selben Zeit auch wirklich gezahlt wurde — dann steht
+            # fest, welcher Court gemeint ist.
+            gezahlt = (beobachtet or {}).get((g["datum"], g["zeit"]), set())
+            passend = [a for a in deckbar if a in gezahlt]
+            voll = (max(passend) if passend
+                    else max(deckbar) if deckbar else WELLPASS_RABATT)
             return ("wellpass", "0 € — eigener Anteil über Wellpass gedeckt",
-                    round(WELLPASS_RABATT, 2), 0.0)
-        if 0 < pb <= ANTEIL_MAX - WELLPASS_RABATT:
-            voll = round(pb + WELLPASS_RABATT, 2)
-            if voll in volle:
+                    round(voll, 2), 0.0)
+        if not (0 < pb <= ANTEIL_MAX - WELLPASS_RABATT):
+            continue
+        voll = round(pb + WELLPASS_RABATT, 2)
+        if anteile:
+            if pb in anteile:
+                continue            # ist selbst ein voller Anteil
+            if voll in anteile:
                 return "wellpass", f"{euro(pb)} statt {euro(voll)}", voll, pb
+        if voll in volle:
+            return "wellpass", f"{euro(pb)} statt {euro(voll)}", voll, pb
 
     if not g["plaetze"]:
         # Kein bezahlter Platz übrig — bleibt nur ein noch offener.
@@ -7346,8 +7451,10 @@ def _analysieren_zahlungen(pdf, cdf) -> bool:
         return False
 
     volle = _volle_anteile(slots)
+    beobachtet = _beobachtete_anteile(slots)
     turniere = turnier_vollpreise(slots)
-    bewertet = [(g, *slot_bewerten(g, volle, turniere)) for g in slots]
+    bewertet = [(g, *slot_bewerten(g, volle, turniere, beobachtet))
+                for g in slots]
     ansprueche = [(g, txt) for g, art, txt, _v, _a in bewertet
                   if art == "wellpass"]
 
