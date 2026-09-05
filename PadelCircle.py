@@ -95,15 +95,25 @@ CONFIG = {
     "preis_training":      55.0,   # pro Stunde, Court separat
 
     # ── EGYM Wellpass ────────────────────────────────────────────────────────
-    # Wellpass zahlt 13 € pro Check-in, davon bekommst du 95 %.
-    "wellpass_brutto":     12.00,    # aktueller Satz
+    # ZWEI verschiedene Zahlen, die nichts miteinander zu tun haben:
+    #
+    #   wellpass_brutto — was EGYM DIR pro Check-in zahlt: 13,00 €,
+    #                     davon 95 % = 12,35 €.
+    #   wellpass_abzug  — was PLAYTOMIC dem Spieler vom Platzpreis
+    #                     abzieht: 12,00 €. Nur damit wird der Abgleich
+    #                     gerechnet.
+    #
+    # Die beiden waren verwechselt: als EGYM-Satz stand ab dem
+    # 04.08.2026 eine Senkung auf 12,00 € — das war in Wahrheit der
+    # Playtomic-Rabatt. Dadurch war jeder Euro-Betrag der App zu klein
+    # (11,40 € statt 12,35 € pro Check-in).
+    "wellpass_brutto":     13.00,
     "wellpass_anteil":      0.95,
-    # EGYM hat den Satz gesenkt. Alte Monate müssen weiter mit dem alten
-    # Satz gerechnet werden, sonst stimmt rückwirkend keine Zahl mehr.
-    # Aufsteigend nach Datum, "ab" gilt einschliesslich.
+    # Ändert EGYM den Satz, hier einen Eintrag ergänzen — über
+    # Einstellungen → EGYM-Vergütung geht es auch ohne Code. Alte Monate
+    # rechnen weiter mit ihrem Satz, sonst stimmt rückwirkend nichts.
     "wellpass_saetze": [
         {"ab": "2000-01-01", "brutto": 13.00},
-        {"ab": "2026-08-04", "brutto": 12.00},
     ],
     # Was Playtomic pro Wellpass-Spieler vom Platzpreis abzieht.
     # NICHT dasselbe wie wellpass_brutto — das ist die Vergütung von EGYM.
@@ -6935,22 +6945,13 @@ WELLPASS_RABATT = 12.0                 # fester Nachlass je Person und Buchung
 ANTEIL_MIN, ANTEIL_MAX = 9.0, 22.0     # plausibler Anteil EINER Person
 VOLLPREIS_MIN_ZAHL = 2                 # ein einmaliger Preis beweist nichts
 
-# ── Preisliste: GANZER Court je Stunde ───────────────────────────────
-# (Grenze in Stunden, Preis) — gilt bis unter diese Stunde.
-# Angefangene Zeit wird anteilig berechnet: 11:00–13:00 auf dem Double
-# kostet 28 € (11–12) plus 32 € (12–13) = 60 €.
-#
-# Damit ist der volle Personenanteil RECHENBAR statt geraten. Genau
-# daran lag der Fehler vom 28.08.: 8,00 € sah nach einem Rabatt auf
-# 20,00 € aus, ist aber schlicht der Viertelanteil eines Double-Courts
-# von 15:00 bis 16:00 — 32 € durch vier.
-COURT_PREISE = {
-    "double": ((12, 28.0), (16, 32.0), (24, 36.0)),
-    "single": ((16, 18.0), (24, 22.0)),
-}
-COURT_PREISE_WE = {"double": ((24, 36.0),), "single": ((24, 22.0),)}
-COURT_SPIELER = {"double": 4, "single": 2}
+# Buchbare Spielzeiten. Von Marcel bestätigt: 30 oder 40 Minuten gibt
+# es nicht — und das ist wichtig. Mit 40 Minuten im Modell wäre Double
+# abends 24 € / 4 = 6,00 €, und die vier Wellpass-Spieler vom 26.08.
+# um 18:00 sähen aus wie Vollzahler. Je mehr Dauern erlaubt sind, desto
+# mehr Rabattpreise lassen sich als voller Anteil "erklären".
 COURT_DAUERN = (60, 90, 120)
+COURT_SPIELER = {False: 4, True: 2}     # single_court → Spieler
 # Minuten um den Spielbeginn, in denen ein Check-in zu einem Anteil
 # passt. Gemessen an 115 namensgleichen Paaren vom 26.–31.08.: die
 # meisten scannen kurz vorher, aber ein Teil erst beim Rausgehen — bis
@@ -7062,25 +7063,6 @@ def zahlungs_slots(pdf: pd.DataFrame) -> list:
                   key=lambda g: (g["datum"], g["zeit"], g["name"]))
 
 
-def _stundensatz(typ: str, stunde: int, wochenende: bool) -> float:
-    tabelle = (COURT_PREISE_WE if wochenende else COURT_PREISE)[typ]
-    for bis, preis in tabelle:
-        if stunde < bis:
-            return preis
-    return tabelle[-1][1]
-
-
-def courtpreis(start: int, dauer: int, typ: str, wochenende: bool) -> float:
-    """Was der ganze Court kostet — über die Zeitfenster hinweg."""
-    summe, m = 0.0, int(start)
-    ende = int(start) + int(dauer)
-    while m < ende:
-        bis = min(ende, (m // 60 + 1) * 60)
-        summe += _stundensatz(typ, (m // 60) % 24, wochenende) * (bis - m) / 60.0
-        m = bis
-    return round(summe, 2)
-
-
 def moegliche_anteile(datum, minute: int) -> frozenset:
     """
     Alle Personen-Anteile, die zu dieser Startzeit rechnerisch möglich
@@ -7095,11 +7077,12 @@ def moegliche_anteile(datum, minute: int) -> frozenset:
     """
     if datum is None or minute is None or minute < 0:
         return frozenset()
-    wochenende = datum.weekday() >= 5
+    start = (datetime.combine(datum, datetime.min.time())
+             + timedelta(minutes=int(minute)))
     out = set()
-    for typ, spieler in COURT_SPIELER.items():
+    for single, spieler in COURT_SPIELER.items():
         for dauer in COURT_DAUERN:
-            preis = courtpreis(minute, dauer, typ, wochenende)
+            preis = listenpreis(start, dauer, single)
             for n in range(1, spieler + 1):
                 out.add(round(preis * n / spieler, 2))
     return frozenset(out)
