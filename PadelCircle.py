@@ -602,6 +602,8 @@ SHEET_SPALTEN = {
                          "bestaetigt", "timestamp"],
     "auffaellige":      ["name_norm", "name", "art", "notiz", "timestamp"],
     "geschenke":        ["checkin_key", "datum", "name", "grund", "timestamp"],
+    "buchungs_luecken": ["key", "datum", "zeit", "court", "anzahl", "anteil",
+                         "kandidaten", "erledigt", "timestamp"],
     "wetter":           ["datum", "code", "lage", "t_max", "t_min",
                          "regen_mm", "art", "timestamp"],
     "auth_tokens":      ["token", "created", "expires"],
@@ -7419,6 +7421,102 @@ def _rabatte_zerlegen(differenz: float, anteil: float, spieler: int,
     return None, None
 
 
+def luecken_merken(unklar: list):
+    """
+    Buchungen, bei denen die Person nicht eindeutig ist, festhalten.
+
+    Der Zahler hat zwei Gastplätze bezahlt, einen voll und einen mit
+    Rabatt — welcher Name zu welchem Platz gehört, steht in keinem
+    Export. Marcel sieht es in Playtomic. Damit er nicht bei jedem
+    Import neu suchen muss, bleibt die Frage stehen, bis er sie
+    beantwortet hat.
+    """
+    if not unklar:
+        return
+    alt = loadsheet("buchungs_luecken", SHEET_SPALTEN["buchungs_luecken"])
+    schon = set(alt["key"].astype(str)) if not alt.empty else set()
+    neu = [{
+        "key": u["key"], "datum": u["datum"], "zeit": u["zeit"],
+        "court": u["court"], "anzahl": u["anzahl"], "anteil": u["anteil"],
+        "kandidaten": " | ".join(u["kandidaten"]), "erledigt": "",
+        "timestamp": datetime.now().isoformat(),
+    } for u in unklar if u["key"] not in schon]
+    if neu:
+        savesheet_append(pd.DataFrame(neu), "buchungs_luecken")
+        cache_leeren("buchungs_luecken", funktionen=("offene_luecken",))
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def offene_luecken() -> pd.DataFrame:
+    """Noch unbeantwortete Buchungsfragen, neueste zuerst."""
+    df = loadsheet("buchungs_luecken", SHEET_SPALTEN["buchungs_luecken"])
+    if df.empty or "key" not in df.columns:
+        return pd.DataFrame()
+    offen = df[~df.get("erledigt", pd.Series([""] * len(df))).map(is_true)]
+    if offen.empty:
+        return pd.DataFrame()
+    return offen.sort_values("datum", ascending=False)
+
+
+def luecke_beantworten(key: str, name: str, datum: str, zeit: str,
+                       anteil: float) -> bool:
+    """
+    Die Frage ist beantwortet: dieser Spieler hatte den Rabatt.
+
+    Es entsteht dieselbe Zeile, die auch beim Import entstanden wäre —
+    Anspruch über den vollen Anteil, 0 € gezahlt. Der Check-in wird
+    danach ganz normal gesucht.
+    """
+    df = loadsheet("buchungs_luecken", SHEET_SPALTEN["buchungs_luecken"])
+    if df.empty:
+        return False
+    treffer = df[df["key"].astype(str) == str(key)]
+    if treffer.empty:
+        return False
+
+    if name:
+        nn = normalize_name(name)
+        c = loadsheet("checkins")
+        ci = pd.DataFrame()
+        if not c.empty and "analysis_date" in c.columns:
+            ci = c[(c["analysis_date"].astype(str) == str(datum))
+                   & (c["Name_norm"].astype(str) == nn)
+                   & (c["Gespielt"].astype(str) != "Ja")]
+        hat_ci = not ci.empty
+        zeile = {
+            "Datum": str(datum), "Name": name, "Name_norm": nn,
+            "Email": email_fuer(name) or "", "Court": "",
+            "Service_Zeit": zeit, "Dauer": 0,
+            "Listenpreis": float(anteil), "Bezahlt": 0.0, "Betrag": 0.0,
+            "Plaetze": 1, "Wellpass_Rabatte": 1, "Teilnehmer": 1,
+            "Checkin_Zeit": str(ci.iloc[0]["Checkin_Zeit"]) if hat_ci else "",
+            "Relevant": "Ja", "Event": "Nein", "Event_Name": "",
+            "Event_Id": "", "Event_Courts": 0, "Event_Unklar": "Nein",
+            "Check-in": "Ja" if hat_ci else "Nein",
+            "Team": "Ja" if nn in GESCHENK_NORM else "Nein",
+            "Fehler": "Nein" if (hat_ci or nn in GESCHENK_NORM
+                                 or ist_platzhalter(name)) else "Ja",
+            "Quelle": "buchung",
+            "Rabatt_Grund": "0 € — von dir zugeordnet",
+            "analysis_date": str(datum),
+        }
+        append_rows(pd.DataFrame([zeile]), "buchungen",
+                    ["analysis_date", "Name_norm", "Service_Zeit", "Court"],
+                    aktualisieren=True)
+        if hat_ci:
+            c.loc[ci.index, "Gespielt"] = "Ja"
+            savesheet(c, "checkins")
+
+    df.loc[treffer.index, "erledigt"] = "Ja"
+    df.loc[treffer.index, "timestamp"] = datetime.now().isoformat()
+    savesheet(df, "buchungs_luecken")
+    cache_leeren("buchungs_luecken", "buchungen", "checkins",
+                 funktionen=("offene_luecken", "offene_fehler",
+                             "offene_je_tag", "offene_checkins",
+                             "verfuegbare_tage"))
+    return True
+
+
 def buchungs_luecken(bdf, slots: list, arten: dict = None) -> tuple:
     """
     Spieler, die in der Buchung stehen, aber in den Zahlungen fehlen.
@@ -7569,12 +7667,15 @@ def buchungs_luecken(bdf, slots: list, arten: dict = None) -> tuple:
         # bei ihm hat Playtomic die Zeile schlicht nicht angelegt.
         rest_bedarf = soll - hat - len(korrigierbar)
         if rest_bedarf != len(ohne):
-            wer = ", ".join(ohne) if ohne else "niemand ohne Zahlungszeile"
-            unklar.append(
-                f"{datum_kurz(tag)} {zeit} · {r.get('resource_name', '')} — "
-                f"{soll - hat} Rabatt fehlt, {len(ohne)} kommen in Frage: "
-                f"{wer}. Platzpreis {euro(liste)}, kassiert {euro(preis)}, "
-                f"Anteil {euro(anteil)}")
+            unklar.append({
+                "key": f"{tag}|{zeit}|{str(r.get('resource_name', '')).strip()}",
+                "datum": tag, "zeit": zeit,
+                "court": str(r.get("resource_name", "") or ""),
+                "anzahl": int(rest_bedarf if rest_bedarf > 0 else soll - hat),
+                "anteil": round(anteil, 2),
+                "kandidaten": list(ohne),
+                "liste": round(liste, 2), "kassiert": round(preis, 2),
+            })
             continue
 
         for n, k in korrigierbar:
@@ -7655,15 +7756,11 @@ def _analysieren_zahlungen(pdf, cdf, bdf=None) -> bool:
         st.caption(f"{len(korrekturen)} Beträge über die Buchungsdatei "
                    "richtiggestellt.")
     if unklar:
-        # Gesammelt statt einzeln: über einen ganzen Monat sind das
-        # schnell dreissig Kästen, und dann liest sie niemand mehr.
-        box(f"👀 <b>{len(unklar)} Buchungen</b> lassen sich nicht eindeutig "
-            "auflösen — dort fehlt ein Rabatt, aber es kommen mehrere "
-            "Teilnehmer dafür in Frage oder keiner. Geraten wird nicht.",
-            "info")
-        with st.expander(f"Die {len(unklar)} Buchungen ansehen"):
-            for hinweis in unklar:
-                st.caption("· " + hinweis)
+        luecken_merken(unklar)
+        box(f"👀 <b>{len(unklar)} Buchungen</b> brauchen deine Entscheidung — "
+            "dort fehlt ein Rabatt, aber es kommen mehrere Teilnehmer dafür "
+            "in Frage. Sie stehen unten unter „Deine Entscheidung“ und "
+            "warten dort, bis du sie beantwortest.", "info")
     if zusatz:
         st.caption(f"{len(zusatz)} Spieler aus dem Buchungsexport ergänzt — "
                    "ihr Platz wurde von jemand anderem bezahlt.")
@@ -7995,6 +8092,50 @@ def modul_daten():
 
         if not (z_datei and zc_datei):
             st.caption("Zahlungen und Check-ins werden gebraucht.")
+
+        # ── Offene Fragen aus dem Buchungsexport ────────────────────
+        #
+        # Der Zahler hat zwei Gastplätze bezahlt, einen voll und einen
+        # mit Rabatt. Welcher Name zu welchem Platz gehört, steht in
+        # keinem Export — in Playtomic sieht man es. Statt zu raten
+        # fragt die App, und zwar so lange, bis eine Antwort da ist.
+        luecken = offene_luecken()
+        if not luecken.empty:
+            st.markdown("---")
+            st.markdown(f"##### 🤔 Deine Entscheidung  ·  {len(luecken)}")
+            box("Bei diesen Buchungen fehlt ein Wellpass-Rabatt, aber es "
+                "kommen mehrere Teilnehmer dafür in Frage. In Playtomic "
+                "steht bei der richtigen Person „Egym Wellpass“ — hier "
+                "einmal auswählen, dann ist der Fall angelegt.", "info")
+            for i, (_, l) in enumerate(luecken.head(20).iterrows()):
+                kand = [k.strip() for k in str(l["kandidaten"]).split("|")
+                        if k.strip()]
+                with st.container(border=True):
+                    st.markdown(
+                        f"**{datum_kurz(str(l['datum']))} · {l['zeit']} · "
+                        f"{l['court']}**")
+                    st.caption(f"{l['anzahl']} Rabatt fehlt · voller Anteil "
+                               f"{euro(l['anteil'])} · wer hatte Wellpass?")
+                    spalten = st.columns(max(2, len(kand) + 1))
+                    for j, name in enumerate(kand):
+                        with spalten[j]:
+                            if st.button(name[:22], key=f"lk_{i}_{j}",
+                                         use_container_width=True):
+                                if luecke_beantworten(
+                                        str(l["key"]), name, str(l["datum"]),
+                                        str(l["zeit"]), parse_betrag(l["anteil"])):
+                                    st.toast(f"{name} angelegt.")
+                                    st.rerun()
+                    with spalten[len(kand)]:
+                        if st.button("Keiner davon", key=f"lk_{i}_x",
+                                     use_container_width=True):
+                            if luecke_beantworten(str(l["key"]), "",
+                                                  str(l["datum"]),
+                                                  str(l["zeit"]), 0.0):
+                                st.toast("Erledigt.")
+                                st.rerun()
+            if len(luecken) > 20:
+                st.caption(f"… und {len(luecken) - 20} weitere.")
 
         with st.expander("Wie gerechnet wird"):
             st.markdown(f"""
