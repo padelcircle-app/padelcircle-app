@@ -10923,7 +10923,7 @@ def _wa_seitenspalte(datum: str, offen_heute: pd.DataFrame):
         st.markdown("")
 
 
-def _wa_fall(r, i: int, datum: str, angeboten: set = None):
+def _wa_fall(r, i: int, datum: str, angeboten: set = None, rang: int = 0):
     """Ein einzelner Fall mit allen Aktionen."""
     name = str(r["Name"])
     nn = str(r["Name_norm"])
@@ -10944,7 +10944,17 @@ def _wa_fall(r, i: int, datum: str, angeboten: set = None):
     # `email_fuer(name)`: Der Namens-Nachschlag wäre bei genau den
     # Namen mehrdeutig, um die es hier geht.
     zeilen_mail = str(r.get("Email", "") or "").strip()
-    zweitbuchung = ist_zweitbuchung(nn, datum, zeilen_mail or None)
+    # Zweitbuchung heisst: EGYM zahlt für diesen Platz nicht mehr.
+    #
+    # Zwei Wege dorthin. Entweder liegt schon ein Check-in an dem Tag
+    # vor, dann ist jeder weitere Rabatt-Platz unbezahlt. Oder es gibt
+    # gar keinen Check-in, aber mehrere Rabatt-Plätze — dann kann
+    # höchstens EINER davon noch gedeckt werden, alle weiteren nie.
+    # Felix Pischel spielte am 12.07. zweimal mit Rabatt und holte am
+    # 21.07. einmal nach: ein Fall lässt sich schliessen, der zweite
+    # bleibt eine Zweitbuchung. `rang` zählt, der wievielte offene Fall
+    # dieser Person an dem Tag das hier ist.
+    zweitbuchung = ist_zweitbuchung(nn, datum, zeilen_mail or None) or rang > 0
 
     status = ""
     if zweitbuchung:
@@ -11235,10 +11245,17 @@ def _wa_tagesarbeit():
                     st.markdown("")
 
             # Ein Check-in wird nur einmal vorgeschlagen — quer über
-            # alle Fälle dieses Tages.
-            schon_angeboten = set()
+            # alle Fälle dieses Tages. Und wer mehrere offene Rabatt-
+            # Plätze an einem Tag hat, sieht ab dem zweiten die
+            # Zweitbuchung: gedeckt werden kann höchstens einer.
+            schon_angeboten, schon_gesehen = set(), {}
+            if "Service_Zeit" in offen.columns:
+                offen = offen.sort_values("Service_Zeit")
             for i, (_, r) in enumerate(offen.iterrows()):
-                _wa_fall(r, i, datum, schon_angeboten)
+                nn_ = str(r["Name_norm"])
+                rang = schon_gesehen.get(nn_, 0)
+                schon_gesehen[nn_] = rang + 1
+                _wa_fall(r, i, datum, schon_angeboten, rang)
 
     with rechts:
         _wa_seitenspalte(datum, offen)
