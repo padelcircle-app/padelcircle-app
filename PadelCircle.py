@@ -10923,7 +10923,7 @@ def _wa_seitenspalte(datum: str, offen_heute: pd.DataFrame):
         st.markdown("")
 
 
-def _wa_fall(r, i: int, datum: str):
+def _wa_fall(r, i: int, datum: str, angeboten: set = None):
     """Ein einzelner Fall mit allen Aktionen."""
     name = str(r["Name"])
     nn = str(r["Name_norm"])
@@ -11014,10 +11014,20 @@ def _wa_fall(r, i: int, datum: str):
                 st.rerun()
 
     # ── Nachholung an einem Folgetag ────────────────────────────────
+    #
+    # Ein Check-in darf nur EINEM Fall angeboten werden. Felix Pischel
+    # spielte am 12.07. zweimal mit Rabatt und checkte am 21.07. einmal
+    # nach — beiden Fällen denselben Check-in vorzuschlagen führt in die
+    # Irre. Der zweite Klick würde ohnehin abgewiesen; hier taucht die
+    # Frage gar nicht erst zweimal auf.
+    angeboten = angeboten if angeboten is not None else set()
     nachhol = ([] if zweitbuchung
-               else [x for x in nachhol_kandidaten(name, datum) if x[4] > 0])
+               else [x for x in nachhol_kandidaten(name, datum)
+                     if x[4] > 0
+                     and checkin_schluessel(x[2], x[1]) not in angeboten])
     if nachhol:
         a, kn, cd, sc, tg = nachhol[0]
+        angeboten.add(checkin_schluessel(cd, kn))
         st.markdown(
             f'<div class="pc-vorschlag nachhol">🔄 <b>{a}</b> hat am '
             f'<b>{datum_kurz(cd)}</b> eingecheckt — {tg} '
@@ -11224,8 +11234,11 @@ def _wa_tagesarbeit():
                         st.rerun()
                     st.markdown("")
 
+            # Ein Check-in wird nur einmal vorgeschlagen — quer über
+            # alle Fälle dieses Tages.
+            schon_angeboten = set()
             for i, (_, r) in enumerate(offen.iterrows()):
-                _wa_fall(r, i, datum)
+                _wa_fall(r, i, datum, schon_angeboten)
 
     with rechts:
         _wa_seitenspalte(datum, offen)
