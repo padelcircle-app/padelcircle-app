@@ -18,3 +18,6 @@ secrets.toml
 bookings-download*.csv
 Checkins*.csv
 880ac6b8-*.csv
+
+# Pruefwerkzeuge erzeugen Zwischendateien
+pruefung/__pycache__/
