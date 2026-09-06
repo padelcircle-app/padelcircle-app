@@ -1205,7 +1205,7 @@ ABGELEITETE_CACHES = ("tages_kennzahlen", "verfuegbare_tage", "monats_kennzahlen
                       "redundante_korrekturen",
                       "buchungsnamen_am_tag", "abzug_pruefen", "verguetung_wert",
                       "checkins_von_am", "rabattierte_buchungen_am", "checkins_roh_und_verguetet",
-                      "playtomic_spieler", "spieltage_von", "mapping_konflikte",
+                      "playtomic_spieler", "spieltage_von",
                       "offene_freigaben", "anspruch_verdacht",
                       # Auswertungen. Die standen hier lange nicht drin und
                       # zeigten nach einer Bearbeitung bis zu 15 Minuten lang
@@ -1222,7 +1222,7 @@ ABGELEITETE_CACHES = ("tages_kennzahlen", "verfuegbare_tage", "monats_kennzahlen
                       "belegte_slots", "auslastung_raster", "auslastung_slot",
                       "circle_points", "circle_points_monate",
                       "circle_points_verlauf", "absagen_liste",
-                      "absagen_ignoriert", "absagen_markierungen",
+                      "absagen_ignoriert",
                       "wetter_daten", "wetter_korrelation", "wetter_hinweise",
                       "geschenk_checkins", "falsche_zuordnungen")
 
@@ -5022,11 +5022,6 @@ def css_laden():
   padding:1.5rem 1.8rem; margin-bottom:1.4rem;
   position:relative; overflow:hidden; animation:pcUp .45s ease both;
  }}
- .pc-head::after {{
-  content:''; position:absolute; left:0; right:0; bottom:0; height:2px;
-  background:linear-gradient(90deg,var(--volt),rgba(223,255,0,.1),var(--volt));
-  background-size:200% 100%; animation:pcSweep 6s linear infinite;
- }}
  .pc-head .row {{ display:flex; align-items:center; gap:14px; }}
  .pc-head .mark {{ width:46px; height:auto; color:var(--volt); flex-shrink:0; }}
  .pc-head h1 {{ margin:0; font-size:1.5rem; font-weight:700; letter-spacing:-.01em; }}
@@ -5628,50 +5623,6 @@ def absagen_ignoriert() -> set:
         return set()
     aktiv = df[df["art"].astype(str) == "ignoriert"] if "art" in df.columns else df
     return {str(x) for x in aktiv["name_norm"]}
-
-
-@st.cache_data(ttl=300, show_spinner=False)
-def absagen_markierungen() -> dict:
-    """{name_norm: art} — Vorauszahlung oder ignoriert."""
-    df = loadsheet("auffaellige", SHEET_SPALTEN["auffaellige"])
-    if df.empty or "name_norm" not in df.columns:
-        return {}
-    return {str(r["name_norm"]): str(r.get("art", ""))
-            for _, r in df.iterrows()}
-
-
-def absage_markieren(name_norm: str, name: str, art: str) -> bool:
-    """Eine Person markieren — „vorauszahlung" oder „ignoriert"."""
-    df = loadsheet("auffaellige", SHEET_SPALTEN["auffaellige"])
-    if not df.empty and "name_norm" in df.columns:
-        df = df[df["name_norm"].astype(str) != str(name_norm)]
-    neu = pd.DataFrame([{
-        "name_norm": str(name_norm), "name": str(name), "art": str(art),
-        "notiz": "", "timestamp": datetime.now().isoformat(timespec="seconds"),
-    }])
-    zusammen = pd.concat([df, neu], ignore_index=True) if not df.empty else neu
-    ok = savesheet(zusammen, "auffaellige")
-    if ok:
-        cache_leeren("auffaellige",
-                     funktionen=["absagen_ignoriert", "absagen_markierungen",
-                                 "absagen_liste"])
-    return ok
-
-
-def absage_markierung_loesen(name_norm: str) -> bool:
-    """Markierung wieder entfernen."""
-    df = loadsheet("auffaellige", SHEET_SPALTEN["auffaellige"])
-    if df.empty or "name_norm" not in df.columns:
-        return False
-    behalten = df[df["name_norm"].astype(str) != str(name_norm)]
-    if len(behalten) == len(df):
-        return False
-    ok = savesheet(behalten, "auffaellige")
-    if ok:
-        cache_leeren("auffaellige",
-                     funktionen=["absagen_ignoriert", "absagen_markierungen",
-                                 "absagen_liste"])
-    return ok
 
 
 def _zahlungs_index(pdf: pd.DataFrame) -> dict:
@@ -6423,25 +6374,6 @@ def neu_berechnen(tage=None) -> bool:
     if erfolg:
         cache_leeren()
     return erfolg
-
-
-def _verarbeiten(b_datei, c_datei, p_datei=None) -> bool:
-    """
-    Bookings und Wellpass-Check-ins abgleichen.
-    Der Payments-Export ist optional und liefert nur die Umsatzzahlen.
-    """
-    bdf = parse_bookings(b_datei)
-    if bdf.empty:
-        return False
-    cdf = parse_checkins(c_datei)
-    if cdf.empty:
-        st.error("❌ Check-in-Datei konnte nicht gelesen werden.")
-        return False
-
-    st.caption(f"Buchungen {len(bdf)} · Check-ins {len(cdf)}")
-
-    pdf = parse_playtomic(p_datei) if p_datei is not None else None
-    return _analysieren(bdf, cdf, pdf)
 
 
 def _analysieren(bdf, cdf, pdf=None, zahlungen_index=None) -> bool:
@@ -7589,7 +7521,14 @@ def _analysieren_zahlungen(pdf, cdf, bdf=None) -> bool:
         team = nn in TEAM_NORM
         buchungen_out.append({
             "Datum": str(z["datum"]), "Name": name, "Name_norm": nn,
-            "Email": email_fuer(name) or "", "Court": z.get("court", ""),
+            "Email": email_fuer(name) or "",
+            # Court bleibt LEER, obwohl er aus der Buchung bekannt wäre:
+            # _tage_nach_methode() erkennt am gefüllten Court den alten
+            # Buchungsexport-Weg. Eine einzige Zeile mit Court würde den
+            # ganzen Tag beim „Neu berechnen" über den alten Weg schicken
+            # — und dort gehen Spieler verloren, weil pro Zeitfenster nur
+            # vier Plätze vorgesehen sind. Der Court steht im Grund-Text.
+            "Court": "",
             "Service_Zeit": z["zeit"], "Dauer": 0,
             "Listenpreis": z["anteil"], "Bezahlt": 0.0, "Betrag": 0.0,
             "Plaetze": 1, "Wellpass_Rabatte": 1, "Teilnehmer": 1,
@@ -7601,7 +7540,8 @@ def _analysieren_zahlungen(pdf, cdf, bdf=None) -> bool:
             "Fehler": "Ja" if (c is None and not team
                                and not ist_platzhalter(name)) else "Nein",
             "Quelle": "buchung",       # kam nicht aus der Zahlungsdatei
-            "Rabatt_Grund": "0 € — Platz von jemand anderem bezahlt",
+            "Rabatt_Grund": ("0 € — Platz von jemand anderem bezahlt"
+                             + (f" · {z['court']}" if z.get("court") else "")),
             "analysis_date": z["datum"].strftime("%Y-%m-%d"),
         })
 
@@ -7812,9 +7752,8 @@ def tage_entfernen(tage: list) -> dict:
 def modul_daten():
     head("Daten-Zentrale", "Playtomic · Wellpass · Kunden")
 
-    t0, t1, t2, t3 = st.tabs(["💳 Zahlungen + Check-ins",
-                              "📊 Buchungen + Check-ins (alt)",
-                              "👥 Kundenliste", "🗂 Bestand"])
+    t0, t2, t3 = st.tabs(["💳 Zahlungen + Check-ins",
+                          "👥 Kundenliste", "🗂 Bestand"])
 
     # ── Neuer Weg: ohne Buchungsexport ──────────────────────────────────
     with t0:
@@ -7885,60 +7824,6 @@ leer. Lieber eine Lücke als eine geratene Zahl.
 """)
 
     # ── Alter Weg mit Buchungsexport ────────────────────────────────────
-    with t1:
-        box("Der bisherige Weg, für Tage mit Buchungsexport. Die App vergleicht "
-            "den Listenpreis jeder Buchung mit dem tatsächlich gezahlten Betrag. "
-            "Die Lücke verrät, wie viele Wellpass-Rabatte drin steckten. Danach "
-            "prüft sie, wer davon wirklich eingecheckt hat.", "info")
-
-        c1, c2 = st.columns(2)
-        with c1:
-            b_datei = st.file_uploader("Buchungen · bookings-download.csv",
-                                       type=["csv"], key="up_b")
-            if b_datei:
-                st.caption(f"✓ {b_datei.name}")
-        with c2:
-            c_datei = st.file_uploader("Wellpass Check-ins (.csv)", type=["csv"],
-                                       key="up_c")
-            if c_datei:
-                st.caption(f"✓ {c_datei.name}")
-
-        p_datei = st.file_uploader("Zahlungen (optional, nur für den Umsatz)",
-                                   type=["csv"], key="up_p")
-        if p_datei:
-            st.caption(f"✓ {p_datei.name}")
-
-        st.markdown("")
-        if st.button("🔄 Daten verarbeiten", type="primary",
-                     use_container_width=True,
-                     disabled=not (b_datei and c_datei)):
-            with st.spinner(lade_text("verarbeite")):
-                if _verarbeiten(b_datei, c_datei, p_datei):
-                    st.rerun()
-
-        if not (b_datei and c_datei):
-            st.caption("Buchungen und Check-ins werden für den Abgleich gebraucht. "
-                       "Die Zahlungsdatei ist optional.")
-
-        with st.expander("Wo finde ich die Exporte?"):
-            st.markdown(f"""
-**Buchungen (wichtigste Datei)**
-1. Playtomic Manager → *Bookings* / *Buchungen*
-2. Zeitraum wählen → **Download**
-3. Datei heisst meist `bookings-download.csv`
-
-**Zahlungen (optional)**
-1. Playtomic Manager → *Payments* / *Zahlungen*
-2. Zeitraum wählen → CSV exportieren
-
-**EGYM Wellpass**
-1. Partner-Portal öffnen
-2. *Check-ins* → Zeitraum wählen
-3. CSV exportieren
-
-Direktlink zu deinem Club: {CONFIG['playtomic']}
-""")
-
     # ── Kundenliste ─────────────────────────────────────────────────────
     with t2:
         box("Ohne Telefonnummern kann die App keine WhatsApp-Reminder senden. "
@@ -10281,18 +10166,7 @@ def _wa_auto_block(tage: list):
         "zweitbesten). Reine Schreibweisen-Unterschiede — der Check-in lag "
         "vor und war von EGYM bezahlt.", "ok")
 
-    with st.expander("Ansehen, was übernommen wurde"):
-        st.dataframe(pd.DataFrame([{
-            "Spieltag": datum_kurz(k["datum"]),
-            "Playtomic": k["name"],
-            "Wellpass": k["checkin"],
-            "Sicherheit": f"{k['score']:.0f} %",
-            "Belege": k["grund"],
-        } for k in protokoll]), use_container_width=True, hide_index=True,
-            height=min(320, 60 + 35 * len(protokoll)))
-        st.caption("Zurücknehmen unter Name-Abgleich → Gelernte Zuordnungen. "
-                   "Stellt sich später heraus, dass es zwei Personen sind, "
-                   "meldet sich der Konflikte-Tab von selbst.")
+    st.caption("Zurücknehmen unter Name-Abgleich → Gelernte Zuordnungen.")
     st.markdown("---")
 
 
@@ -10522,12 +10396,6 @@ def _wa_seitenspalte(datum: str, offen_heute: pd.DataFrame):
         st.caption(f"Keine offenen Fälle am {datum_kurz(datum)} — angeboten "
                    f"werden die {len(ziele_alt)} offenen Fälle der letzten "
                    f"{fenster_nachhol()} Tage.")
-
-    if aelter_ausserhalb:
-        box(f"👀 <b>{aelter_ausserhalb} weitere offene Fälle</b> liegen mehr "
-            f"als {fenster_nachhol()} Tage zurück und werden deshalb nicht "
-            "angeboten. Passt keiner der Vorschläge, erhöhe das "
-            "Nachhol-Fenster unter <i>Einstellungen → Zuordnung</i>.", "info")
 
     # Zielnamen einmal vorbereiten — vorher wurden Normalisierung und
     # E-Mail-Suche für jeden Check-in erneut durchlaufen, und danach im
@@ -12151,9 +12019,9 @@ def modul_whatsapp():
         box("Der Wellpass-QR-Link fehlt — die Nachrichten gehen ohne QR raus.",
             "info")
 
-    t1, t2, t3, t4, t5, t6 = st.tabs(["📅 Tagesarbeit", "🔍 Zuordnung prüfen",
-                                      "✅ Erledigt", "📊 Übersicht",
-                                      "📜 Protokoll", "⚠️ Auffällige Spieler"])
+    t1, t2, t3, t4, t5 = st.tabs(["📅 Tagesarbeit", "🔍 Zuordnung prüfen",
+                                  "✅ Erledigt", "📊 Übersicht",
+                                  "📜 Protokoll"])
 
     with t1:
         _wa_tagesarbeit()
@@ -12224,9 +12092,6 @@ def modul_whatsapp():
     with t5:
         _wa_protokoll()
 
-    with t6:
-        _wa_auffaellige()
-
 
 def _wa_protokoll():
     """
@@ -12263,104 +12128,6 @@ def _wa_protokoll():
                     for c in spalten]
     st.dataframe(zeig, use_container_width=True, hide_index=True, height=420)
 
-
-def _wa_auffaellige():
-    """Wer sagt auffällig oft kurzfristig ab?"""
-    box("Absagen aus den Zahlungsdaten: Jede Erstattung verrät, wann "
-        "storniert wurde. Je kürzer der Vorlauf, desto schwerer wiegt es — "
-        "ein Platz, der zwei Stunden vorher frei wird, bleibt meist leer.",
-        "info")
-
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        zeitraum = st.selectbox("Zeitraum", [30, 90, 180, 365], index=1,
-                                format_func=lambda t: f"letzte {t} Tage",
-                                key="auf_zeit")
-    with c2:
-        mindest = st.selectbox("Ab wie vielen Absagen?", [2, 3, 4, 5], index=0,
-                               key="auf_min")
-    with c3:
-        nur_stamm = st.checkbox("Nur Stammkunden (ab 10 Slots)",
-                                key="auf_stamm")
-
-    liste = absagen_liste(zeitraum, mindest)
-    if liste.empty:
-        box("Niemand fällt auf — im gewählten Zeitraum gibt es keine "
-            "Häufung von Absagen.", "ok")
-        return
-
-    if nur_stamm:
-        liste = liste[liste["Slots"] >= 10].reset_index(drop=True)
-        if liste.empty:
-            box("Unter den Stammkunden fällt niemand auf.", "ok")
-            return
-
-    kurz = liste[liste["kurzfristig"] > 0]
-    k1, k2, k3 = st.columns(3)
-    with k1:
-        kpi("Auffällige Spieler", str(len(liste)))
-    with k2:
-        kpi("mit Kurzabsage", str(len(kurz)), "unter 24 Stunden vorher")
-    with k3:
-        kpi("Absagen gesamt", str(int(liste["Absagen"].sum())))
-
-    markiert = absagen_markierungen()
-
-    st.markdown("")
-    for i, (_, r) in enumerate(liste.head(40).iterrows()):
-        nn = str(r["Name_norm"])
-        ampel = ("🔴" if r["Score"] >= 0.30 else
-                 "🟠" if r["Score"] >= 0.15 else "🟡")
-        vermerk = markiert.get(nn, "")
-
-        with st.container(border=True):
-            z1, z2 = st.columns([3, 2])
-            with z1:
-                st.markdown(f"**{ampel} {r['Name']}**"
-                            + (" · 💳 Vorauszahlung" if vermerk == "vorauszahlung"
-                               else ""))
-                st.caption(
-                    f"{int(r['Slots'])} Slots · {int(r['Absagen'])} Absagen "
-                    f"({r['Quote']:.0f} %) · davon <24 h: {int(r['<24h'])} · "
-                    f"<2 h: {int(r['<2h'])} · nach Beginn: "
-                    f"{int(r['nach Beginn'])}")
-            with z2:
-                b1, b2 = st.columns(2)
-                with b1:
-                    if vermerk == "vorauszahlung":
-                        if st.button("Vorauszahlung lösen", key=f"auf_l{i}",
-                                     use_container_width=True):
-                            absage_markierung_loesen(nn)
-                            st.rerun()
-                    elif st.button("💳 Vorauszahlung", key=f"auf_v{i}",
-                                   use_container_width=True):
-                        absage_markieren(nn, str(r["Name"]), "vorauszahlung")
-                        st.rerun()
-                with b2:
-                    if st.button("Ignorieren", key=f"auf_i{i}",
-                                 use_container_width=True):
-                        absage_markieren(nn, str(r["Name"]), "ignoriert")
-                        st.rerun()
-
-            if r["kurzfristig"] > 0:
-                with st.expander("💬 Freundlicher Hinweis zum Kopieren"):
-                    st.code(absage_nachricht(str(r["Name"]),
-                                             int(r["Absagen"]),
-                                             int(r["kurzfristig"])),
-                            language=None)
-
-    if len(liste) > 40:
-        st.caption(f"… und {len(liste) - 40} weitere.")
-
-    st.caption("Die Absage hängt am Zahler der Buchung. Wer für vier bucht "
-               "und absagt, erscheint hier einmal, nicht viermal — als "
-               "Rangliste taugt das, als exakte Quote je Person nicht.")
-
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#   🔄  NACHHOLUNGEN  —  Check-ins, die einen älteren Fall auflösen
-# ══════════════════════════════════════════════════════════════════════════════
 
 def checkin_schluessel(datum: str, name_norm: str) -> str:
     return f"{datum}|{name_norm}"
@@ -12894,64 +12661,6 @@ def spieltage_von(name_norm: str) -> set:
     return set(treffer["analysis_date"].astype(str))
 
 
-@st.cache_data(ttl=900, show_spinner=False)
-def mapping_konflikte() -> list:
-    """
-    Verknüpfungen, die nicht mehr stimmen können.
-
-    Spielen beide Namen am selben Tag eigenständig in Playtomic, sind
-    es zwei verschiedene Menschen — dann wurde die Zuordnung damals
-    falsch bestätigt und verfälscht seitdem jede Auswertung.
-
-    → [{buchung, checkin, art, hinweis, tage}, …]
-    """
-    mapping = mapping_roh()
-    if not mapping:
-        return []
-
-    konflikte = []
-    for buchung_name, ziel in mapping.items():
-        checkin_name = str(ziel["checkin_name"] if isinstance(ziel, dict)
-                           else ziel)
-        tage_b = spieltage_von(str(buchung_name))
-        tage_c = spieltage_von(checkin_name)
-
-        # Gleicher Nachname, anderer Vorname: zwei Menschen. Wirkt
-        # ohnehin nicht mehr, gehört aber hierher — sonst steht die
-        # Zeile unsichtbar in der Tabelle und niemand räumt sie weg.
-        if namen_sind_verschiedene_personen(str(buchung_name), checkin_name):
-            konflikte.append({
-                "buchung": str(buchung_name), "checkin": checkin_name,
-                "art": "hart", "tage": sorted(tage_b | tage_c, reverse=True),
-                "hinweis": ("Gleicher Nachname, anderer Vorname — das sind "
-                            "zwei Menschen. Die Verknüpfung ist bereits "
-                            "ausser Kraft, hier kannst du sie löschen."),
-            })
-            continue
-
-        if not tage_c:
-            continue    # Name existiert nur bei EGYM — alles in Ordnung
-
-        gemeinsam = sorted(tage_b & tage_c, reverse=True)
-        if gemeinsam:
-            konflikte.append({
-                "buchung": str(buchung_name), "checkin": checkin_name,
-                "art": "hart", "tage": gemeinsam,
-                "hinweis": (f"Beide haben am {datum_kurz(gemeinsam[0])} "
-                            "gespielt — das können nicht dieselben sein."),
-            })
-        else:
-            konflikte.append({
-                "buchung": str(buchung_name), "checkin": checkin_name,
-                "art": "weich", "tage": sorted(tage_c, reverse=True),
-                "hinweis": (f"„{checkin_name}“ hat {len(tage_c)} eigene "
-                            "Spieltage in Playtomic — prüfen."),
-            })
-
-    return sorted(konflikte, key=lambda k: (k["art"] != "hart",
-                                            -len(k["tage"])))
-
-
 def modul_matching():
     head("Name-Abgleich", "Playtomic ↔ Wellpass zusammenführen")
 
@@ -12962,12 +12671,7 @@ def modul_matching():
 
     mapping = mapping_laden()
     abgelehnt = rejected_matches_laden()
-    konflikte = mapping_konflikte()
-
-    titel_konflikt = ("⚠️ Konflikte" + (f"  ·  {len(konflikte)}" if konflikte
-                                        else ""))
-    t1, t2, t3 = st.tabs(["🔍 Vorschläge", "📚 Gelernte Zuordnungen",
-                          titel_konflikt])
+    t1, t2 = st.tabs(["🔍 Vorschläge", "📚 Gelernte Zuordnungen"])
 
     # ── Vorschläge ──────────────────────────────────────────────────────
     # Eigene Funktion, weil hier mehrfach früh abgebrochen wird. Vorher
@@ -13169,73 +12873,6 @@ def modul_matching():
                             rejected_entfernen(b, c)
                             st.rerun()
 
-    # ── Konflikte ───────────────────────────────────────────────────────
-    with t3:
-        box("Eine Verknüpfung kann sich im Nachhinein als falsch "
-            "herausstellen — nämlich dann, wenn der Wellpass-Name plötzlich "
-            "eigene Buchungen in Playtomic hat. Spielen beide am selben Tag, "
-            "sind es zwei verschiedene Menschen und die Zuordnung verfälscht "
-            "seitdem jede Auswertung.", "info")
-
-        if not konflikte:
-            box("✅ Keine widersprüchlichen Verknüpfungen. Alle "
-                "Wellpass-Namen existieren nur bei EGYM.", "ok")
-        else:
-            hart = [k for k in konflikte if k["art"] == "hart"]
-            weich = [k for k in konflikte if k["art"] == "weich"]
-
-            if hart:
-                box(f"❌ <b>{len(hart)} sichere Fehlverknüpfungen.</b> "
-                    "Beide Namen haben am selben Tag gespielt.", "warn")
-            if weich:
-                box(f"👀 <b>{len(weich)} zu prüfen.</b> Der Wellpass-Name hat "
-                    "eigene Spieltage, aber nie am selben Tag.", "info")
-
-            for i, k in enumerate(konflikte):
-                farbe = C["err"] if k["art"] == "hart" else C["warn"]
-                st.markdown(f"""
-                <div class="pc-card" style="border-left:3px solid {farbe};">
-                  <div style="display:flex;justify-content:space-between;
-                              align-items:center;">
-                    <div>
-                      <span style="color:{C['dim']};font-size:.78rem;">
-                        Playtomic</span><br>
-                      <span style="font-weight:600;color:{C['text']};">
-                        {k['buchung']}</span>
-                    </div>
-                    <div style="font-size:1.3rem;color:{farbe};">↮</div>
-                    <div style="text-align:right;">
-                      <span style="color:{C['dim']};font-size:.78rem;">
-                        Wellpass</span><br>
-                      <span style="font-weight:600;color:{C['text']};">
-                        {k['checkin']}</span>
-                    </div>
-                  </div>
-                  <div style="margin-top:.6rem;color:{C['dim']};
-                              font-size:.82rem;">{k['hinweis']}</div>
-                </div>""", unsafe_allow_html=True)
-
-                k1, k2 = st.columns([1, 2])
-                with k1:
-                    if st.button("Verknüpfung lösen", key=f"mk_del_{i}",
-                                 type="primary" if k["art"] == "hart"
-                                 else "secondary",
-                                 use_container_width=True):
-                        mapping_entfernen(k["buchung"])
-                        rejected_speichern(k["buchung"], k["checkin"])
-                        st.toast("Verknüpfung gelöst.")
-                        st.rerun()
-                with k2:
-                    st.caption("Spieltage: " + ", ".join(
-                        datum_kurz(t) for t in k["tage"][:6])
-                        + (" …" if len(k["tage"]) > 6 else ""))
-                st.markdown("")
-
-            box("Nach dem Lösen die betroffenen Tage in der Daten-Zentrale "
-                "neu verarbeiten, damit die Auswertung wieder stimmt.", "info")
-
-
-# ══════════════════════════════════════════════════════════════════════════════
 #   ⚙️  MODUL · EINSTELLUNGEN
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -13665,18 +13302,6 @@ def _naechste_schritte(tage: list, nicht_angeschrieben: int,
             "text": "Keine offene Sperre mehr — Wellpass-Zugang bei EGYM "
                     "wieder öffnen.",
             "art": "warn", "ziel": "whatsapp", "knopf": "Freigeben"})
-
-    # 7 · Namensvarianten
-    try:
-        konflikte = len(mapping_konflikte())
-    except Exception:
-        konflikte = 0
-    if konflikte:
-        schritte.append({
-            "ic": "🔗", "titel": f"{konflikte} Verknüpfungen im Konflikt",
-            "text": "Beide Namen haben am selben Tag gespielt — das können "
-                    "nicht dieselben sein.",
-            "art": "err", "ziel": "matching", "knopf": "Klären"})
 
     st.markdown("")
     st.markdown("##### Was als Nächstes dran ist")
