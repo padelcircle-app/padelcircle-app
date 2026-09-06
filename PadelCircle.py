@@ -7162,7 +7162,15 @@ def slot_bewerten(g: dict, volle, turniere: dict = None,
     """
     b = g["preis"]
     volle = vergleichspreise(volle, g["datum"], g["zeit"])
-    abzug = wellpass_abzug_am(g["datum"])
+    # Alle Abzüge, die an diesem Spieltag in Frage kommen. Der Satz des
+    # Spieltags zuerst, dann die anderen bekannten: gebucht wird bis zu
+    # zwei Wochen im Voraus, und massgeblich ist der Abzug zum Zeitpunkt
+    # der BUCHUNG. Am 11.08. zahlten zwei Spieler je 3,50 € auf einem
+    # Anteil von 16,50 € — das sind 13,00 € Abzug, obwohl an dem Tag
+    # schon 12,00 € galten. Mit nur einem Wert galten beide als
+    # Vollzahler, und zwei Ansprüche fehlten.
+    kandidaten = abzug_kandidaten(g["datum"])
+    abzug = kandidaten[0]
 
     if g["bezahlt_zeilen"] == 0:
         # Alle Zeilen dieser Person verfallen: der Zahlungsanteil wurde
@@ -7210,22 +7218,24 @@ def slot_bewerten(g: dict, volle, turniere: dict = None,
                     else max(deckbar) if deckbar else abzug)
             return ("wellpass", "0 € — eigener Anteil über Wellpass gedeckt",
                     round(voll, 2), 0.0)
-        if not (0 < pb <= ANTEIL_MAX - abzug):
+        if pb <= 0:
             continue
-        voll = round(pb + abzug, 2)
-        if anteile:
-            if pb in anteile:
-                continue            # ist selbst ein voller Anteil
-            if voll in anteile:
+        if anteile and pb in anteile:
+            continue                # ist selbst ein voller Anteil
+        for kand in kandidaten:
+            if pb > ANTEIL_MAX - kand:
+                continue
+            voll = round(pb + kand, 2)
+            if (anteile and voll in anteile) or (not anteile and voll in volle):
                 return "wellpass", f"{euro(pb)} statt {euro(voll)}", voll, pb
-        if voll in volle:
-            return "wellpass", f"{euro(pb)} statt {euro(voll)}", voll, pb
 
     if not g["plaetze"]:
         # Kein bezahlter Platz übrig — bleibt nur ein noch offener.
         bv = g["verfallen"]
-        if 0 < bv <= ANTEIL_MAX - abzug:
-            voll = round(bv + abzug, 2)
+        for kand in kandidaten:
+            if not (0 < bv <= ANTEIL_MAX - kand):
+                continue
+            voll = round(bv + kand, 2)
             if voll in volle:
                 return ("wellpass", f"{euro(bv)} statt {euro(voll)} (noch offen)",
                         voll, bv)
