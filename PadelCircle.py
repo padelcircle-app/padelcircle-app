@@ -26,6 +26,7 @@ import time
 import random
 import re
 import unicodedata
+import itertools
 import secrets
 import json
 import hashlib
@@ -127,6 +128,12 @@ CONFIG = {
         {"ab": "2026-08-04", "abzug": 12.00},
     ],
     "wellpass_abzug_alternativen": [13.00, 12.00, 13.50, 11.00],
+    # Welche Courts sind Single Courts? Verglichen wird kleingeschrieben
+    # als Teilzeichenkette. „Padel 6" gehört dazu, weil der Platz im Juli
+    # noch so hiess und erst später in „Single Court Padel 6" umbenannt
+    # wurde — mit dem Double-Preis gerechnet gingen im Juli 55 von 66
+    # Buchungen dieses Platzes nicht auf, als Single nur noch wenige.
+    "single_courts": ["single", "padel 6"],
     "admin_gebuehr":       15.00,   # Gebühr wenn Check-in vergessen wurde
     # Wie viele Tage nach dem Spiel darf ein Check-in nachgeholt werden?
     "nachhol_fenster_tage": 5,
@@ -1721,6 +1728,30 @@ def wellpass_abzug_am(datum=None) -> float:
 def wellpass_abzug() -> float:
     """Der heute gültige Abzug."""
     return wellpass_abzug_am(date.today())
+
+
+def abzug_kandidaten(datum=None) -> list:
+    """
+    Welche Abzüge kommen an diesem Spieltag in Frage — bester zuerst.
+
+    Massgeblich ist der Tag der BUCHUNG, nicht der Spieltag. Man kann
+    zwei Wochen im Voraus reservieren: nach einer Umstellung laufen also
+    noch Wochen lang Buchungen mit dem alten Abzug ein, während neue
+    schon den neuen haben. Im Juli-Bestand steht das in einer einzigen
+    Buchung nebeneinander — 54,00 € Platzpreis, 29,00 € kassiert, das
+    sind 13,00 € plus 12,00 €.
+
+    Deshalb kein fester Wert, sondern eine Reihenfolge: der Satz des
+    Spieltags zuerst, danach die anderen bekannten.
+    """
+    bevorzugt = wellpass_abzug_am(datum)
+    weitere = [float(x) for x in CONFIG.get("wellpass_abzug_alternativen", [])]
+    weitere += [float(s["abzug"]) for s in wellpass_abzug_saetze()]
+    out = [bevorzugt]
+    for w in weitere:
+        if all(abs(w - x) > 0.005 for x in out):
+            out.append(w)
+    return out
 
 
 def wellpass_anzahl(liste: float, bezahlt: float, plaetze: int,
@@ -6847,7 +6878,12 @@ def _analysieren(bdf, cdf, pdf=None, zahlungen_index=None) -> bool:
 # das Verrechnen sahen neun Personen so aus, als hätten sie an einem Tag
 # mehrfach Wellpass genutzt.
 
-WELLPASS_RABATT = 12.0                 # fester Nachlass je Person und Buchung
+# Der Nachlass ist NICHT fest über die Zeit: bis 03.08.2026 zog Playtomic
+# 13,00 € ab, seither 12,00 €. Massgeblich ist der Spieltag —
+# wellpass_abzug_am() kennt die Historie und ist über die Einstellungen
+# pflegbar. Der Juli-Bestand hat das aufgedeckt: mit festen 12 € gingen
+# 255 von 907 Buchungen nicht auf, mit 13 € nur noch 67.
+WELLPASS_RABATT = 12.0                 # nur noch als letzter Rückfallwert
 ANTEIL_MIN, ANTEIL_MAX = 9.0, 22.0     # plausibler Anteil EINER Person
 VOLLPREIS_MIN_ZAHL = 2                 # ein einmaliger Preis beweist nichts
 
@@ -6967,6 +7003,18 @@ def zahlungs_slots(pdf: pd.DataFrame) -> list:
                       else round(g["verfallen"], 2))
     return sorted(gruppen.values(),
                   key=lambda g: (g["datum"], g["zeit"], g["name"]))
+
+
+def ist_single_court(name) -> bool:
+    """
+    Single Court oder Double? Der Preis und die Spielerzahl hängen daran.
+
+    Über den Namen, weil der Buchungsexport nichts anderes mitliefert.
+    Playtomic hat denselben Platz schon einmal umbenannt, deshalb steht
+    die Liste in der Konfiguration und nicht hart im Code.
+    """
+    n = str(name or "").strip().lower()
+    return any(teil in n for teil in CONFIG.get("single_courts", ["single"]))
 
 
 def moegliche_anteile(datum, minute: int) -> frozenset:
@@ -7114,6 +7162,7 @@ def slot_bewerten(g: dict, volle, turniere: dict = None,
     """
     b = g["preis"]
     volle = vergleichspreise(volle, g["datum"], g["zeit"])
+    abzug = wellpass_abzug_am(g["datum"])
 
     if g["bezahlt_zeilen"] == 0:
         # Alle Zeilen dieser Person verfallen: der Zahlungsanteil wurde
@@ -7151,19 +7200,19 @@ def slot_bewerten(g: dict, volle, turniere: dict = None,
             # Christopher Gordy waren es 8 €, bei necmettin kartal 7 €.
             # Der volle Anteil ist der grösste mögliche, den 12 € noch
             # ganz decken.
-            deckbar = [a for a in anteile if a <= WELLPASS_RABATT]
+            deckbar = [a for a in anteile if a <= abzug]
             # Am genauesten wird es, wenn einer der möglichen Anteile
             # zur selben Zeit auch wirklich gezahlt wurde — dann steht
             # fest, welcher Court gemeint ist.
             gezahlt = (beobachtet or {}).get((g["datum"], g["zeit"]), set())
             passend = [a for a in deckbar if a in gezahlt]
             voll = (max(passend) if passend
-                    else max(deckbar) if deckbar else WELLPASS_RABATT)
+                    else max(deckbar) if deckbar else abzug)
             return ("wellpass", "0 € — eigener Anteil über Wellpass gedeckt",
                     round(voll, 2), 0.0)
-        if not (0 < pb <= ANTEIL_MAX - WELLPASS_RABATT):
+        if not (0 < pb <= ANTEIL_MAX - abzug):
             continue
-        voll = round(pb + WELLPASS_RABATT, 2)
+        voll = round(pb + abzug, 2)
         if anteile:
             if pb in anteile:
                 continue            # ist selbst ein voller Anteil
@@ -7175,8 +7224,8 @@ def slot_bewerten(g: dict, volle, turniere: dict = None,
     if not g["plaetze"]:
         # Kein bezahlter Platz übrig — bleibt nur ein noch offener.
         bv = g["verfallen"]
-        if 0 < bv <= ANTEIL_MAX - WELLPASS_RABATT:
-            voll = round(bv + WELLPASS_RABATT, 2)
+        if 0 < bv <= ANTEIL_MAX - abzug:
+            voll = round(bv + abzug, 2)
             if voll in volle:
                 return ("wellpass", f"{euro(bv)} statt {euro(voll)} (noch offen)",
                         voll, bv)
@@ -7320,6 +7369,46 @@ def _passenden_checkin(g: dict, checkins: list, nur_gleicher_name: bool,
     return (c, punkte, abstand)
 
 
+def _rabatte_zerlegen(differenz: float, anteil: float, spieler: int,
+                     datum=None) -> tuple:
+    """
+    Wie viele Wellpass-Rabatte stecken in dieser Preisdifferenz?
+
+    Nicht einfach „Differenz durch Abzug": in der Umstellungswoche
+    stehen zwei Abzüge nebeneinander, weil zwei Wochen im Voraus
+    gebucht werden kann. Am 30.07. fehlten in einer Buchung 25,00 € —
+    das ist 13,00 € plus 12,00 €, nicht ein krummes Vielfaches.
+
+    Gesucht wird deshalb eine Summe aus höchstens so vielen Rabatten,
+    wie der Platz Spieler hat. Der Abzug des Spieltags wird zuerst
+    probiert, dann die Mischungen. Geht es nicht sauber auf, kommt
+    None zurück — dann bleibt die Buchung lieber ungeprüft, als dass
+    eine Zahl geraten wird.
+
+    → (Anzahl Rabatte, gedeckter Betrag je Rabatt) oder (None, None)
+    """
+    if differenz < 0.005:
+        return 0, min(wellpass_abzug_am(datum), anteil)
+    kandidaten = [min(k, anteil) for k in abzug_kandidaten(datum)]
+    kandidaten = [k for k in kandidaten if k > 0.005]
+    if not kandidaten:
+        return None, None
+
+    # Erst der reine Fall: alle Rabatte gleich hoch, Satz des Spieltags
+    # zuerst. Das deckt fast alles ab und bleibt eindeutig.
+    for k in kandidaten:
+        n = differenz / k
+        if abs(n - round(n)) < 0.01 and 0 <= round(n) <= spieler:
+            return int(round(n)), k
+
+    # Sonst eine Mischung — höchstens so viele Rabatte wie Spieler.
+    for anzahl in range(2, spieler + 1):
+        for misch in itertools.combinations_with_replacement(kandidaten, anzahl):
+            if abs(sum(misch) - differenz) < 0.01:
+                return anzahl, max(misch)
+    return None, None
+
+
 def buchungs_luecken(bdf, slots: list, arten: dict = None) -> tuple:
     """
     Spieler, die in der Buchung stehen, aber in den Zahlungen fehlen.
@@ -7389,7 +7478,7 @@ def buchungs_luecken(bdf, slots: list, arten: dict = None) -> tuple:
         if dauer <= 0:
             continue
 
-        single = "single" in str(r.get("resource_name", "")).lower()
+        single = ist_single_court(r.get("resource_name"))
         liste = listenpreis(start, dauer, single)
         preis = parse_betrag(r.get("price"))
         spieler = COURT_SPIELER[single]
@@ -7397,11 +7486,10 @@ def buchungs_luecken(bdf, slots: list, arten: dict = None) -> tuple:
         if anteil <= 0:
             continue
 
-        gedeckt = min(WELLPASS_RABATT, anteil)
-        roh = (liste - preis) / gedeckt
-        if abs(roh - round(roh)) > 0.01 or roh < 0:
-            continue                    # kein sauberes Vielfaches → Finger weg
-        soll = int(round(roh))
+        soll, gedeckt = _rabatte_zerlegen(round(liste - preis, 2), anteil,
+                                          spieler, start.date())
+        if soll is None:
+            continue                    # nicht sauber zerlegbar → Finger weg
         if soll == 0:
             continue
 
@@ -7475,8 +7563,16 @@ def _analysieren_zahlungen(pdf, cdf, bdf=None) -> bool:
     arten = {(str(g["datum"]), g["zeit"], g["name_norm"]): art
              for g, art, _t, _v, _a in bewertet}
     zusatz, unklar = buchungs_luecken(bdf, slots, arten)
-    for hinweis in unklar:
-        st.warning("⚠️ " + hinweis)
+    if unklar:
+        # Gesammelt statt einzeln: über einen ganzen Monat sind das
+        # schnell dreissig Kästen, und dann liest sie niemand mehr.
+        box(f"👀 <b>{len(unklar)} Buchungen</b> lassen sich nicht eindeutig "
+            "auflösen — dort fehlt ein Rabatt, aber es kommen mehrere "
+            "Teilnehmer dafür in Frage oder keiner. Geraten wird nicht.",
+            "info")
+        with st.expander(f"Die {len(unklar)} Buchungen ansehen"):
+            for hinweis in unklar:
+                st.caption("· " + hinweis)
     if zusatz:
         st.caption(f"{len(zusatz)} Spieler aus dem Buchungsexport ergänzt — "
                    "ihr Platz wurde von jemand anderem bezahlt.")
@@ -7805,12 +7901,14 @@ def modul_daten():
 
         with st.expander("Wie gerechnet wird"):
             st.markdown(f"""
-**Der Wellpass-Rabatt ist fest: {euro(WELLPASS_RABATT)} je Person und Buchung.**
+**Der Wellpass-Rabatt beträgt zurzeit {euro(wellpass_abzug())} je Person und
+Buchung.** Er hat sich schon geändert — bis 03.08.2026 waren es 13,00 €. Jeder
+Tag rechnet mit dem Wert, der damals galt.
 Wer weniger als den vollen Anteil gezahlt hat, genau um diesen Betrag, hat den
 Rabatt bekommen — das ist gerechnet, nicht geschätzt.
 
 - `1,50 €` statt `13,50 €` · `4,50 €` statt `16,50 €` · `6,00 €` statt `18,00 €`
-- `0 €`, wenn der Anteil ohnehin unter {euro(WELLPASS_RABATT)} lag
+- `0 €`, wenn der Anteil ohnehin darunter lag
 
 **Erstattungen werden verrechnet.** Wer 6 € zahlt, 6 € zurückbekommt und dann
 1,50 € zahlt, hat einen Anspruch über 1,50 € — nicht drei Fälle.
