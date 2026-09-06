@@ -7388,7 +7388,130 @@ def _passenden_checkin(g: dict, checkins: list, nur_gleicher_name: bool,
     return (c, punkte, abstand)
 
 
-def _analysieren_zahlungen(pdf, cdf) -> bool:
+def buchungs_luecken(bdf, slots: list, arten: dict = None) -> tuple:
+    """
+    Spieler, die in der Buchung stehen, aber in den Zahlungen fehlen.
+
+    Zahlt jemand anderes einen 0-€-Wellpass-Platz mit, legt Playtomic
+    für den Begünstigten KEINE Zahlungszeile an. Lisa Schmiema spielte
+    am 28.08. um 10:00 mit Wellpass, bezahlt von Aileen Täuber — in der
+    Zahlungsdatei kommt sie nicht vor. Für die App hatte sie nicht
+    gespielt: kein Anspruch, kein offener Fall, nichts zum Anschreiben.
+
+    Der Buchungsexport schliesst die Lücke, ohne dass irgendetwas
+    geraten wird. Er nennt Court, Dauer und den KASSIERTEN Preis. Der
+    Listenpreis kommt aus der Preisliste, und die Differenz ist der
+    gewährte Rabatt:
+
+        Rabatte = (Listenpreis − kassiert) ÷ Anteil, höchstens 12 € je Person
+
+    Geprüft an 263 bezahlten Buchungen vom 26.–31.08.: die Zahl geht
+    263 Mal glatt auf, kein einziges Mal daneben.
+
+    Gemeldet wird nur, wo diese Zahl höher ist als das, was in den
+    Zahlungen steht — und auch dann nur, wenn genau so viele Teilnehmer
+    ohne Zahlungszeile dastehen, wie Rabatte fehlen. Sonst wäre es
+    geraten, und dann kommt lieber ein Hinweis als eine falsche Zahl.
+
+    Aussen vor bleiben: stornierte Buchungen, Turniere (OPEN_PLAY — dort
+    ist der Preis ein Startgeld, kein Platzpreis) und alles, was nicht
+    bezahlt ist.
+
+    → ([{datum, zeit, minute, name, name_norm, anteil}], [unklare Texte])
+    """
+    if bdf is None or getattr(bdf, "empty", True):
+        return [], []
+    noetig = {"booking_start_date", "price", "resource_name",
+              "duration (Minuten)", "participant_name_1"}
+    if not noetig <= set(bdf.columns):
+        st.warning("⚠️ Der Buchungsexport hat nicht die erwarteten Spalten — "
+                   "gerechnet wird ohne ihn.")
+        return [], []
+
+    arten = arten or {}
+    bekannt = {(str(g["datum"]), g["zeit"], g["name_norm"]) for g in slots}
+    # Nur Tage, die in den Zahlungen überhaupt vorkommen. Wer aus
+    # Versehen den Buchungsexport eines anderen Zeitraums hochlädt,
+    # hätte sonst lauter Teilnehmer ohne Zahlungszeile — und die App
+    # würde daraus reihenweise Ansprüche erfinden. Auf dem Prüfbestand
+    # waren das 67 aus dem Nichts.
+    tage_mit_zahlungen = {str(g["datum"]) for g in slots}
+
+    fehlend, unklar, fremd = [], [], 0
+    for _, r in bdf.iterrows():
+        if str(r.get("status", "")).strip().upper() == "CANCELED":
+            continue
+        if str(r.get("booking_type", "")).strip().upper() == "OPEN_PLAY":
+            continue
+        if str(r.get("payment_status", "")).strip().upper() not in (
+                "PAID", "PARTIAL_PAID"):
+            continue
+
+        start = parse_datetime_safe(r.get("booking_start_date"))
+        if start is None:
+            continue
+        try:
+            dauer = int(float(str(r.get("duration (Minuten)", 0)).strip()))
+        except (TypeError, ValueError):
+            continue
+        if dauer <= 0:
+            continue
+
+        single = "single" in str(r.get("resource_name", "")).lower()
+        liste = listenpreis(start, dauer, single)
+        preis = parse_betrag(r.get("price"))
+        spieler = COURT_SPIELER[single]
+        anteil = round(liste / spieler, 2)
+        if anteil <= 0:
+            continue
+
+        gedeckt = min(WELLPASS_RABATT, anteil)
+        roh = (liste - preis) / gedeckt
+        if abs(roh - round(roh)) > 0.01 or roh < 0:
+            continue                    # kein sauberes Vielfaches → Finger weg
+        soll = int(round(roh))
+        if soll == 0:
+            continue
+
+        tag, zeit = start.strftime("%Y-%m-%d"), start.strftime("%H:%M")
+        if tag not in tage_mit_zahlungen:
+            fremd += 1
+            continue
+        namen = [str(r.get(f"participant_name_{i}", "") or "").strip()
+                 for i in (1, 2, 3, 4)]
+        namen = [n for n in namen if n and n.lower() != "nan"]
+
+        hat = sum(1 for n in namen
+                  if arten.get((tag, zeit, normalize_name(n))) == "wellpass")
+        if hat >= soll:
+            continue
+
+        ohne = [n for n in namen
+                if (tag, zeit, normalize_name(n)) not in bekannt]
+        if len(ohne) != soll - hat:
+            unklar.append(
+                f"{datum_kurz(tag)} {zeit} · {r.get('resource_name', '')}: "
+                f"{soll - hat} Rabatt(e) ohne Zahlungszeile, aber "
+                f"{len(ohne)} Teilnehmer kommen dafür in Frage")
+            continue
+
+        for n in ohne:
+            fehlend.append({
+                "datum": start.date(), "zeit": zeit,
+                "minute": start.hour * 60 + start.minute,
+                "name": n, "name_norm": normalize_name(n),
+                "anteil": round(gedeckt, 2),
+                "court": str(r.get("resource_name", "") or ""),
+            })
+
+    if fremd:
+        st.warning(f"⚠️ {fremd} Buchungen liegen an Tagen, für die keine "
+                   "Zahlungen hochgeladen wurden — sie bleiben aussen vor. "
+                   "Passt der Zeitraum der beiden Dateien zusammen?")
+    return fehlend, unklar
+
+
+def _analysieren_zahlungen(pdf, cdf, bdf=None) -> bool:
     """
     Wellpass-Abgleich allein aus Zahlungen und Check-ins.
 
@@ -7412,8 +7535,24 @@ def _analysieren_zahlungen(pdf, cdf) -> bool:
     turniere = turnier_vollpreise(slots)
     bewertet = [(g, *slot_bewerten(g, volle, turniere, beobachtet))
                 for g in slots]
+
+    # Spieler, deren Wellpass-Platz jemand anderes bezahlt hat, stehen in
+    # der Zahlungsdatei überhaupt nicht. Der Buchungsexport nennt sie —
+    # siehe buchungs_luecken(). Sie kommen als eigene Ansprüche dazu und
+    # laufen ab hier durch dieselbe Check-in-Zuordnung wie alle anderen.
+    arten = {(str(g["datum"]), g["zeit"], g["name_norm"]): art
+             for g, art, _t, _v, _a in bewertet}
+    zusatz, unklar = buchungs_luecken(bdf, slots, arten)
+    for hinweis in unklar:
+        st.warning("⚠️ " + hinweis)
+    if zusatz:
+        st.caption(f"{len(zusatz)} Spieler aus dem Buchungsexport ergänzt — "
+                   "ihr Platz wurde von jemand anderem bezahlt.")
+
     ansprueche = [(g, txt) for g, art, txt, _v, _a in bewertet
                   if art == "wellpass"]
+    ansprueche += [(z, f"0 € — Platz von jemand anderem bezahlt "
+                       f"(voller Anteil {euro(z['anteil'])})") for z in zusatz]
 
     # Erst die namensgleichen Treffer, dann die Schreibvarianten auf dem,
     # was übrig bleibt. Andernfalls nimmt eine Abkürzung wie „Maximilian
@@ -7439,6 +7578,33 @@ def _analysieren_zahlungen(pdf, cdf) -> bool:
     mapping = mapping_laden()
 
     buchungen_out, checkins_out = [], []
+    # Die ergänzten Spieler zuerst — sie sind gewöhnliche Ansprüche,
+    # nur ohne eigene Zahlungszeile.
+    for z in zusatz:
+        idx = next((k for k, (ag, _t) in enumerate(ansprueche) if ag is z), None)
+        c, _p, _ab, _ex = treffer.get(idx, (None, 0.0, 0, False))
+        if c is not None:
+            c["benutzt"] = True
+        nn, name = z["name_norm"], z["name"]
+        team = nn in TEAM_NORM
+        buchungen_out.append({
+            "Datum": str(z["datum"]), "Name": name, "Name_norm": nn,
+            "Email": email_fuer(name) or "", "Court": z.get("court", ""),
+            "Service_Zeit": z["zeit"], "Dauer": 0,
+            "Listenpreis": z["anteil"], "Bezahlt": 0.0, "Betrag": 0.0,
+            "Plaetze": 1, "Wellpass_Rabatte": 1, "Teilnehmer": 1,
+            "Checkin_Zeit": c["zeit"] if c else "",
+            "Relevant": "Ja", "Event": "Nein", "Event_Name": "",
+            "Event_Id": "", "Event_Courts": 0, "Event_Unklar": "Nein",
+            "Check-in": "Ja" if c else "Nein",
+            "Team": "Ja" if team else "Nein",
+            "Fehler": "Ja" if (c is None and not team
+                               and not ist_platzhalter(name)) else "Nein",
+            "Quelle": "buchung",       # kam nicht aus der Zahlungsdatei
+            "Rabatt_Grund": "0 € — Platz von jemand anderem bezahlt",
+            "analysis_date": z["datum"].strftime("%Y-%m-%d"),
+        })
+
     for i, (g, art, txt, vollpreis, eigen) in enumerate(bewertet):
         if art == "storniert":
             continue
@@ -7554,7 +7720,8 @@ def _analysieren_zahlungen(pdf, cdf) -> bool:
     return True
 
 
-def _verarbeiten_zahlungen(z_datei, c_datei, o_datei=None) -> bool:
+def _verarbeiten_zahlungen(z_datei, c_datei, o_datei=None,
+                           b_datei=None) -> bool:
     """
     Neuer Weg: Zahlungen + Check-ins, ohne Buchungsexport.
 
@@ -7589,7 +7756,20 @@ def _verarbeiten_zahlungen(z_datei, c_datei, o_datei=None) -> bool:
     # dort entdoppelt append_rows über den Zeilen-Fingerabdruck.
     append_rows(pdf, "playtomic_raw", id_spalte="Payment id")
 
-    return _analysieren_zahlungen(pdf, cdf)
+    # Vierte, freiwillige Datei: der Buchungsexport. Er ändert an der
+    # Rechnung nichts — er findet nur die Spieler, für die jemand anderes
+    # bezahlt hat und die deshalb in keiner Zahlungszeile stehen.
+    bdf = None
+    if b_datei is not None:
+        bdf = parse_bookings(b_datei)
+        if bdf.empty:
+            st.warning("⚠️ Der Buchungsexport konnte nicht gelesen werden — "
+                       "gerechnet wird ohne ihn.")
+            bdf = None
+        else:
+            st.caption(f"Buchungsexport zur Kontrolle: {len(bdf)} Buchungen.")
+
+    return _analysieren_zahlungen(pdf, cdf, bdf)
 
 
 def tage_entfernen(tage: list) -> dict:
@@ -7664,11 +7844,21 @@ def modul_daten():
                        "bezahlt waren, stehen nur hier. Ohne diese Datei "
                        "fehlen sie in der Auswertung.")
 
+        b_datei = st.file_uploader("Buchungen · zur Kontrolle (.csv, freiwillig)",
+                                   type=["csv"], key="up_zb")
+        if b_datei:
+            st.caption(f"✓ {b_datei.name}")
+        else:
+            st.caption("Zahlt jemand den Wellpass-Platz eines Mitspielers "
+                       "mit, legt Playtomic für den Mitspieler keine "
+                       "Zahlungszeile an — er fehlt dann ganz. Nur der "
+                       "Buchungsexport nennt ihn.")
+
         st.markdown("")
         if st.button("🔄 Abgleichen", type="primary", use_container_width=True,
                      disabled=not (z_datei and zc_datei), key="btn_zahl"):
             with st.spinner(lade_text("verarbeite")):
-                if _verarbeiten_zahlungen(z_datei, zc_datei, o_datei):
+                if _verarbeiten_zahlungen(z_datei, zc_datei, o_datei, b_datei):
                     st.rerun()
 
         if not (z_datei and zc_datei):
