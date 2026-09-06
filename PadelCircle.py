@@ -7448,19 +7448,25 @@ def buchungs_luecken(bdf, slots: list, arten: dict = None) -> tuple:
     ist der Preis ein Startgeld, kein Platzpreis) und alles, was nicht
     bezahlt ist.
 
-    → ([{datum, zeit, minute, name, name_norm, anteil}], [unklare Texte])
+    → ([ergänzte Spieler], {Korrekturen}, [unklare Texte])
     """
     if bdf is None or getattr(bdf, "empty", True):
-        return [], []
+        return [], {}, []
     noetig = {"booking_start_date", "price", "resource_name",
               "duration (Minuten)", "participant_name_1"}
     if not noetig <= set(bdf.columns):
         st.warning("⚠️ Der Buchungsexport hat nicht die erwarteten Spalten — "
                    "gerechnet wird ohne ihn.")
-        return [], []
+        return [], {}, []
 
     arten = arten or {}
     bekannt = {(str(g["datum"]), g["zeit"], g["name_norm"]) for g in slots}
+    # Was jeder gezahlt hat, und die einzelnen Plätze dazu. Ohne die
+    # Buchung ist ein Betrag mehrdeutig — 9,00 € kann der Viertelanteil
+    # eines Double-Courts sein oder 22,00 € minus 13,00 € Wellpass auf
+    # dem Single Court. Mit dem Platzpreis der Buchung ist es eindeutig.
+    plaetze_von = {(str(g["datum"]), g["zeit"], g["name_norm"]):
+                   [pl["betrag"] for pl in g["plaetze"]] for g in slots}
     # Nur Tage, die in den Zahlungen überhaupt vorkommen. Wer aus
     # Versehen den Buchungsexport eines anderen Zeitraums hochlädt,
     # hätte sonst lauter Teilnehmer ohne Zahlungszeile — und die App
@@ -7468,7 +7474,7 @@ def buchungs_luecken(bdf, slots: list, arten: dict = None) -> tuple:
     # waren das 67 aus dem Nichts.
     tage_mit_zahlungen = {str(g["datum"]) for g in slots}
 
-    fehlend, unklar, fremd = [], [], 0
+    fehlend, korrekturen, unklar, fremd = [], {}, [], 0
     for _, r in bdf.iterrows():
         if str(r.get("status", "")).strip().upper() == "CANCELED":
             continue
@@ -7518,13 +7524,36 @@ def buchungs_luecken(bdf, slots: list, arten: dict = None) -> tuple:
 
         ohne = [n for n in namen
                 if (tag, zeit, normalize_name(n)) not in bekannt]
-        if len(ohne) != soll - hat:
+
+        # Wer eine Zahlungszeile hat, aber nicht als Wellpass gilt: Passt
+        # einer seiner Plätze zum Anteil DIESER Buchung minus Abzug, war
+        # es doch einer. Das trifft zwei Sorten: 0,00 € ohne
+        # Free-payment-Kennzeichen, und Beträge wie 9,00 €, die zufällig
+        # anderswo ein voller Anteil sind.
+        moegliche = [round(anteil - k, 2) for k in abzug_kandidaten(start.date())]
+        moegliche = [m for m in moegliche if m >= 0] + [0.0]
+        korrigierbar = []
+        for n in namen:
+            k = (tag, zeit, normalize_name(n))
+            if k not in bekannt or arten.get(k) == "wellpass":
+                continue
+            if any(abs(b - m) < 0.005
+                   for b in plaetze_von.get(k, []) for m in moegliche):
+                korrigierbar.append((n, k))
+
+        if len(ohne) + len(korrigierbar) != soll - hat:
             unklar.append(
                 f"{datum_kurz(tag)} {zeit} · {r.get('resource_name', '')}: "
                 f"{soll - hat} Rabatt(e) ohne Zahlungszeile, aber "
                 f"{len(ohne)} Teilnehmer kommen dafür in Frage")
             continue
 
+        for n, k in korrigierbar:
+            korrekturen[k] = {
+                "name": n, "anteil": round(anteil, 2),
+                "gezahlt": min(plaetze_von.get(k, [0.0]),
+                               key=lambda b: min(abs(b - m) for m in moegliche)),
+            }
         for n in ohne:
             fehlend.append({
                 "datum": start.date(), "zeit": zeit,
@@ -7538,7 +7567,7 @@ def buchungs_luecken(bdf, slots: list, arten: dict = None) -> tuple:
         st.warning(f"⚠️ {fremd} Buchungen liegen an Tagen, für die keine "
                    "Zahlungen hochgeladen wurden — sie bleiben aussen vor. "
                    "Passt der Zeitraum der beiden Dateien zusammen?")
-    return fehlend, unklar
+    return fehlend, korrekturen, unklar
 
 
 def _analysieren_zahlungen(pdf, cdf, bdf=None) -> bool:
@@ -7572,7 +7601,24 @@ def _analysieren_zahlungen(pdf, cdf, bdf=None) -> bool:
     # laufen ab hier durch dieselbe Check-in-Zuordnung wie alle anderen.
     arten = {(str(g["datum"]), g["zeit"], g["name_norm"]): art
              for g, art, _t, _v, _a in bewertet}
-    zusatz, unklar = buchungs_luecken(bdf, slots, arten)
+    zusatz, korrekturen, unklar = buchungs_luecken(bdf, slots, arten)
+    if korrekturen:
+        # Die Buchung kennt den echten Anteil und sagt, wie viele Rabatte
+        # drinstecken. Wo das mit einem Betrag zusammenpasst, den die
+        # Zahlungsdatei allein nicht deuten konnte, wird korrigiert.
+        neu_bewertet = []
+        for g, art, txt, voll, eigen in bewertet:
+            k = (str(g["datum"]), g["zeit"], g["name_norm"])
+            kor = korrekturen.get(k)
+            if kor and art != "wellpass":
+                art = "wellpass"
+                voll, eigen = kor["anteil"], round(kor["gezahlt"], 2)
+                txt = (f"{euro(eigen)} statt {euro(voll)} — aus der Buchung"
+                       if eigen else "0 € — Platz über Wellpass gedeckt")
+            neu_bewertet.append((g, art, txt, voll, eigen))
+        bewertet = neu_bewertet
+        st.caption(f"{len(korrekturen)} Beträge über die Buchungsdatei "
+                   "richtiggestellt.")
     if unklar:
         # Gesammelt statt einzeln: über einen ganzen Monat sind das
         # schnell dreissig Kästen, und dann liest sie niemand mehr.
