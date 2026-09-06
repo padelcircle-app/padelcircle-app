@@ -19,6 +19,10 @@ import PadelCircle as PC
 
 
 def pruefen(pfad):
+    import os
+    if not os.path.exists(pfad):
+        print(f"\n❌ Datei nicht gefunden: {pfad}")
+        sys.exit(1)
     zeilen = list(csv.DictReader(open(pfad, encoding="utf-8-sig")))
     je_court = collections.defaultdict(lambda: [0, 0])
     schief = []

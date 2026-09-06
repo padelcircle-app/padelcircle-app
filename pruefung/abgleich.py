@@ -35,6 +35,13 @@ def _sheets_ersetzen():
 
 
 def datei(pfad):
+    if not os.path.exists(pfad):
+        print(f"\n❌ Datei nicht gefunden: {pfad}\n"
+              "   Exporte liegen üblicherweise im Downloads-Ordner und "
+              "haben Namen wie\n"
+              "   880ac6b8-…csv (Zahlungen), Checkins….csv, "
+              "bookings-download….csv")
+        sys.exit(1)
     return io.BytesIO(open(pfad, "rb").read())
 
 
