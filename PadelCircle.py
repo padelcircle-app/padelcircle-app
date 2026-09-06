@@ -1205,7 +1205,8 @@ def dubletten_bereinigen(sheet_name: str, id_spalte: str = None) -> tuple:
 ABGELEITETE_CACHES = ("tages_kennzahlen", "verfuegbare_tage", "monats_kennzahlen",
                       "spieler_statistik", "auslastung_matrix",
                       "rejected_matches_laden", "einstellungen_laden",
-                      "kontakt_index", "offene_fehler", "offene_je_tag", "eigener_anspruch",
+                      "kontakt_index", "offene_fehler", "offene_je_tag", "_auto_kandidaten_gerechnet",
+                      "_rabattierte_namen_am", "eigener_anspruch",
                       "zuordnung_vorschlag", "nachhol_kandidaten",
                       "offene_checkins", "offene_checkins_zeitraum",
                       "verbrauchte_checkins", "anspruch_bilanz", "nachholung_quelle",
@@ -3344,7 +3345,8 @@ def zuordnung_zuruecknehmen(fall_key: str) -> bool:
     if ok:
         cache_leeren("checkin_zuordnung", "corrections",
                      funktionen=["falsche_zuordnungen", "verbrauchte_checkins",
-                                 "offene_fehler", "offene_je_tag",
+                                 "offene_fehler", "offene_je_tag", "_auto_kandidaten_gerechnet",
+                      "_rabattierte_namen_am",
                                  "offene_checkins", "nachhol_kandidaten",
                                  "anspruch_bilanz"])
     return ok
@@ -3477,10 +3479,12 @@ def als_behoben_markieren(name_norm: str, datum: str,
         "timestamp": datetime.now().isoformat()})
 
     cache_leeren("corrections", funktionen=(
-        "offene_fehler", "offene_je_tag", "verbrauchte_checkins",
+        "offene_fehler", "offene_je_tag", "_auto_kandidaten_gerechnet",
+                      "_rabattierte_namen_am", "verbrauchte_checkins",
         "offene_checkins", "offene_checkins_zeitraum", "nachhol_kandidaten",
         "nachholung_quelle", "anspruch_bilanz")
-        if geloest else ("offene_fehler", "offene_je_tag", "anspruch_bilanz"))
+        if geloest else ("offene_fehler", "offene_je_tag", "_auto_kandidaten_gerechnet",
+                      "_rabattierte_namen_am", "anspruch_bilanz"))
 
 
 def _erledigt_knopf(name_norm: str, datum: str, key: str):
@@ -3553,10 +3557,12 @@ def behebung_zuruecknehmen(name_norm: str, datum: str):
     geloest = zuordnung_zu_fall_loesen(name_norm, datum)
 
     cache_leeren("corrections", funktionen=(
-        "offene_fehler", "offene_je_tag", "verbrauchte_checkins",
+        "offene_fehler", "offene_je_tag", "_auto_kandidaten_gerechnet",
+                      "_rabattierte_namen_am", "verbrauchte_checkins",
         "offene_checkins", "offene_checkins_zeitraum", "nachhol_kandidaten",
         "nachholung_quelle", "mapping_gedeckt_je_tag")
-        if geloest else ("offene_fehler", "offene_je_tag"))
+        if geloest else ("offene_fehler", "offene_je_tag", "_auto_kandidaten_gerechnet",
+                      "_rabattierte_namen_am"))
 
 
 def erledigte_faelle() -> pd.DataFrame:
@@ -3709,8 +3715,14 @@ def zuordnung_vorschlag(name: str, datum_str: str, mail: str = None,
             for k, v in sortiert if v[0] >= 50]
 
 
+@st.cache_data(ttl=600, show_spinner=False)
 def _rabattierte_namen_am(datum: str) -> list:
-    """Alle Namen, die an diesem Tag mit Rabatt gespielt haben."""
+    """
+    Alle Namen, die an diesem Tag mit Rabatt gespielt haben.
+
+    Wird aus eigener_anspruch() für jede Nachholung einzeln gerufen und
+    las dabei jedes Mal das ganze Buchungsblatt. Zwischengespeichert.
+    """
     df = loadsheet("buchungen")
     if df.empty or "analysis_date" not in df.columns:
         return []
@@ -10390,6 +10402,25 @@ def auto_kandidaten_von_checkins(tage: list, schwelle: float) -> list:
 
 def auto_kandidaten(tage: list = None, schwelle: float = None) -> list:
     """
+    Wie _auto_kandidaten_gerechnet, nur mit Zwischenspeicher.
+
+    Diese Suche lief bei JEDEM Bildaufbau der Tagesarbeit komplett neu —
+    über alle Tage, für jeden offenen Fall ein Vorschlagslauf. Auf dem
+    Prüfbestand von 31 Tagen sind das 170 bis 230 ms auf einem schnellen
+    Rechner; in der Cloud entsprechend mehr. Und es kam nichts Neues
+    dabei heraus, solange sich an den Daten nichts geändert hat.
+    """
+    if schwelle is None:
+        schwelle = float(einstellung("auto_schwelle", AUTO_SCHWELLE_STANDARD))
+    if tage is None:
+        tage = verfuegbare_tage()
+    return _auto_kandidaten_gerechnet(tuple(str(t) for t in tage),
+                                      float(schwelle))
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _auto_kandidaten_gerechnet(tage: tuple, schwelle: float) -> list:
+    """
     Fälle, bei denen die Zuordnung eindeutig genug ist, um sie ohne
     Rückfrage zu übernehmen.
 
@@ -10406,11 +10437,6 @@ def auto_kandidaten(tage: list = None, schwelle: float = None) -> list:
 
     → [{datum, name, name_norm, checkin, checkin_norm, score, grund}, …]
     """
-    if schwelle is None:
-        schwelle = float(einstellung("auto_schwelle", AUTO_SCHWELLE_STANDARD))
-    if tage is None:
-        tage = verfuegbare_tage()
-
     gefunden = []
     for tag in tage:
         offen = offene_fehler(tag)
@@ -12630,7 +12656,8 @@ def nachholung_speichern(checkin_datum: str, checkin_name: str,
     # Ein zugeordneter Check-in ist immer eine Nachholung — EGYM vergütet.
     als_behoben_markieren(fall_name, fall_datum, grund="nachgeholt")
     cache_leeren("checkin_zuordnung", "corrections",
-                 funktionen=("offene_fehler", "offene_je_tag",
+                 funktionen=("offene_fehler", "offene_je_tag", "_auto_kandidaten_gerechnet",
+                      "_rabattierte_namen_am",
                              "verbrauchte_checkins", "offene_checkins",
                              "offene_checkins_zeitraum", "zuordnung_vorschlag",
                              "nachhol_kandidaten", "nachholung_quelle",
