@@ -7530,29 +7530,64 @@ def buchungs_luecken(bdf, slots: list, arten: dict = None) -> tuple:
         # es doch einer. Das trifft zwei Sorten: 0,00 € ohne
         # Free-payment-Kennzeichen, und Beträge wie 9,00 €, die zufällig
         # anderswo ein voller Anteil sind.
-        moegliche = [round(anteil - k, 2) for k in abzug_kandidaten(start.date())]
-        moegliche = [m for m in moegliche if m >= 0] + [0.0]
-        korrigierbar = []
+        # Wie viele rabattierte Plätze steckt eine Zahlung ab? Ein
+        # Zahler deckt oft mehrere: Jonas.valentino zahlte am 05.08.
+        # 1,00 € — das sind ZWEI Anteile zu je 0,50 €, seiner und der
+        # von Katja Hero. Playtomic fasst das in einer Zeile zusammen.
+        reste = sorted({round(anteil - k, 2)
+                        for k in abzug_kandidaten(start.date())
+                        if anteil - k >= -0.005}, reverse=True)
+
+        def _deckt(betraege) -> int:
+            treffer = 0
+            for b in betraege:
+                for rest in reste:
+                    if rest <= 0.005:
+                        if abs(b) < 0.005:
+                            treffer += 1
+                            break
+                    elif b > 0.005:
+                        n_ = b / rest
+                        if abs(n_ - round(n_)) < 0.01 and 1 <= round(n_) <= spieler:
+                            treffer += int(round(n_))
+                            break
+            return treffer
+
+        korrigierbar, gaeste = [], 0
         for n in namen:
             k = (tag, zeit, normalize_name(n))
-            if k not in bekannt or arten.get(k) == "wellpass":
+            if k not in bekannt:
                 continue
-            if any(abs(b - m) < 0.005
-                   for b in plaetze_von.get(k, []) for m in moegliche):
+            d = _deckt(plaetze_von.get(k, []))
+            if arten.get(k) == "wellpass":
+                gaeste += max(0, d - 1)     # weitere Plätze gehören Gästen
+            elif d:
                 korrigierbar.append((n, k))
+                gaeste += d - 1
 
-        if len(ohne) + len(korrigierbar) != soll - hat:
+        # Wer gar keine Zahlungszeile hat, braucht kein Gast-Kontingent —
+        # bei ihm hat Playtomic die Zeile schlicht nicht angelegt.
+        rest_bedarf = soll - hat - len(korrigierbar)
+        if rest_bedarf != len(ohne):
+            wer = ", ".join(ohne) if ohne else "niemand ohne Zahlungszeile"
             unklar.append(
-                f"{datum_kurz(tag)} {zeit} · {r.get('resource_name', '')}: "
-                f"{soll - hat} Rabatt(e) ohne Zahlungszeile, aber "
-                f"{len(ohne)} Teilnehmer kommen dafür in Frage")
+                f"{datum_kurz(tag)} {zeit} · {r.get('resource_name', '')} — "
+                f"{soll - hat} Rabatt fehlt, {len(ohne)} kommen in Frage: "
+                f"{wer}. Platzpreis {euro(liste)}, kassiert {euro(preis)}, "
+                f"Anteil {euro(anteil)}")
             continue
 
         for n, k in korrigierbar:
+            # Der eigene Anteil ist der kleinste Rabattpreis, der in
+            # seinen Zeilen steckt — den Rest hat er für Gäste gezahlt.
+            eigene = [b for b in plaetze_von.get(k, [])
+                      if any(abs(b - r) < 0.005 or
+                             (r > 0.005 and abs(b / r - round(b / r)) < 0.01)
+                             for r in reste)]
             korrekturen[k] = {
                 "name": n, "anteil": round(anteil, 2),
-                "gezahlt": min(plaetze_von.get(k, [0.0]),
-                               key=lambda b: min(abs(b - m) for m in moegliche)),
+                "gezahlt": min(reste) if not eigene else min(
+                    min(eigene), min(r for r in reste if r >= 0)),
             }
         for n in ohne:
             fehlend.append({
@@ -7670,7 +7705,7 @@ def _analysieren_zahlungen(pdf, cdf, bdf=None) -> bool:
         if c is not None:
             c["benutzt"] = True
         nn, name = z["name_norm"], z["name"]
-        team = nn in TEAM_NORM
+        team = nn in GESCHENK_NORM
         buchungen_out.append({
             "Datum": str(z["datum"]), "Name": name, "Name_norm": nn,
             "Email": email_fuer(name) or "",
@@ -7705,7 +7740,13 @@ def _analysieren_zahlungen(pdf, cdf, bdf=None) -> bool:
         idx = next((k for k, (ag, _t) in enumerate(ansprueche) if ag is g), None)
         c, punkte, abstand, exakt = treffer.get(idx, (None, 0.0, 0, False))
         nn, name = g["name_norm"], g["name"]
-        team = nn in TEAM_NORM
+        # GESCHENK_NORM statt TEAM_NORM: darin stehen ausser Team und
+        # Familie auch Spieler, die grundsätzlich frei spielen. Andrej
+        # Miller hat bei Playtomic einen Benefit hinterlegt und zahlt
+        # nie — ein offener Fall entsteht bei ihm nie, egal was die
+        # Preisrechnung sagt. Die Liste steht in der Konfiguration
+        # unter "geschenk_checkins".
+        team = nn in GESCHENK_NORM
         rabatt = art == "wellpass"
         # Über eine bestätigte Verknüpfung zählt der Check-in ebenfalls
         if c is None and nn in mapping:
