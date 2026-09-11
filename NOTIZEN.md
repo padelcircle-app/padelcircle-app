@@ -103,6 +103,14 @@ Monaten, das ist zumutbar.
   „Neu berechnen" über den alten Pfad, wo Spieler verloren gehen.
 - **Nur Tage prüfen, für die auch Zahlungen da sind.** Ein
   Buchungsexport aus einem anderen Zeitraum erfand sonst 67 Ansprüche.
+- **Neu berechnen nur mit abgelegter Buchungsdatei.** Die Tage werden
+  ersetzt; ohne Buchungsdatei fielen fremdbezahlte Plätze und Korrekturen
+  lautlos weg. Solche Tage werden deshalb übersprungen. Nachreichen geht
+  mit „Nur Buchungsdatei ablegen". Alles, was vor `3f990a4` hochgeladen
+  wurde, hat keine abgelegte Buchungsdatei.
+- **Wer hat verknüpft, steht in `confirmed_by`.** „manuell" = Marcel,
+  alles andere = die App. Die Anzeige muss das unterscheiden — „bestätigte
+  Verknüpfung" für beides las sich, als hätte Marcel zugeordnet.
 - **Summen sagen nichts.** Zwei Fehler haben sich hinter einer
   unveränderten Gesamtzahl versteckt. Immer alt gegen neu diffen und
   die geänderten **Zeilen** lesen.

@@ -2021,6 +2021,12 @@ def mapping_roh() -> dict:
     return mapping
 
 
+def _von_dir(eintrag) -> bool:
+    """Hat Marcel diese Verknüpfung selbst angelegt — oder die App?"""
+    return (isinstance(eintrag, dict)
+            and str(eintrag.get("confirmed_by", "")).strip().lower() == "manuell")
+
+
 def mapping_laden() -> dict:
     """
     Die Verknüpfungen, die angewandt werden dürfen.
@@ -2068,7 +2074,7 @@ def mapping_hinzufuegen(buchung_name: str, checkin_name: str, confidence=100):
     return True
 
 
-def mapping_mehrere_hinzufuegen(paare: list):
+def mapping_mehrere_hinzufuegen(paare: list, confirmed_by: str = "automatisch"):
     """
     Mehrere Verknüpfungen auf einmal — ein Schreibvorgang statt einer
     pro Paar. Bei zwanzig Zuordnungen ist das der Unterschied zwischen
@@ -2089,7 +2095,7 @@ def mapping_mehrere_hinzufuegen(paare: list):
             "checkin_name": checkin_name,
             "confidence": confidence,
             "timestamp": jetzt,
-            "confirmed_by": "automatisch",
+            "confirmed_by": confirmed_by,
         }
     mapping_speichern(m)
 
@@ -6491,21 +6497,43 @@ def _neu_berechnen_zahlungen(tage: list) -> bool:
 
     # Der abgelegte Buchungsexport gehört dazu — ohne ihn fehlen die
     # fremdbezahlten Plätze und alles, was nur er belegt.
+    #
+    # Tage OHNE abgelegte Buchungsdatei werden übersprungen, nicht ohne sie
+    # gerechnet. Die Tage werden ja ersetzt — ohne die Buchungsdatei fielen
+    # dabei alle Plätze weg, die nur sie kennt: Lisa Schmiema, Danja Mayer,
+    # jede Korrektur eines mehrdeutigen Betrags. Das wären echte Fälle, die
+    # lautlos verschwinden.
     bdf = gespeicherter_buchungsexport(tage)
     mit_export = (set(bdf["booking_start_date"].map(_tag_von))
                   if not bdf.empty else set())
+    rechenbar = menge & mit_export
     ohne_export = sorted(menge - mit_export)
     if ohne_export:
-        st.caption("Ohne Buchungsexport gerechnet — für diese Tage wurde "
-                   "keiner hochgeladen: "
-                   + ", ".join(datum_kurz(t) for t in ohne_export[:10])
-                   + (" …" if len(ohne_export) > 10 else ""))
+        st.session_state["_neu_hinweis"] = (
+            f"⚠️ <b>{len(ohne_export)} "
+            + ("Tag" if len(ohne_export) == 1 else "Tage")
+            + " nicht neu gerechnet</b> — dafür ist keine Buchungsdatei "
+            "gespeichert (" + ", ".join(datum_kurz(t) for t in ohne_export[:8])
+            + (" …" if len(ohne_export) > 8 else "") + "). Die Buchungsdatei "
+            "für den Zeitraum unter <i>Zahlungen + Check-ins</i> mit "
+            "„Nur Buchungsdatei ablegen“ nachreichen, dann noch einmal.")
+    if not rechenbar:
+        st.error("❌ Für keinen der gewählten Tage ist eine Buchungsdatei "
+                 "gespeichert — es wurde nichts neu gerechnet.")
+        return False
+
+    pdf = pdf[pdf["Service date"].map(lambda w: str(_slot_zeit(w)[0]) in rechenbar)]
+    cdf = cdf[cdf["Datum"].astype(str).isin(rechenbar)]
+    bdf = bdf[bdf["booking_start_date"].map(_tag_von).isin(rechenbar)]
+    if pdf.empty:
+        st.error("❌ Für diese Tage stehen keine Zahlungszeilen im Bestand.")
+        return False
 
     # Die Tage werden ersetzt, nicht nur überschrieben: Ein Anspruch, den
     # die neue Rechnung nicht mehr sieht, muss auch aus dem Blatt raus.
     tage_mit_zahlungen = {str(_slot_zeit(w)[0]) for w in pdf["Service date"]}
-    return _analysieren_zahlungen(pdf, cdf, bdf if not bdf.empty else None,
-                                  tage_ersetzen=tage_mit_zahlungen & menge)
+    return _analysieren_zahlungen(pdf, cdf, bdf,
+                                  tage_ersetzen=tage_mit_zahlungen & rechenbar)
 
 
 def neu_berechnen(tage=None) -> bool:
@@ -8574,6 +8602,20 @@ def modul_daten():
         if not (z_datei and zc_datei):
             st.caption("Zahlungen und Check-ins werden gebraucht.")
 
+        # Nur die Buchungsdatei ablegen, ohne neuen Abgleich. Für Tage, die
+        # schon im System sind: danach unter Bestand „Neu berechnen".
+        if b_datei and not (z_datei and zc_datei):
+            if st.button("📥 Nur Buchungsdatei ablegen",
+                         use_container_width=True, key="btn_nur_buchungen"):
+                with st.spinner("Wird gespeichert …"):
+                    bdf_allein = parse_bookings(b_datei)
+                    if not bdf_allein.empty:
+                        buchungsexport_speichern(bdf_allein)
+                if not bdf_allein.empty:
+                    st.success(f"✅ {len(bdf_allein)} Buchungen abgelegt. "
+                               "Jetzt unter Bestand → Neu berechnen die Tage "
+                               "neu rechnen.")
+
         # ── Offene Fragen aus dem Buchungsexport ────────────────────
         #
         # Der Zahler hat zwei Gastplätze bezahlt, einen voll und einen
@@ -8851,6 +8893,11 @@ Nummern werden automatisch umgewandelt: `0170…` → `+49170…`
                            "· gelernte Namenszuordnungen\n\n"
                            "· zugeordnete Nachholungen\n\n"
                            "· Zahlungen und Kundenliste")
+
+            # Übersprungene Tage aus dem letzten Lauf — sonst verschwindet
+            # der Hinweis mit dem Neuaufbau der Seite.
+            if st.session_state.get("_neu_hinweis"):
+                box(st.session_state.pop("_neu_hinweis"), "warn")
 
             tage_alle = verfuegbare_tage()
             if not tage_alle:
@@ -11801,10 +11848,17 @@ def checkin_zuordnungen(datum: str) -> pd.DataFrame:
                    if not tag_b.empty else pd.DataFrame())
         weg = "Name identisch"
 
-        # 3. Über eine bestätigte Verknüpfung
+        # 3. Über eine gemerkte Verknüpfung — und wer sie angelegt hat.
+        # Vorher hiess jede „bestätigte Verknüpfung", auch die, die die App
+        # beim Import selbst gelernt hatte. Das las sich, als hättest du
+        # zugeordnet.
         if treffer.empty and ci_norm in rueck and not tag_b.empty:
             treffer = tag_b[tag_b["Name_norm"].astype(str).isin(rueck[ci_norm])]
-            weg = "bestätigte Verknüpfung"
+            gespielt = set(treffer["Name_norm"].astype(str))
+            von_dir = any(_von_dir(mapping.get(b)) for b in rueck[ci_norm]
+                          if b in gespielt)
+            weg = ("von dir verknüpft" if von_dir
+                   else "automatisch verknüpft (App)")
 
         if treffer.empty:
             eintrag["Zugeordnet zu"] = "— keiner Buchung —"
@@ -13643,9 +13697,10 @@ def modul_matching():
                 if st.button(f"Alle {len(sicher)} bestätigen",
                              type="primary", use_container_width=True,
                              key="mm_sammel"):
+                    # Von dir geklickt — also auch als deine gespeichert
                     mapping_mehrere_hinzufuegen(
                         [(v["buchung_norm"], v["checkin_norm"], v["score"])
-                         for v in sicher])
+                         for v in sicher], confirmed_by="manuell")
                     cache_leeren()
                     st.toast(f"{len(sicher)} Verknüpfungen gemerkt.")
                     st.rerun()
@@ -13721,15 +13776,45 @@ def modul_matching():
         if not mapping:
             box("Noch keine Zuordnungen gelernt.", "info")
         else:
-            st.caption(f"{len(mapping)} gespeicherte Zuordnungen")
+            app = [b for b, d in mapping.items() if not _von_dir(d)]
+            st.caption(f"{len(mapping)} gespeicherte Zuordnungen · "
+                       f"{len(mapping) - len(app)} von dir · "
+                       f"{len(app)} von der App")
+
+            # Nur die automatischen weg — deine eigenen Entscheidungen
+            # bleiben. Beim nächsten „Neu berechnen" lernt die App nur
+            # wieder, was an dem Tag erneut eindeutig passt.
+            if app:
+                with st.container(border=True):
+                    st.markdown(f"**{len(app)} Verknüpfungen hat die App "
+                                "selbst angelegt**")
+                    st.caption("Beim Import gelernte Schreibweisen und "
+                               "Übernahmen ab 95 %. Löschen nimmt nur diese "
+                               "weg, deine eigenen bleiben. Danach einmal "
+                               "„Neu berechnen“, dann lernt die App nur "
+                               "neu, was an dem Tag wieder eindeutig passt.")
+                    ok = st.checkbox("Ja, alle automatischen löschen",
+                                     key="mm_auto_ok")
+                    if st.button(f"🗑 {len(app)} automatische löschen",
+                                 disabled=not ok, use_container_width=True,
+                                 key="mm_auto_weg"):
+                        with st.spinner("Wird gespeichert …"):
+                            mapping_speichern({b: d for b, d
+                                               in mapping_roh().items()
+                                               if _von_dir(d)})
+                        st.toast(f"{len(app)} automatische Verknüpfungen "
+                                 "gelöscht.")
+                        st.rerun()
+
             for i, (buchung, details) in enumerate(mapping.items()):
                 ziel = (details["checkin_name"] if isinstance(details, dict)
                         else details)
+                wer = "von dir" if _von_dir(details) else "App"
                 c1, c2 = st.columns([4, 1])
                 with c1:
                     st.markdown(f"<div class='pc-row'>"
                                 f"<span class='nm'>{buchung}</span>"
-                                f"<span class='mt'>↔ {ziel}</span></div>",
+                                f"<span class='mt'>↔ {ziel} · {wer}</span></div>",
                                 unsafe_allow_html=True)
                 with c2:
                     if st.button("Löschen", key=f"mm_del_{i}",
