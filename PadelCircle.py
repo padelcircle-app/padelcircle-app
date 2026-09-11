@@ -2871,7 +2871,21 @@ def hinfaellige_fall_keys() -> set:
         return set()
     if falsch.empty or "fall_key" not in falsch.columns:
         return set()
-    return set(falsch["fall_key"].astype(str))
+
+    # Hinfällig ist ein FALL erst, wenn ihn keine einzige gültige
+    # Zuordnung mehr schliesst. Vorher reichte eine alte, ungültige Zeile:
+    # Wer für so einen Fall einen neuen, passenden Check-in fand und auf
+    # „Nachgeholt" klickte, bekam „Fall geschlossen" angezeigt — und der
+    # Fall stand sofort wieder offen da, weil die alte Zeile weiter am
+    # selben Fall hing. Gespeichert war alles, sichtbar passierte nichts.
+    ungueltig = set(falsch["checkin_key"].astype(str))
+    zuo = loadsheet("checkin_zuordnung", SHEET_SPALTEN["checkin_zuordnung"])
+    gueltig = set()
+    if not zuo.empty and {"checkin_key", "fall_key"} <= set(zuo.columns):
+        gueltig = {fk for ck, fk in zip(zuo["checkin_key"].astype(str),
+                                        zuo["fall_key"].astype(str))
+                   if ck not in ungueltig}
+    return set(falsch["fall_key"].astype(str)) - gueltig
 
 
 def behobene_keys() -> set:
@@ -3604,6 +3618,28 @@ def erledigte_faelle() -> pd.DataFrame:
     return df.sort_values("_ts", ascending=False)
 
 
+def _ohne_zweitscans(offen: pd.DataFrame, alle: pd.DataFrame) -> pd.DataFrame:
+    """
+    Weitere Check-ins einer Person herausnehmen, deren Check-in an dem
+    Tag schon ein Spiel deckt.
+
+    EGYM vergütet pro Person und Tag genau einmal. Berkay Kürekci checkte
+    am 29.08. um 15:20 und um 18:56 ein, der zweite deckte sein Spiel.
+    Der erste stand trotzdem als überzählig da — obwohl für ihn nie Geld
+    kommt und er nichts nachholen kann.
+    """
+    if offen.empty or alle.empty or "Gespielt" not in alle.columns:
+        return offen
+    ja = alle[alle["Gespielt"].astype(str) == "Ja"]
+    if ja.empty:
+        return offen
+    genutzt = set(zip(ja["analysis_date"].astype(str),
+                      ja["Name_norm"].astype(str)))
+    maske = [(str(t), str(n)) not in genutzt
+             for t, n in zip(offen["analysis_date"], offen["Name_norm"])]
+    return offen[maske]
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def offene_checkins(datum_str: str) -> pd.DataFrame:
     """
@@ -3618,7 +3654,8 @@ def offene_checkins(datum_str: str) -> pd.DataFrame:
     tag = c[c["analysis_date"].astype(str) == str(datum_str)]
     if tag.empty or "Gespielt" not in tag.columns:
         return pd.DataFrame()
-    offen = tag[tag["Gespielt"].astype(str) == "Nein"].copy()
+    offen = _ohne_zweitscans(tag[tag["Gespielt"].astype(str) == "Nein"],
+                             tag).copy()
     if offen.empty:
         return offen
 
@@ -3862,7 +3899,8 @@ def checkins_ohne_buchung(datum_str: str) -> pd.DataFrame:
     tag = c[c["analysis_date"].astype(str) == str(datum_str)]
     if tag.empty or "Gespielt" not in tag.columns:
         return pd.DataFrame()
-    return tag[tag["Gespielt"].astype(str) == "Nein"].copy()
+    return _ohne_zweitscans(tag[tag["Gespielt"].astype(str) == "Nein"],
+                            tag).copy()
 
 
 def alle_checkins_ohne_buchung() -> pd.DataFrame:
@@ -3879,13 +3917,13 @@ def alle_checkins_ohne_buchung() -> pd.DataFrame:
     c = loadsheet("checkins")
     if c.empty or "Gespielt" not in c.columns or "analysis_date" not in c.columns:
         return pd.DataFrame()
-    df = c[c["Gespielt"].astype(str) == "Nein"].copy()
+    df = _ohne_zweitscans(c[c["Gespielt"].astype(str) == "Nein"], c).copy()
     if df.empty:
         return df
 
     verbraucht = verbrauchte_checkins()
     if verbraucht:
-        schluessel = [checkin_schluessel(str(t), str(n)) for t, n
+        schluessel =[checkin_schluessel(str(t), str(n)) for t, n
                       in zip(df["analysis_date"], df["Name_norm"])]
         df = df[[k not in verbraucht for k in schluessel]]
     if df.empty:
@@ -7244,6 +7282,14 @@ def slot_bewerten(g: dict, volle, turniere: dict = None,
                 return "wellpass", f"{euro(pb)} statt {euro(voll)}", voll, pb
 
     if not g["plaetze"]:
+        # Alles Bezahlte wurde erstattet: die Buchung ist storniert. Der
+        # verfallene Anteil daneben ist dann kein offener Betrag, sondern
+        # der Rest derselben Stornierung. Steffi Gengenbach, 31.08. 17:30:
+        # 0 € bezahlt, 0 € erstattet, 11 € verfallen — im Buchungsexport
+        # zweimal CANCELED. Sie stand als offener Wellpass-Fall da. In Juli
+        # und August der einzige Fall, der hier durchlief.
+        if g.get("erstattet"):
+            return "storniert", "erstattet — Buchung storniert", 0.0, 0.0
         # Kein bezahlter Platz übrig — bleibt nur ein noch offener.
         bv = g["verfallen"]
         for kand in kandidaten:
@@ -7671,6 +7717,8 @@ def buchungs_luecken(bdf, slots: list, arten: dict = None) -> tuple:
             d = _deckt(plaetze_von.get(k, []))
             if arten.get(k) == "wellpass":
                 gaeste += max(0, d - 1)     # weitere Plätze gehören Gästen
+            elif arten.get(k) == ZAHLT_FUER_GAST:
+                gaeste += d                 # sein Rabattplatz ist der des Gastes
             elif d:
                 korrigierbar.append((n, k))
                 gaeste += d - 1
@@ -7718,6 +7766,86 @@ def buchungs_luecken(bdf, slots: list, arten: dict = None) -> tuple:
     return fehlend, korrekturen, unklar
 
 
+ZAHLT_FUER_GAST = "zahlt_fuer_gast"
+
+
+def wellpass_platz_beim_gast(bdf, bewertet: list, checkins: list) -> set:
+    """
+    Zahler, deren Wellpass-Platz in Wahrheit einem Mitspieler gehört.
+
+    Wer für einen Mitspieler mitbezahlt, bekommt dessen Platz als eigene
+    Zeile aufs Konto. Ist dieser Platz über Wellpass gedeckt, steht der
+    Zahler mit einem 0-€-Platz da und gilt selbst als Wellpass-Spieler.
+    Maximilian Birk, 31.08. 20:00: 0 € und 9 € auf seinem Konto, laut
+    Buchung mit Danja Mayer, die keine eigene Zeile hat. Birk hat in zwei
+    Monaten nie eingecheckt, Danja um 20:00. Der Fall stand bei Birk,
+    Danjas Check-in als überzählig daneben.
+
+    Umgebucht wird nur, wenn alles zusammenpasst — sonst bleibt es, wie es
+    war:
+      • genau EIN rabattierter Platz, daneben mindestens ein voller,
+      • der Zahler hat nie eingecheckt — weder in dieser Datei noch im
+        gespeicherten Bestand, auch nicht unter ähnlicher Schreibweise
+        oder über eine Verknüpfung,
+      • genau EIN Mitspieler ohne eigene Zahlungszeile hat an dem Tag
+        eingecheckt.
+    In Juli und August traf das genau diesen einen Fall.
+
+    → {(datum, zeit, name_norm) der Zahler}
+    """
+    if bdf is None or getattr(bdf, "empty", True) or not checkins:
+        return set()
+    if not {"booking_start_date", "participant_name_1"} <= set(bdf.columns):
+        return set()
+
+    bekannt = {(str(g["datum"]), g["zeit"], g["name_norm"])
+               for g, *_ in bewertet}
+    eingecheckt_am = {(str(c["datum"]), c["name_norm"]) for c in checkins}
+    ci_namen = {c["name_norm"] for c in checkins}
+    bestand = loadsheet("checkins")
+    if not bestand.empty and "Name_norm" in bestand.columns:
+        ci_namen |= set(bestand["Name_norm"].astype(str))
+    mapping = mapping_laden()
+
+    teilnehmer = {}
+    for _, r in bdf.iterrows():
+        if str(r.get("status", "")).strip().upper() == "CANCELED":
+            continue
+        start = parse_datetime_safe(r.get("booking_start_date"))
+        if start is None:
+            continue
+        namen = [str(r.get(f"participant_name_{i}", "") or "").strip()
+                 for i in range(1, 21)]
+        teilnehmer.setdefault(
+            (start.strftime("%Y-%m-%d"), start.strftime("%H:%M")), []).append(
+            [n for n in namen if n and n.lower() != "nan"])
+
+    umbuchen = set()
+    for g, art, _txt, _voll, _eigen in bewertet:
+        if art != "wellpass" or len(g["plaetze"]) < 2:
+            continue
+        anteile = moegliche_anteile(g["datum"], g.get("minute", -1))
+        volle_plaetze = sum(1 for pl in g["plaetze"]
+                            if pl["betrag"] > 0 and pl["betrag"] in anteile)
+        if not volle_plaetze or len(g["plaetze"]) - volle_plaetze != 1:
+            continue
+        nn = g["name_norm"]
+        if (nn in mapping or nn in ci_namen
+                or any(namen_decken_sich(nn, c) for c in ci_namen)):
+            continue
+        tag, zeit = str(g["datum"]), g["zeit"]
+        for namen in teilnehmer.get((tag, zeit), []):
+            if nn not in {normalize_name(n) for n in namen}:
+                continue
+            da = [n for n in namen
+                  if (tag, zeit, normalize_name(n)) not in bekannt
+                  and (tag, normalize_name(n)) in eingecheckt_am]
+            if len(da) == 1:
+                umbuchen.add((tag, zeit, nn))
+            break
+    return umbuchen
+
+
 def _analysieren_zahlungen(pdf, cdf, bdf=None) -> bool:
     """
     Wellpass-Abgleich allein aus Zahlungen und Check-ins.
@@ -7747,8 +7875,21 @@ def _analysieren_zahlungen(pdf, cdf, bdf=None) -> bool:
     # der Zahlungsdatei überhaupt nicht. Der Buchungsexport nennt sie —
     # siehe buchungs_luecken(). Sie kommen als eigene Ansprüche dazu und
     # laufen ab hier durch dieselbe Check-in-Zuordnung wie alle anderen.
+    # Ein Wellpass-Platz auf dem Konto des Zahlers kann dem Mitspieler
+    # gehören — siehe wellpass_platz_beim_gast(). Der Zahler wird dann
+    # Vollzahler, und buchungs_luecken() nimmt den Mitspieler auf.
+    umbuchen = wellpass_platz_beim_gast(bdf, bewertet, checkins)
+    if umbuchen:
+        bewertet = [
+            (g, "vollzahler", "", max(pl["betrag"] for pl in g["plaetze"]),
+             max(pl["betrag"] for pl in g["plaetze"]))
+            if (str(g["datum"]), g["zeit"], g["name_norm"]) in umbuchen
+            else (g, art, txt, voll, eigen)
+            for g, art, txt, voll, eigen in bewertet]
     arten = {(str(g["datum"]), g["zeit"], g["name_norm"]): art
              for g, art, _t, _v, _a in bewertet}
+    for k in umbuchen:
+        arten[k] = ZAHLT_FUER_GAST
     zusatz, korrekturen, unklar = buchungs_luecken(bdf, slots, arten)
     if korrekturen:
         # Die Buchung kennt den echten Anteil und sagt, wie viele Rabatte
@@ -12534,12 +12675,21 @@ def verbrauchte_checkins() -> dict:
     df = loadsheet("checkin_zuordnung", SHEET_SPALTEN["checkin_zuordnung"])
     if df.empty or "checkin_key" not in df.columns:
         return {}
-    # Hinfällige Zuordnungen geben den Check-in wieder frei — sonst
-    # bliebe er an einem Fall hängen, der gar nicht mehr geschlossen ist.
-    hin = hinfaellige_fall_keys()
+    # Ungültige Zuordnungen geben ihren Check-in wieder frei — sonst
+    # bliebe er an einem Fall hängen, den er gar nicht schliessen kann.
+    # Entschieden wird je Check-in, nicht je Fall: Hat ein Fall neben der
+    # alten, ungültigen Zeile inzwischen eine gültige, ist deren Check-in
+    # sehr wohl verbraucht.
+    try:
+        falsch = falsche_zuordnungen()
+    except Exception:
+        falsch = pd.DataFrame()
+    ungueltig = (set(falsch["checkin_key"].astype(str))
+                 if not falsch.empty and "checkin_key" in falsch.columns
+                 else set())
     return {ck: fk for ck, fk in zip(df["checkin_key"].astype(str),
                                      df["fall_key"].astype(str))
-            if fk not in hin}
+            if ck not in ungueltig}
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -12644,7 +12794,7 @@ def nachholung_speichern(checkin_datum: str, checkin_name: str,
                  "pro Person und Tag nur einmal.")
         return False
 
-    sheet_zeile_setzen("checkin_zuordnung", {
+    neu = {
         "checkin_key": ck,
         "fall_key": fk,
         "checkin_datum": checkin_datum,
@@ -12652,9 +12802,31 @@ def nachholung_speichern(checkin_datum: str, checkin_name: str,
         "fall_datum": fall_datum,
         "fall_name": fall_name,
         "timestamp": datetime.now().isoformat(),
-    }, schluessel_spalte="checkin_key")
-    # Ein zugeordneter Check-in ist immer eine Nachholung — EGYM vergütet.
-    als_behoben_markieren(fall_name, fall_datum, grund="nachgeholt")
+    }
+    # Zwei Schreibvorgänge bei Google dauern ein paar Sekunden. Ohne
+    # Anzeige sieht das aus, als hätte der Klick nichts bewirkt.
+    with st.spinner("Wird gespeichert …"):
+        # Alte, ungültige Zuordnungen desselben Falls gehen mit raus. Sie
+        # schliessen nichts mehr, stünden aber weiter unter „Zuordnungen,
+        # die vermutlich nicht stimmen" — und deren „Zurücknehmen" löst
+        # alle Zeilen eines Falls, also auch die neue.
+        zuo = loadsheet("checkin_zuordnung", SHEET_SPALTEN["checkin_zuordnung"])
+        falsch = falsche_zuordnungen()
+        ungueltig = (set(falsch["checkin_key"].astype(str)) - {ck}
+                     if not falsch.empty else set())
+        veraltet = pd.Series(False, index=zuo.index)
+        if ungueltig and {"checkin_key", "fall_key"} <= set(zuo.columns):
+            veraltet = ((zuo["fall_key"].astype(str) == fk)
+                        & zuo["checkin_key"].astype(str).isin(ungueltig))
+        if veraltet.any():
+            rest = zuo[~veraltet & (zuo["checkin_key"].astype(str) != ck)]
+            savesheet(pd.concat([rest, pd.DataFrame([neu])], ignore_index=True),
+                      "checkin_zuordnung")
+        else:
+            sheet_zeile_setzen("checkin_zuordnung", neu,
+                               schluessel_spalte="checkin_key")
+        # Ein zugeordneter Check-in ist immer eine Nachholung — EGYM vergütet.
+        als_behoben_markieren(fall_name, fall_datum, grund="nachgeholt")
     cache_leeren("checkin_zuordnung", "corrections",
                  funktionen=("offene_fehler", "offene_je_tag", "_auto_kandidaten_gerechnet",
                       "_rabattierte_namen_am",
@@ -12662,7 +12834,9 @@ def nachholung_speichern(checkin_datum: str, checkin_name: str,
                              "offene_checkins_zeitraum", "zuordnung_vorschlag",
                              "nachhol_kandidaten", "nachholung_quelle",
                              "anspruch_bilanz", "eigener_anspruch",
-                             "anspruch_verdacht"))
+                             "anspruch_verdacht", "falsche_zuordnungen",
+                             "mapping_gedeckt_je_tag",
+                             "mapping_belegte_checkins"))
     return True
 
 
@@ -12706,7 +12880,7 @@ def offene_checkins_zeitraum(von: date, bis: date,
     if df.empty or "Gespielt" not in df.columns:
         return pd.DataFrame()
 
-    df = df[df["Gespielt"].astype(str) == "Nein"].copy()
+    df = _ohne_zweitscans(df[df["Gespielt"].astype(str) == "Nein"], df).copy()
     if df.empty:
         return df
 

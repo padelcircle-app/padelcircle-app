@@ -107,12 +107,54 @@ Monaten, das ist zumutbar.
   unveränderten Gesamtzahl versteckt. Immer alt gegen neu diffen und
   die geänderten **Zeilen** lesen.
 
-## Was zuletzt offen war
+## Was zuletzt offen war (Stand 11.09.2026)
 
-- Dashboard aufräumen: beim Tag nur die Zahlen, Auslastung als
-  Ø Stundenauslastung getrennt nach Double und Single, und die
-  Handlungsvorschläge ausdünnen (gewünscht bleiben: anschreiben,
-  zuordnen, freigeben).
-- Der Datei fehlt eine Aufteilung. 13.500 Zeilen sind für eine Datei
-  zu viel; beim nächsten grösseren Modul lohnt sich der Schnitt in
-  ein Modul je Datei plus ein gemeinsames Fundament.
+In dieser Reihenfolge:
+
+1. ✅ **„Nachgeholt — Fall schliessen" tut nichts.** Ursache: Hinfällig
+   wurde je FALL entschieden. Hing an einem Fall noch eine alte,
+   ungültige Zuordnung (Check-in am eigenen Tag gebraucht), hielt sie
+   ihn offen — auch nachdem eine neue, gültige gespeichert war. Jetzt je
+   Zuordnung; beim Nachholen fliegt die alte Zeile mit raus; Spinner.
+2. **Drei von Hand geprüfte Tage** (Excel-Tage 29., 30., 31.08.,
+   `Checkins_2026-08-2x-….xlsx` in `~/Downloads`). Links stimmte die App
+   bis auf zwei Fälle. Erledigt:
+   - ✅ Zweiter Scan derselben Person am selben Tag stand als überzählig
+     (Berkay Kürekci; im Juli/August 22 solche).
+   - ✅ Steffi Gengenbach 31.08.: ganz erstattet + verfallener Rest galt
+     als „noch offen" — war storniert.
+   - ✅ Maximilian Birk / Danja Mayer 31.08.: Birk bezahlte Danjas
+     0-€-Wellpass-Platz mit, der Fall stand bei ihm. `wellpass_platz_beim_gast()`.
+   - offen: Barbara Gekeler 30.08. spielte in Nico Brunos Buchung ohne
+     Rabatt, steht aber als „keine passende Buchung". Braucht die
+     Teilnehmer aus dem Buchungsexport → Punkt 4.
+   - nicht lösbar: Maya Bitzer 30.08. war vermutlich der namenlose
+     vierte Platz bei Lina/Kevin/Simon um 13:00. Aus den Daten nicht
+     belegbar. Nico Bruno fehlte bei Marcel rechts — im frischen Lauf
+     steht er korrekt da; live vermutlich schon zugeordnet.
+3. **Name-Abgleich nur ab 95 % automatisch** übernehmen und anwenden,
+   den Rest ordnet Marcel am Tag selbst zu. Übernommene Verknüpfungen
+   merken und künftig direkt zuordnen — **ohne** dafür erst einen
+   offenen Fall anzulegen.
+4. **„Neu berechnen" für gewählte Tage**, damit man für geänderte
+   Regeln nicht löschen und neu hochladen muss. Den Knopf gibt es
+   (Daten-Zentrale → Bestand), er ist aber für Zahlungstage kaputt:
+   Der Buchungsexport wird nirgends gespeichert, also rechnet er ohne
+   ihn (fremdbezahlte Plätze, Korrekturen, Birk/Danja fehlen), und
+   Zeilen, die wegfallen (Steffi), bleiben stehen. → Buchungsexport in
+   eigenem Blatt speichern, beim Neu-Rechnen mitgeben, Tage ersetzen
+   statt nur überschreiben.
+5. Frage: Alle Tage bis Ende August sind hochgeladen, die alten sind
+   längst abgearbeitet. Einfach alles auf erledigt setzen? → dafür
+   eine saubere Lösung anbieten statt hunderter Einzelklicks.
+6. Dashboard (angefangen, noch nichts geändert): beim **Tag** nur die
+   Zahlen; **Auslastung** als Ø Stundenauslastung Double gegen Single;
+   die **Handlungsvorschläge im Reiter Auslastung** (Rückgang / tote
+   Prime-Time / Preis-Kandidat) auf wenige sinnvolle eindampfen.
+   Court und Dauer stehen nur im Buchungsexport und dürfen nicht in
+   `buchungen` (siehe Fallen) → eigenes Blatt `belegung`, sonst
+   verschwindet die Auslastung nach dem Neu-Import.
+7. Marcel schickt noch weitere Punkte.
+
+Länger offen: Die Datei ist mit 13.700 Zeilen zu gross; beim nächsten
+grösseren Modul in ein Modul je Datei plus Fundament schneiden.
