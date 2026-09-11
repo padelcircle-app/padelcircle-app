@@ -132,7 +132,7 @@ In dieser Reihenfolge:
      vierte Platz bei Lina/Kevin/Simon um 13:00. Aus den Daten nicht
      belegbar. Nico Bruno fehlte bei Marcel rechts — im frischen Lauf
      steht er korrekt da; live vermutlich schon zugeordnet.
-3. **Name-Abgleich nur ab 95 % automatisch** (gebaut, in Prüfung).
+3. ✅ **Name-Abgleich nur ab 95 % automatisch** (`3f990a4`).
    `AUTO_SCHWELLE_MIN = 95` — Tagesarbeit, Einstellungen und
    Sammelbestätigung gehen nie darunter. Beim Import werden die
    eindeutigen gleich übernommen, und gemerkte Verknüpfungen greifen
@@ -140,7 +140,8 @@ In dieser Reihenfolge:
    entsteht für sie kein offener Fall mehr. Unverändert bleibt die
    Schreibweisen-Erkennung im Import selbst (z. B. „Mika" ↔ „Mika
    Strele") — die hat Marcels Handprüfung bestätigt.
-4. **„Neu berechnen"** (gebaut, in Prüfung). War für Zahlungstage kaputt:
+4. ✅ **„Neu berechnen"** (`3f990a4`). Geprüft: August importiert, veraltete
+   Zeile eingeschleust, neu gerechnet → Zeile weg, Anzeige identisch. War für Zahlungstage kaputt:
    ohne Buchungsexport gerechnet, und weggefallene Zeilen blieben
    stehen. Jetzt: Blatt `buchungsexport` (lazy, ohne E-Mails) wird beim
    Import abgelegt, beim Neu-Rechnen mitgegeben, und die Tage werden per
@@ -148,17 +149,20 @@ In dieser Reihenfolge:
    Schutz: lässt sich das Blatt nicht lesen, wird nichts geschrieben.
    Liegt der Export erst ab dem nächsten Upload vor: Juli/August einmal
    mit allen vier Dateien neu hochladen.
-5. **Alte Tage sammelweise erledigen** (gebaut, in Prüfung). Daten-Zentrale
+5. ✅ **Alte Tage sammelweise erledigen** (`3f990a4`). Daten-Zentrale
    → Bestand → „Alte Tage als erledigt markieren": bis zu einem Tag
    alle offenen Fälle mit Grund „Altbestand" schliessen, nur angehängt,
    jederzeit zurücknehmbar.
-6. Dashboard (angefangen, noch nichts geändert): beim **Tag** nur die
-   Zahlen; **Auslastung** als Ø Stundenauslastung Double gegen Single;
-   die **Handlungsvorschläge im Reiter Auslastung** (Rückgang / tote
-   Prime-Time / Preis-Kandidat) auf wenige sinnvolle eindampfen.
-   Court und Dauer stehen nur im Buchungsexport und dürfen nicht in
-   `buchungen` (siehe Fallen) → eigenes Blatt `belegung`, sonst
-   verschwindet die Auslastung nach dem Neu-Import.
+6. **Dashboard** (gebaut, in Prüfung). **Tag**: nur noch die Kennzahlen.
+   **Auslastung** liest aus dem Blatt `buchungsexport` (ältere Tage
+   weiter aus `buchungen` mit Court): Ø Double, Ø Single, 17–22 Uhr und
+   eine Grafik je Uhrzeit. Juli + August gemessen: **Double Ø 42 %,
+   Single Ø 72 %**; Double vormittags werktags 4–11 %, Single abends
+   96–98 %. **Handlungsvorschläge** jetzt in Court-Minuten statt
+   Zahlungszeilen, höchstens fünf: Rückgang (≥ 20 Punkte), Leerlauf
+   (Vormittag < 15 %), schwächster Abend (< 60 %), Preis (Tagespreis
+   trotz ≥ 75 %). Mit „Handlungsvorschläge" meinte Marcel diese Liste,
+   nicht „Was als Nächstes dran ist" auf der Startseite — die bleibt.
 7. Marcel schickt noch weitere Punkte.
 
 Länger offen: Die Datei ist mit 13.700 Zeilen zu gross; beim nächsten

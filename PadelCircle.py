@@ -1238,7 +1238,7 @@ ABGELEITETE_CACHES = ("tages_kennzahlen", "verfuegbare_tage", "monats_kennzahlen
                       # Auslastung, Punkte, Absagen, Wetter — dieselbe Regel:
                       # Was aus den Blättern rechnet, muss nach einer
                       # Änderung neu rechnen.
-                      "belegte_slots", "auslastung_raster", "auslastung_slot",
+                      "belegte_slots", "auslastung_daten_da", "auslastung_raster", "auslastung_slot",
                       "circle_points", "circle_points_monate",
                       "circle_points_verlauf", "absagen_liste",
                       "absagen_ignoriert",
@@ -2559,9 +2559,70 @@ def court_daten_da() -> bool:
     return bool(b["Court"].astype(str).str.strip().ne("").any())
 
 
+@st.cache_data(ttl=900, show_spinner=False)
 def belegte_slots(von: str = None, bis: str = None) -> pd.DataFrame:
     """
     Jede Buchung einmal, aufgelöst nach Court.
+
+    Erste Quelle ist der abgelegte Buchungsexport. Seit dem Wechsel auf
+    den Zahlungs-Abgleich steht in `buchungen` kein Court mehr — ohne den
+    Export wäre die Auslastung leer. Für ältere Tage, zu denen kein Export
+    abgelegt ist, bleibt der Weg über `buchungen`.
+    """
+    grenze = von or standort_start()
+    export = _belegte_slots_aus_export(grenze, bis)
+    alt = _belegte_slots_aus_buchungen(grenze, bis)
+    if export.empty:
+        return alt
+    if alt.empty:
+        return export
+    return pd.concat([export, alt[~alt["tag"].isin(set(export["tag"]))]],
+                     ignore_index=True)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def auslastung_daten_da() -> bool:
+    """Gibt es Belegungsdaten — aus dem Buchungsexport oder mit Court?"""
+    return not belegte_slots().empty
+
+
+def _belegte_slots_aus_export(von: str, bis: str = None) -> pd.DataFrame:
+    """Belegung aus dem abgelegten Buchungsexport, ohne stornierte."""
+    df = loadsheet("buchungsexport")
+    if df.empty or not {"booking_start_date", "resource_name"} <= set(df.columns):
+        return pd.DataFrame()
+    zeilen = []
+    for _, r in df.iterrows():
+        if str(r.get("status", "")).strip().upper() == "CANCELED":
+            continue
+        start = parse_datetime_safe(r.get("booking_start_date"))
+        if start is None:
+            continue
+        tag = start.date()
+        if str(tag) < str(von) or (bis and str(tag) > str(bis)):
+            continue
+        try:
+            dauer = float(str(r.get("duration (Minuten)", "")).strip())
+        except ValueError:
+            ende = parse_datetime_safe(r.get("booking_end_date"))
+            dauer = (ende - start).total_seconds() / 60 if ende else 0.0
+        if dauer <= 0:
+            continue
+        namen = [str(r.get(f"participant_name_{i}", "") or "").strip()
+                 for i in range(1, 21)]
+        namen = [n for n in namen if n and n.lower() != "nan"]
+        zeilen.append({
+            "tag": tag, "court": court_kurz(r.get("resource_name")),
+            "zeit": start.strftime("%H:%M"), "stunde": start.hour,
+            "minute": start.minute, "dauer": dauer,
+            "wochentag": tag.weekday(), "koepfe": len(namen),
+            "namen": ", ".join(namen)})
+    return pd.DataFrame(zeilen)
+
+
+def _belegte_slots_aus_buchungen(von: str = None, bis: str = None) -> pd.DataFrame:
+    """
+    Jede Buchung einmal, aufgelöst nach Court — aus dem Blatt `buchungen`.
 
     Das Blatt `buchungen` führt eine Zeile je Teilnehmer — vier Zeilen für
     eine Buchung. Für die Belegung zählt der Platz, nicht der Spieler.
@@ -2652,6 +2713,15 @@ def _minuten_je_stunde(stunde: int, dauer: float, minute: int = 0) -> dict:
     return out
 
 
+def _slots_filtern(slots: pd.DataFrame, court: str = None) -> pd.DataFrame:
+    """„Double", „Single" oder ein einzelner Court."""
+    if not court or slots.empty:
+        return slots
+    if court in ("Double", "Single"):
+        return slots[slots["court"].map(ist_single_court) == (court == "Single")]
+    return slots[slots["court"] == court]
+
+
 @st.cache_data(ttl=900, show_spinner=False)
 def auslastung_raster(von: str = None, bis: str = None,
                       court: str = None) -> dict:
@@ -2670,7 +2740,7 @@ def auslastung_raster(von: str = None, bis: str = None,
         return {}
 
     if court:
-        slots = slots[slots["court"] == court]
+        slots = _slots_filtern(slots, court)
         if slots.empty:
             return {}
 
@@ -2688,7 +2758,9 @@ def auslastung_raster(von: str = None, bis: str = None,
         tage[(tag_von + timedelta(days=i)).weekday()] = \
             tage.get((tag_von + timedelta(days=i)).weekday(), 0) + 1
 
-    courts = 1 if court else len(courts_liste())
+    courts = (CONFIG["courts_single"] if court == "Single"
+              else CONFIG["courts_double"] if court == "Double"
+              else 1 if court else len(courts_liste()))
     quote = {}
     for (wt, std), min_ in minuten.items():
         kapazitaet = courts * 60.0 * tage.get(wt, 0)
@@ -2707,7 +2779,7 @@ def auslastung_slot(wochentag: int, stunde: int, von: str = None,
     if slots.empty:
         return pd.DataFrame()
     if court:
-        slots = slots[slots["court"] == court]
+        slots = _slots_filtern(slots, court)
 
     treffer = []
     for _, r in slots.iterrows():
@@ -2726,91 +2798,103 @@ def auslastung_slot(wochentag: int, stunde: int, von: str = None,
 @st.cache_data(ttl=900, show_spinner=False)
 def auslastung_vorschlaege() -> list:
     """
-    Konkrete Handlungsvorschläge statt nur einer Heatmap zum Anschauen.
+    Wenige Vorschläge, jeder mit einer Zahl dahinter.
 
-    Drei Muster, jedes mit eigener Handlungsempfehlung:
-      • Rückläufige Slots — letzte 4 Wochen deutlich schwächer als die
-        4 Wochen davor. Früh erkennbar, bevor ein Slot ganz ausstirbt.
-      • Tote Prime-Time-Slots — ab 16 Uhr oder am Wochenende seit
-        Beginn der Daten ohne eine einzige Buchung.
-      • Dauerhaft volle Nebenzeit-Slots — ausserhalb der Prime Time
-        durchgehend unter den stärksten 10 % aller Slots. Kandidat für
-        einen höheren Preis, statt Nachfrage zu verschenken.
+    Gerechnet in belegten Court-Minuten gegen die Kapazität, getrennt nach
+    Double und Single und nach Preisbändern. Früher zählte die Liste
+    Zahlungszeilen je Wochentag und Stunde: Ein Viertelanteil zählte wie
+    ein ganzer Court, und jede leere Stunde um 23 Uhr wurde zur „toten
+    Prime-Time". Bis zu fünfzehn Kästen, viele ohne Aussage.
 
-    → [{"art": …, "text": …, "wochentag": …, "stunde": …}, …]
+    Vier Muster, höchstens fünf Vorschläge:
+      • Rückgang — letzte vier Wochen ≥ 20 Punkte unter den vier davor
+      • Leerlauf — Vormittag unter der Woche im Schnitt unter 15 %
+      • Schwacher Abend — der schwächste Block 16–22 Uhr, wenn unter 60 %
+      • Preis — ausserhalb des Abendpreises trotzdem ≥ 75 % belegt
+    Erst ab vier Wochen Daten, darunter wäre jeder Wert Zufall.
+
+    → [{"art": …, "text": …, "wert": …}, …]
     """
-    df = _rohdaten_aufbereitet()
-    if df.empty:
+    slots = belegte_slots()
+    if slots.empty:
         return []
-    df = df[df["_buchung"]]
-    if df.empty:
+    erster, letzter = min(slots["tag"]), max(slots["tag"])
+    if (letzter - erster).days < 27:
         return []
 
-    heute = date.today()
-    vorschlaege = []
+    minuten = {}
+    for _, r in slots.iterrows():
+        typ = "Single" if ist_single_court(r["court"]) else "Double"
+        for std, m in _minuten_je_stunde(int(r["stunde"]), r["dauer"],
+                                         int(r.get("minute", 0))).items():
+            k = (typ, r["tag"], std)
+            minuten[k] = minuten.get(k, 0.0) + m
+    courts = {"Double": CONFIG["courts_double"], "Single": CONFIG["courts_single"]}
+    alle_tage = [erster + timedelta(days=i)
+                 for i in range((letzter - erster).days + 1)]
 
-    # ── Rückläufige Slots: letzte 4 Wochen vs. die 4 Wochen davor ───────
-    letzte_4w = df[df["_datum"] >= heute - timedelta(days=28)]
-    davor_4w = df[(df["_datum"] < heute - timedelta(days=28)) &
-                  (df["_datum"] >= heute - timedelta(days=56))]
-    if not letzte_4w.empty and not davor_4w.empty:
-        m_neu = (letzte_4w.groupby(["_wochentag", "_stunde"]).size())
-        m_alt = (davor_4w.groupby(["_wochentag", "_stunde"]).size())
-        for schluessel, alt_anzahl in m_alt.items():
-            if alt_anzahl < 3:
-                continue  # zu wenig Basis für einen verlässlichen Vergleich
-            neu_anzahl = int(m_neu.get(schluessel, 0))
-            rueckgang = prozent(alt_anzahl - neu_anzahl, alt_anzahl)
-            if rueckgang >= 40:
-                wt, std = schluessel
-                vorschlaege.append({
-                    "art": "rueckgang",
-                    "wochentag": int(wt), "stunde": int(std),
-                    "text": (f"{WOCHENTAGE_DE[int(wt)]} {int(std)}:00 Uhr — "
-                             f"{rueckgang:.0f}% weniger Buchungen als in den "
-                             f"4 Wochen davor ({int(alt_anzahl)} → {neu_anzahl}). "
-                             "Läuft der Slot einer festen Gruppe hinterher, die "
-                             "gerade ausbleibt?"),
-                })
+    def quote(typ, stunden, tage):
+        kap = courts[typ] * 60.0 * len(tage) * len(stunden)
+        if not kap:
+            return None
+        return sum(minuten.get((typ, t, s), 0.0)
+                   for t in tage for s in stunden) / kap * 100
 
-    # ── Tote Prime-Time-Slots ─────────────────────────────────────────────
-    gesamt = df.groupby(["_wochentag", "_stunde"]).size()
-    wochen_erfasst = max(1, (df["_datum"].max() - df["_datum"].min()).days // 7)
-    for wt in range(7):
-        for std in range(CONFIG["oeffnung_von"], CONFIG["oeffnung_bis"]):
-            prime = std >= 16 or wt >= 5
-            if not prime:
-                continue
-            if gesamt.get((wt, std), 0) > 0:
-                continue
+    baender = {"06–12": range(6, 12), "12–16": range(12, 16),
+               "16–22": range(16, 22), "22–24": range(22, 24)}
+    rueckgang, abende, preis, leerlauf = [], [], [], []
+
+    neu = [t for t in alle_tage if (letzter - t).days < 28]
+    davor = [t for t in alle_tage if 28 <= (letzter - t).days < 56]
+
+    for typ in ("Double", "Single"):
+        werktage = [t for t in alle_tage if t.weekday() < 5]
+        q = quote(typ, baender["06–12"], werktage)
+        if q is not None and q < 15:
+            leerlauf.append({
+                "art": "leerlauf", "wert": q,
+                "text": (f"Vormittags unter der Woche stehen die "
+                         f"{typ}-Courts fast leer — im Schnitt {q:.0f} % "
+                         "zwischen 6 und 12 Uhr. Platz für Kurse, Firmen- "
+                         "oder Schulangebote.")})
+        for wt in range(7):
+            tage_wt = [t for t in alle_tage if t.weekday() == wt]
+            for band, stunden in baender.items():
+                name = f"{WOCHENTAGE_DE[wt]} {band} Uhr, {typ}"
+                q = quote(typ, stunden, tage_wt)
+                if q is None:
+                    continue
+                if band == "16–22":
+                    abende.append((q, name))
+                abendpreis = wt >= 5 or band in ("16–22", "22–24")
+                if not abendpreis and q >= 75:
+                    preis.append({
+                        "art": "preis", "wert": q,
+                        "text": (f"{name}: {q:.0f} % belegt zum günstigeren "
+                                 "Tagespreis. Die Nachfrage trägt einen "
+                                 "höheren Preis.")})
+                if davor:
+                    q_neu = quote(typ, stunden, [t for t in neu if t.weekday() == wt])
+                    q_alt = quote(typ, stunden, [t for t in davor if t.weekday() == wt])
+                    if (q_neu is not None and q_alt is not None
+                            and q_alt >= 40 and q_alt - q_neu >= 20):
+                        rueckgang.append({
+                            "art": "rueckgang", "wert": q_alt - q_neu,
+                            "text": (f"{name}: {q_alt:.0f} % → {q_neu:.0f} % "
+                                     "in den letzten vier Wochen. Bleibt eine "
+                                     "feste Gruppe weg?")})
+
+    vorschlaege = sorted(rueckgang, key=lambda v: -v["wert"])[:2]
+    vorschlaege += leerlauf[:1]
+    if abende:
+        q, name = min(abende)
+        if q < 60:
             vorschlaege.append({
-                "art": "leer",
-                "wochentag": wt, "stunde": std,
-                "text": (f"{WOCHENTAGE_DE[wt]} {std}:00 Uhr — seit "
-                         f"{wochen_erfasst} Wochen keine einzige Buchung, "
-                         "obwohl Prime-Time-Preis gilt. Kurs, Event oder "
-                         "befristete Aktion könnte den Slot beleben."),
-            })
-
-    # ── Dauerhaft volle Nebenzeit-Slots — Preis-Kandidaten ──────────────
-    if not gesamt.empty:
-        schwelle = gesamt.quantile(0.9)
-        for (wt, std), anzahl in gesamt.items():
-            prime = std >= 16 or wt >= 5
-            if prime or anzahl < schwelle or anzahl < 4:
-                continue
-            vorschlaege.append({
-                "art": "stark",
-                "wochentag": int(wt), "stunde": int(std),
-                "text": (f"{WOCHENTAGE_DE[int(wt)]} {int(std)}:00 Uhr — "
-                         f"{int(anzahl)} Buchungen trotz Nebenzeit-Preis, "
-                         "unter den gefragtesten Slots insgesamt. Nachfrage "
-                         "da für einen höheren Preis oder mehr Kapazität."),
-            })
-
-    reihenfolge = {"rueckgang": 0, "leer": 1, "stark": 2}
-    vorschlaege.sort(key=lambda v: reihenfolge.get(v["art"], 9))
-    return vorschlaege
+                "art": "abend", "wert": q,
+                "text": (f"{name}: nur {q:.0f} % — der schwächste Abend. Ein "
+                         "Event oder Mexicano könnte ihn füllen.")})
+    vorschlaege += sorted(preis, key=lambda v: -v["wert"])[:2]
+    return vorschlaege[:5]
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -9038,109 +9122,6 @@ def _dash_tag():
         with c3:
             kpi("Bälle", euro(k["baelle"]))
 
-    # ── Offene Fehler ───────────────────────────────────────────────────
-    st.markdown("---")
-    fehler = offene_fehler(datum)
-
-    if fehler.empty:
-        serie = sauber_serie(tage)
-        if serie >= 2:
-            streak_banner(serie)
-        else:
-            box("✅ Alle Wellpass-Check-ins sind da.", "ok")
-    else:
-        box(f"⚠️ <b>{len(fehler)} Spieler</b> ohne Check-in. "
-            f"Potenzieller Verlust: {euro(len(fehler) * wellpass_wert_am(datum))}", "warn")
-
-        for _, r in fehler.iterrows():
-            kennung = f"dt_{r['Name_norm']}_{r['Datum']}"
-            c1, c2, c3 = st.columns([3, 2, 1.3])
-            with c1:
-                st.markdown(f"**{r['Name']}**")
-                zeit = str(r.get("Service_Zeit", "")).strip()
-                st.caption(f"{zeit + ' Uhr · ' if zeit else ''}"
-                           f"{euro(r.get('Betrag', 0))}")
-            with c2:
-                nr = telefon_fuer(str(r["Name"]))
-                st.caption(f"📱 {nr}" if nr else "keine Nummer hinterlegt")
-            with c3:
-                _erledigt_knopf(str(r["Name_norm"]), str(r["Datum"]),
-                                key=f"dt_ok_{r['Name_norm']}_{r['Datum']}")
-
-    # ── Erledigte Fälle dieses Tages ────────────────────────────────────
-    erledigt_alle = erledigte_faelle()
-    if not erledigt_alle.empty:
-        erledigt_tag = erledigt_alle[erledigt_alle["datum"].astype(str) == str(datum)]
-        if not erledigt_tag.empty:
-            st.markdown("")
-            with st.expander(f"✅ {len(erledigt_tag)} Fälle als erledigt "
-                             "markiert — versehentlich? Hier zurücknehmen"):
-                for i, (_, e) in enumerate(erledigt_tag.iterrows()):
-                    u1, u2 = st.columns([3, 1.2])
-                    with u1:
-                        info = grund_info(e.get("grund", ""))
-                        label = f"{info['icon']} {info['kurz']}"
-                        st.markdown(f"**{e['Name']}**  {chip(label, 'soft')}",
-                                    unsafe_allow_html=True)
-                        wann = (e["_ts"].strftime("%d.%m. %H:%M")
-                                if pd.notna(e.get("_ts")) else "")
-                        notiz = str(e.get("notiz", "") or "").strip()
-                        zeile = " · ".join(x for x in
-                                           [f"erledigt am {wann}" if wann else "",
-                                            notiz] if x)
-                        if zeile:
-                            st.caption(zeile)
-                    with u2:
-                        if st.button("Wieder öffnen", key=f"dt_undo_{i}_{datum}",
-                                     use_container_width=True):
-                            behebung_zuruecknehmen(str(e["name_norm"]),
-                                                   str(e["datum"]))
-                            st.toast("Fall ist wieder offen.")
-                            st.rerun()
-
-    # ── Check-ins ohne Buchung ──────────────────────────────────────────
-    ohne = checkins_ohne_buchung(datum)
-    if not ohne.empty:
-        st.markdown("")
-        box(f"👀 <b>{len(ohne)} Check-ins ohne passende Buchung.</b> "
-            "Entweder fehlt die Buchung im Playtomic-Export, oder jemand hat "
-            "eingecheckt ohne zu spielen.", "info")
-        with st.expander("Wer war das?"):
-            st.dataframe(ohne[["Name", "Checkin_Zeit"]],
-                         use_container_width=True, hide_index=True)
-
-    # ── Stunden-Verteilung des Tages ────────────────────────────────────
-    tag_daten = tag_details(datum)
-    if not tag_daten.empty and "Service_Zeit" in tag_daten.columns:
-        stunden = (tag_daten["Service_Zeit"].map(stunde_aus_zeit)
-                   .loc[lambda s: s >= 0])
-        if not stunden.empty:
-            st.markdown("")
-            st.markdown("**Wann war was los?**")
-            zaehl = stunden.value_counts().sort_index()
-            alle_std = list(range(CONFIG["oeffnung_von"], CONFIG["oeffnung_bis"]))
-            werte = [int(zaehl.get(s, 0)) for s in alle_std]
-
-            fig = go.Figure(go.Bar(
-                x=[f"{s}:00" for s in alle_std], y=werte,
-                marker_color=[C["volt"] if v == max(werte) and v > 0
-                              else C["blue_soft"] for v in werte],
-                hovertemplate="%{x}<br>%{y} Buchungen<extra></extra>",
-            ))
-            st.plotly_chart(plotly_layout(fig, 250, "Buchungen"),
-                            use_container_width=True)
-
-    with st.expander("Alle Buchungen des Tages"):
-        if tag_daten.empty:
-            st.caption("Keine Buchungen.")
-        else:
-            spalten = [c for c in ["Name", "Service_Zeit", "Betrag", "Check-in",
-                                   "Relevant", "Team"] if c in tag_daten.columns]
-            zeig = tag_daten[spalten].copy()
-            zeig.columns = [{"Service_Zeit": "Zeit", "Relevant": "Wellpass-pflichtig"}
-                            .get(c, c) for c in spalten]
-            st.dataframe(zeig, use_container_width=True, hide_index=True)
-
 
 def _dash_monat():
     tage = verfuegbare_tage()
@@ -9235,8 +9216,11 @@ def _dash_auslastung():
                          "Letzte 8 Wochen", "Letzte 12 Wochen"],
             key="al_zeit")
     with c2:
-        wahl_court = st.selectbox("Court", ["Alle Courts"] + courts_liste(),
-                                  key="al_court")
+        wahl_court = st.selectbox(
+            "Court", ["Alle Courts", "Double", "Single"] + courts_liste(),
+            format_func=lambda c: {"Double": "Alle Double-Courts",
+                                   "Single": "Single Court"}.get(c, c),
+            key="al_court")
     with c3:
         anzeige = st.radio("Anzeige", ["Auslastung %", "Buchungen"],
                            horizontal=True, key="al_modus")
@@ -9308,26 +9292,49 @@ def _dash_auslastung():
                f"{raster['courts']} Court{'s' if raster['courts'] > 1 else ''} · "
                "grau leer, blau mittel, gelb voll")
 
-    # ── Kennzahlen ──────────────────────────────────────────────────────
-    quoten = list(raster["quote"].values())
-    prime = [q for (wt, std), q in raster["quote"].items() if std >= 17]
-    schwach = sorted(((q, wt, std) for (wt, std), q in raster["quote"].items()
-                      if std >= 16), key=lambda x: x[0])
+    # ── Kennzahlen: Double und Single getrennt ──────────────────────────
+    #
+    # Ein Durchschnitt über alle Courts sagt wenig: Der Single Court ist
+    # abends fast immer voll, die Doubles sind vormittags fast leer. In
+    # einer einzigen Zahl verschwimmt beides.
+    stunden_liste = list(stunden)
+    je_typ = {typ: auslastung_raster(von, None, typ)
+              for typ in ("Double", "Single")}
+
+    def _stundenquote(r, std_menge):
+        if not r:
+            return None
+        kap = r["courts"] * 60.0 * sum(r["tage"].values()) * len(std_menge)
+        belegt = sum(m for (_wt, s), m in r["minuten"].items() if s in std_menge)
+        return belegt / kap * 100 if kap else None
+
     k1, k2, k3 = st.columns(3)
     with k1:
-        kapazitaet = raster["courts"] * 60.0 * tage_gesamt * OEFFNUNGSSTUNDEN
-        kpi("Auslastung gesamt",
-            f"{sum(raster['minuten'].values()) / max(kapazitaet, 1) * 100:.0f} %",
-            f"über alle {OEFFNUNGSSTUNDEN} Öffnungsstunden")
+        q = _stundenquote(je_typ["Double"], stunden_liste)
+        kpi("Ø Double", f"{q:.0f} %" if q is not None else "—",
+            f"{CONFIG['courts_double']} Courts · {OEFFNUNGSSTUNDEN} Stunden")
     with k2:
-        kpi("Prime-Time ab 17 Uhr",
-            f"{(sum(prime) / len(prime)) if prime else 0:.0f} %",
-            "hier verdient die Halle")
+        q = _stundenquote(je_typ["Single"], stunden_liste)
+        kpi("Ø Single", f"{q:.0f} %" if q is not None else "—",
+            f"{CONFIG['courts_single']} Court · {OEFFNUNGSSTUNDEN} Stunden")
     with k3:
-        if schwach:
-            q, wt, std = schwach[0]
-            kpi("Schwächster Abendslot", f"{WOCHENTAGE_KURZ[wt]} {std}:00",
-                f"nur {q:.0f} % belegt")
+        abend = [s for s in stunden_liste if 17 <= s < 22]
+        qd = _stundenquote(je_typ["Double"], abend) or 0.0
+        qs = _stundenquote(je_typ["Single"], abend) or 0.0
+        kpi("17–22 Uhr", f"{qd:.0f} % · {qs:.0f} %", "Double · Single")
+
+    # ── Ø Auslastung je Uhrzeit ─────────────────────────────────────────
+    st.markdown("")
+    st.markdown("**Ø Auslastung je Uhrzeit**")
+    fig_std = go.Figure()
+    for typ, farbe in (("Double", C["blue_soft"]), ("Single", C["volt"])):
+        werte = [_stundenquote(je_typ[typ], [s]) or 0.0 for s in stunden_liste]
+        fig_std.add_trace(go.Bar(
+            x=[f"{s}:00" for s in stunden_liste], y=[round(w) for w in werte],
+            name=typ, marker_color=farbe,
+            hovertemplate="%{x}<br>%{y} %<extra>" + typ + "</extra>"))
+    fig_std.update_layout(barmode="group", yaxis_range=[0, 100])
+    st.plotly_chart(plotly_layout(fig_std, 280, "%"), use_container_width=True)
 
     # ── Detail zu einer Zelle ───────────────────────────────────────────
     #
@@ -9361,38 +9368,21 @@ def _dash_auslastung():
 
     # ── Handlungsvorschläge ──────────────────────────────────────────────
     #
-    # Unabhängig vom Monatsfilter oben — Trend und "seit Beginn der
-    # Daten" beziehen sich immer auf den ganzen erfassten Zeitraum,
-    # sonst verschwindet der Rückgang, sobald man einen einzelnen
-    # Monat auswählt.
+    # Über den ganzen erfassten Zeitraum, unabhängig vom Filter oben — ein
+    # Rückgang verschwände sonst, sobald man nur vier Wochen ansieht.
     st.markdown("")
     st.markdown("---")
     st.markdown("##### 📋 Handlungsvorschläge")
 
     vorschlaege = auslastung_vorschlaege()
     if not vorschlaege:
-        box("Noch zu wenig Daten für verlässliche Vorschläge — braucht "
-            "mindestens ein paar Wochen Verlauf.", "info")
+        box("Nichts Auffälliges — oder noch keine vier Wochen Daten.", "info")
     else:
-        art_info = {
-            "rueckgang": ("⚠️", "warn", "Rückläufig"),
-            "leer":      ("👀", "info", "Tote Prime-Time"),
-            "stark":     ("💡", "ok",   "Preis-Kandidat"),
-        }
-        anzahl_je_art = {}
+        art_info = {"rueckgang": ("⚠️", "warn"), "leerlauf": ("💤", "info"),
+                    "abend": ("👀", "info"), "preis": ("💡", "ok")}
         for v in vorschlaege:
-            anzahl_je_art[v["art"]] = anzahl_je_art.get(v["art"], 0) + 1
-
-        zusammenfassung = " · ".join(
-            f"{art_info[art][0]} {n} {art_info[art][2]}"
-            for art, n in anzahl_je_art.items() if art in art_info)
-        st.caption(zusammenfassung)
-
-        for v in vorschlaege[:15]:
-            icon, farbe, _label = art_info.get(v["art"], ("•", "info", ""))
+            icon, farbe = art_info.get(v["art"], ("•", "info"))
             box(f"{icon} {v['text']}", farbe)
-        if len(vorschlaege) > 15:
-            st.caption(f"… und {len(vorschlaege) - 15} weitere.")
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -9933,10 +9923,11 @@ def _dash_einnahmen():
 
 def modul_dashboard():
     head("Business Dashboard", "Umsatz · Auslastung · Abgleich")
-    # „Auslastung" braucht Court und Spieldauer — siehe court_daten_da().
+    # „Auslastung" braucht Court und Spieldauer — die liefert der abgelegte
+    # Buchungsexport. Siehe belegte_slots().
     seiten = [("📅 Tag", _dash_tag), ("💰 Einnahmen", _dash_einnahmen),
               ("📈 Monat", _dash_monat)]
-    if court_daten_da():
+    if auslastung_daten_da():
         seiten.append(("📊 Auslastung", _dash_auslastung))
     seiten += [("⚖️ Monatsabgleich", _dash_abgleich), ("🌦 Wetter", _dash_wetter)]
 
