@@ -132,21 +132,26 @@ In dieser Reihenfolge:
      vierte Platz bei Lina/Kevin/Simon um 13:00. Aus den Daten nicht
      belegbar. Nico Bruno fehlte bei Marcel rechts — im frischen Lauf
      steht er korrekt da; live vermutlich schon zugeordnet.
-3. **Name-Abgleich nur ab 95 % automatisch** übernehmen und anwenden,
-   den Rest ordnet Marcel am Tag selbst zu. Übernommene Verknüpfungen
-   merken und künftig direkt zuordnen — **ohne** dafür erst einen
-   offenen Fall anzulegen.
-4. **„Neu berechnen" für gewählte Tage**, damit man für geänderte
-   Regeln nicht löschen und neu hochladen muss. Den Knopf gibt es
-   (Daten-Zentrale → Bestand), er ist aber für Zahlungstage kaputt:
-   Der Buchungsexport wird nirgends gespeichert, also rechnet er ohne
-   ihn (fremdbezahlte Plätze, Korrekturen, Birk/Danja fehlen), und
-   Zeilen, die wegfallen (Steffi), bleiben stehen. → Buchungsexport in
-   eigenem Blatt speichern, beim Neu-Rechnen mitgeben, Tage ersetzen
-   statt nur überschreiben.
-5. Frage: Alle Tage bis Ende August sind hochgeladen, die alten sind
-   längst abgearbeitet. Einfach alles auf erledigt setzen? → dafür
-   eine saubere Lösung anbieten statt hunderter Einzelklicks.
+3. **Name-Abgleich nur ab 95 % automatisch** (gebaut, in Prüfung).
+   `AUTO_SCHWELLE_MIN = 95` — Tagesarbeit, Einstellungen und
+   Sammelbestätigung gehen nie darunter. Beim Import werden die
+   eindeutigen gleich übernommen, und gemerkte Verknüpfungen greifen
+   direkt nach dem exakten Namen (`_checkin_ueber_verknuepfung`), also
+   entsteht für sie kein offener Fall mehr. Unverändert bleibt die
+   Schreibweisen-Erkennung im Import selbst (z. B. „Mika" ↔ „Mika
+   Strele") — die hat Marcels Handprüfung bestätigt.
+4. **„Neu berechnen"** (gebaut, in Prüfung). War für Zahlungstage kaputt:
+   ohne Buchungsexport gerechnet, und weggefallene Zeilen blieben
+   stehen. Jetzt: Blatt `buchungsexport` (lazy, ohne E-Mails) wird beim
+   Import abgelegt, beim Neu-Rechnen mitgegeben, und die Tage werden per
+   `tage_ersetzen_im_blatt()` in einem Schreibvorgang ersetzt — mit
+   Schutz: lässt sich das Blatt nicht lesen, wird nichts geschrieben.
+   Liegt der Export erst ab dem nächsten Upload vor: Juli/August einmal
+   mit allen vier Dateien neu hochladen.
+5. **Alte Tage sammelweise erledigen** (gebaut, in Prüfung). Daten-Zentrale
+   → Bestand → „Alte Tage als erledigt markieren": bis zu einem Tag
+   alle offenen Fälle mit Grund „Altbestand" schliessen, nur angehängt,
+   jederzeit zurücknehmbar.
 6. Dashboard (angefangen, noch nichts geändert): beim **Tag** nur die
    Zahlen; **Auslastung** als Ø Stundenauslastung Double gegen Single;
    die **Handlungsvorschläge im Reiter Auslastung** (Rückgang / tote

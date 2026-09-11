@@ -344,6 +344,13 @@ ERLEDIGT_GRUENDE = {
         "hilfe": "EGYM vergütet nachträglich — wird automatisch gesetzt, "
                  "wenn ein späterer Check-in zugeordnet wird.",
     },
+    "altbestand": {
+        "label": "Altbestand",
+        "kurz":  "Altbestand",
+        "icon":  "🗄",
+        "hilfe": "Sammelweise geschlossen: ein Tag, der schon abgearbeitet "
+                 "war. Daten-Zentrale → Bestand → zurücknehmen.",
+    },
 }
 
 GRUND_UNBEKANNT = {
@@ -587,6 +594,7 @@ def stunde_aus_zeit(zeit_str) -> int:
 
 SHEET_SPALTEN = {
     "playtomic_raw":    None,
+    "buchungsexport":   None,
     "buchungen":        None,
     "checkins":         None,
     "customers":        None,
@@ -641,7 +649,7 @@ def get_sheet():
 # Sammelabfrage vorbei und werden erst geholt, wenn sie wirklich
 # gebraucht werden. playtomic_raw allein sind rund 40 % aller Zellen der
 # Mappe — im WhatsApp-Ablauf wird davon keine einzige angefasst.
-LAZY_BLAETTER = ("playtomic_raw",)
+LAZY_BLAETTER = ("playtomic_raw", "buchungsexport")
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -1212,6 +1220,7 @@ ABGELEITETE_CACHES = ("tages_kennzahlen", "verfuegbare_tage", "monats_kennzahlen
                       "verbrauchte_checkins", "anspruch_bilanz", "nachholung_quelle",
                       "mapping_gedeckt_je_tag", "mapping_belegte_checkins",
                       "checkin_erklaerung", "checkin_zuordnungen",
+                      "teilnehmer_am",
                       "redundante_korrekturen",
                       "buchungsnamen_am_tag", "abzug_pruefen", "verguetung_wert",
                       "checkins_von_am", "rabattierte_buchungen_am", "checkins_roh_und_verguetet",
@@ -6395,7 +6404,24 @@ def _neu_berechnen_zahlungen(tage: list) -> bool:
     if cdf.empty:
         st.error("❌ Für diesen Zeitraum sind keine Check-ins gespeichert.")
         return False
-    return _analysieren_zahlungen(pdf, cdf)
+
+    # Der abgelegte Buchungsexport gehört dazu — ohne ihn fehlen die
+    # fremdbezahlten Plätze und alles, was nur er belegt.
+    bdf = gespeicherter_buchungsexport(tage)
+    mit_export = (set(bdf["booking_start_date"].map(_tag_von))
+                  if not bdf.empty else set())
+    ohne_export = sorted(menge - mit_export)
+    if ohne_export:
+        st.caption("Ohne Buchungsexport gerechnet — für diese Tage wurde "
+                   "keiner hochgeladen: "
+                   + ", ".join(datum_kurz(t) for t in ohne_export[:10])
+                   + (" …" if len(ohne_export) > 10 else ""))
+
+    # Die Tage werden ersetzt, nicht nur überschrieben: Ein Anspruch, den
+    # die neue Rechnung nicht mehr sieht, muss auch aus dem Blatt raus.
+    tage_mit_zahlungen = {str(_slot_zeit(w)[0]) for w in pdf["Service date"]}
+    return _analysieren_zahlungen(pdf, cdf, bdf if not bdf.empty else None,
+                                  tage_ersetzen=tage_mit_zahlungen & menge)
 
 
 def neu_berechnen(tage=None) -> bool:
@@ -7439,6 +7465,30 @@ def _passenden_checkin(g: dict, checkins: list, nur_gleicher_name: bool,
     return (c, punkte, abstand)
 
 
+def _checkin_ueber_verknuepfung(g: dict, checkins: list, mapping: dict,
+                                mit_fenster: bool = False):
+    """
+    Der freie Check-in, auf den eine gemerkte Verknüpfung zeigt — am
+    selben Tag. Ohne Zeitfenster zu beliebiger Uhrzeit: EGYM vergütet pro
+    Person und Tag einmal.
+    """
+    ziel = mapping.get(g["name_norm"])
+    if not ziel:
+        return None
+    gname = str(ziel["checkin_name"] if isinstance(ziel, dict) else ziel)
+    for c in checkins:
+        if c["benutzt"] or c["datum"] != g["datum"] or c["name_norm"] != gname:
+            continue
+        if mit_fenster:
+            if c["minute"] < 0 or g["minute"] < 0:
+                continue
+            if not (CHECKIN_FENSTER[0] <= c["minute"] - g["minute"]
+                    <= CHECKIN_FENSTER[1]):
+                continue
+        return c
+    return None
+
+
 def _rabatte_zerlegen(differenz: float, anteil: float, spieler: int,
                      datum=None) -> tuple:
     """
@@ -7846,7 +7896,7 @@ def wellpass_platz_beim_gast(bdf, bewertet: list, checkins: list) -> set:
     return umbuchen
 
 
-def _analysieren_zahlungen(pdf, cdf, bdf=None) -> bool:
+def _analysieren_zahlungen(pdf, cdf, bdf=None, tage_ersetzen=None) -> bool:
     """
     Wellpass-Abgleich allein aus Zahlungen und Check-ins.
 
@@ -7930,17 +7980,35 @@ def _analysieren_zahlungen(pdf, cdf, bdf=None) -> bool:
     # zuerst, dann gleicher Name zu beliebiger Uhrzeit desselben Tages,
     # danach erst die Schreibvarianten.
     treffer = {}
-    for nur_gleich, mit_fenster in ((True, True), (True, False),
+    # Gemerkte Verknüpfungen kommen direkt nach dem exakten Namen und vor
+    # jeder Ähnlichkeitssuche (der Durchgang mit None). Was einmal
+    # bestätigt ist — von Hand oder ab 95 % automatisch —, bekommt seinen
+    # Check-in sicher und steht gar nicht erst als offener Fall da. Vorher
+    # griff die Verknüpfung erst ganz am Ende, wenn eine Schreibvariante
+    # den Check-in womöglich schon jemand anderem gegeben hatte.
+    # Auch hier zuerst mit Zeitfenster: Hat jemand zwei Buchungen an einem
+    # Tag und einen Check-in, gehört er zur Buchung, zu der er zeitlich
+    # passt — nicht zur ersten in der Liste (Noah, 22.08.).
+    gemerkt = mapping_laden()
+    for nur_gleich, mit_fenster in ((True, True), (None, True),
+                                    (True, False), (None, False),
                                     (False, True), (False, False)):
         for i, (g, _txt) in enumerate(ansprueche):
             if i in treffer:
                 continue
-            c, punkte, abstand = _passenden_checkin(g, checkins, nur_gleich,
-                                                    mit_fenster)
+            if nur_gleich is None:
+                c = _checkin_ueber_verknuepfung(g, checkins, gemerkt,
+                                                mit_fenster)
+                punkte, exakt = 100.0, True
+                abstand = (c["minute"] - g["minute"]) if c is not None else 0
+            else:
+                c, punkte, abstand = _passenden_checkin(g, checkins, nur_gleich,
+                                                        mit_fenster)
+                exakt = nur_gleich
             if c is None:
                 continue
             c["benutzt"] = True
-            treffer[i] = (c, punkte, abstand, nur_gleich)
+            treffer[i] = (c, punkte, abstand, exakt)
 
     balken = st.progress(0.0)
     status = st.empty()
@@ -8061,12 +8129,19 @@ def _analysieren_zahlungen(pdf, cdf, bdf=None) -> bool:
     balken.progress(1.0)
     status.empty()
 
-    neu_b = append_rows(pd.DataFrame(buchungen_out), "buchungen",
-                        ["analysis_date", "Name_norm", "Service_Zeit", "Court"],
-                        aktualisieren=True)
-    neu_c = append_rows(pd.DataFrame(checkins_out), "checkins",
-                        ["analysis_date", "Name_norm", "Checkin_Zeit"],
-                        aktualisieren=True)
+    if tage_ersetzen:
+        # Neu berechnen: die Tage vollständig ersetzen
+        neu_b = tage_ersetzen_im_blatt(pd.DataFrame(buchungen_out),
+                                       "buchungen", tage_ersetzen)
+        neu_c = tage_ersetzen_im_blatt(pd.DataFrame(checkins_out),
+                                       "checkins", tage_ersetzen)
+    else:
+        neu_b = append_rows(pd.DataFrame(buchungen_out), "buchungen",
+                            ["analysis_date", "Name_norm", "Service_Zeit", "Court"],
+                            aktualisieren=True)
+        neu_c = append_rows(pd.DataFrame(checkins_out), "checkins",
+                            ["analysis_date", "Name_norm", "Checkin_Zeit"],
+                            aktualisieren=True)
 
     # Selbst erkannte Schreibvarianten festhalten. Ohne das bleibt von
     # so einem Treffer keine Spur: „Zuordnung prüfen" sucht die Buchung
@@ -8089,7 +8164,20 @@ def _analysieren_zahlungen(pdf, cdf, bdf=None) -> bool:
 
     cache_leeren()
 
-    offen = sum(1 for b in buchungen_out if b["Fehler"] == "Ja")
+    # Eindeutige Schreibweisen ab 95 % gleich mit übernehmen — dann stehen
+    # sie gar nicht erst als offene Fälle in der Tagesarbeit. Alles darunter
+    # bleibt bei dir.
+    uebernommen = []
+    if einstellung("auto_zuordnung_an", True):
+        uebernommen = auto_zuordnungen_uebernehmen(
+            sorted({b["analysis_date"] for b in buchungen_out}))
+        if uebernommen:
+            st.caption(f"{len(uebernommen)} eindeutige Schreibweisen ab "
+                       f"{auto_schwelle():.0f} % übernommen.")
+    geklaert = {(k["datum"], k["name_norm"]) for k in uebernommen}
+
+    offen = sum(1 for b in buchungen_out if b["Fehler"] == "Ja"
+                and (b["analysis_date"], b["Name_norm"]) not in geklaert)
     mit = sum(1 for b in buchungen_out if b["Relevant"] == "Ja"
               and b["Check-in"] == "Ja")
     ohne_anspruch = sum(1 for c in checkins_out if c["Gespielt"] == "Nein")
@@ -8101,6 +8189,106 @@ def _analysieren_zahlungen(pdf, cdf, bdf=None) -> bool:
         f"{ohne_anspruch} Check-ins ohne Anspruch "
         f"({neu_b} neue Buchungszeilen, {neu_c} neue Check-in-Zeilen)")
     return True
+
+
+BUCHUNGSEXPORT_SPALTEN = (
+    ["booking_id", "booking_start_date", "booking_end_date",
+     "duration (Minuten)", "resource_name", "price", "booking_type",
+     "payment_status", "status"]
+    + [f"participant_name_{i}" for i in range(1, 21)])
+
+
+def _tag_von(wert) -> str:
+    """Startzeitpunkt → „YYYY-MM-DD", leer wenn unlesbar."""
+    d = parse_datetime_safe(wert)
+    return str(d.date()) if d else ""
+
+
+def buchungsexport_speichern(bdf: pd.DataFrame) -> int:
+    """
+    Den Buchungsexport im Blatt „buchungsexport" ablegen.
+
+    Bisher lebte er nur für die Dauer eines Imports. „Neu berechnen" lief
+    deshalb ohne ihn — und verlor alles, was nur er weiss: fremdbezahlte
+    Plätze, die Korrekturen mehrdeutiger Beträge, Birk und Danja.
+
+    Nur die Spalten, die gebraucht werden: Zeit, Court, Dauer, Preis,
+    Status und die Teilnehmernamen. Keine E-Mail-Adressen. Kommt dieselbe
+    Buchung in einem neueren Export mit anderem Stand (storniert), ersetzt
+    sie die alte Zeile.
+    """
+    if bdf is None or bdf.empty or "booking_id" not in bdf.columns:
+        return 0
+    spalten = [c for c in BUCHUNGSEXPORT_SPALTEN if c in bdf.columns]
+    n = append_rows(bdf[spalten].copy(), "buchungsexport",
+                    id_spalte="booking_id", aktualisieren=True)
+    for fn in ("teilnehmer_am", "checkin_erklaerung"):
+        _cache_funktion_leeren(fn)
+    return n
+
+
+def gespeicherter_buchungsexport(tage) -> pd.DataFrame:
+    """Die abgelegten Buchungen dieser Tage, im Format von parse_bookings()."""
+    df = loadsheet("buchungsexport")
+    if df.empty or "booking_start_date" not in df.columns:
+        return pd.DataFrame()
+    menge = {str(t) for t in tage}
+    return df[df["booking_start_date"].map(_tag_von).isin(menge)].copy()
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def teilnehmer_am(datum: str) -> list:
+    """
+    Wer laut Buchungsexport an diesem Tag auf dem Platz stand.
+    → [(zeit, court, [namen]), …] — ohne stornierte Buchungen
+    """
+    out = []
+    for _, r in gespeicherter_buchungsexport([datum]).iterrows():
+        if str(r.get("status", "")).strip().upper() == "CANCELED":
+            continue
+        start = parse_datetime_safe(r.get("booking_start_date"))
+        if start is None:
+            continue
+        namen = [str(r.get(f"participant_name_{i}", "") or "").strip()
+                 for i in range(1, 21)]
+        namen = [n for n in namen if n and n.lower() != "nan"]
+        if namen:
+            out.append((start.strftime("%H:%M"),
+                        str(r.get("resource_name", "") or ""), namen))
+    return sorted(out)
+
+
+def tage_ersetzen_im_blatt(neu: pd.DataFrame, blatt: str, tage) -> int:
+    """
+    Alle Zeilen dieser Tage durch die neu gerechneten ersetzen — in einem
+    einzigen Schreibvorgang.
+
+    append_rows(aktualisieren=True) ersetzt nur Zeilen, die in der neuen
+    Rechnung wieder vorkommen. Fällt ein Anspruch weg, bleibt die alte
+    Zeile stehen: Steffi Gengenbachs stornierte Buchung wäre nach dem
+    Neu-Rechnen weiter ein offener Fall gewesen.
+
+    Nicht vorab gelöscht, sondern alles in einem Zug geschrieben — siehe
+    die Warnung in neu_berechnen(). Und lässt sich das Blatt nicht lesen,
+    wird gar nicht geschrieben: sonst stünden danach nur noch die neu
+    gerechneten Tage darin.
+
+    → Anzahl der Zeilen für diese Tage
+    """
+    menge = {str(t) for t in tage}
+    alt = loadsheet(blatt)
+    if alt.empty or "analysis_date" not in alt.columns:
+        st.error(f"❌ Das Blatt „{blatt}\" liess sich nicht lesen — es wurde "
+                 "nichts geschrieben. Bitte kurz warten und noch einmal.")
+        return 0
+    rest = alt[~alt["analysis_date"].astype(str).isin(menge)]
+    if not neu.empty:
+        neu = neu[neu["analysis_date"].astype(str).isin(menge)].copy()
+        gemeinsam = [c for c in neu.columns
+                     if c != "_hash" and c in rest.columns]
+        neu["_hash"] = _zeilen_hash(neu, gemeinsam)
+    savesheet(pd.concat([rest, neu], ignore_index=True), blatt)
+    return len(neu)
 
 
 def _verarbeiten_zahlungen(z_datei, c_datei, o_datei=None,
@@ -8151,6 +8339,9 @@ def _verarbeiten_zahlungen(z_datei, c_datei, o_datei=None,
             bdf = None
         else:
             st.caption(f"Buchungsexport zur Kontrolle: {len(bdf)} Buchungen.")
+            # Mit ablegen: „Neu berechnen" braucht ihn später genauso, und
+            # Mitspieler wie Court stehen nur hier.
+            buchungsexport_speichern(bdf)
 
     return _analysieren_zahlungen(pdf, cdf, bdf)
 
@@ -8186,10 +8377,63 @@ def tage_entfernen(tage: list) -> dict:
         if entfernt["playtomic_raw"]:
             savesheet(behalten, "playtomic_raw")
 
+    # Der abgelegte Buchungsexport trägt sein Datum im Startzeitpunkt
+    bx = loadsheet("buchungsexport")
+    if not bx.empty and "booking_start_date" in bx.columns:
+        behalten = bx[~bx["booking_start_date"].map(_tag_von).isin(ziel)]
+        entfernt["buchungsexport"] = len(bx) - len(behalten)
+        if entfernt["buchungsexport"]:
+            savesheet(behalten, "buchungsexport")
+
     st.session_state["_auto_erledigt"] = set()
     st.session_state["_auto_protokoll"] = []
     cache_leeren()
+    for fn in ("teilnehmer_am", "checkin_erklaerung"):
+        _cache_funktion_leeren(fn)
     return entfernt
+
+
+def altbestand_schliessen(bis: str) -> int:
+    """
+    Alle noch offenen Fälle bis einschliesslich zu einem Tag schliessen.
+
+    Für Tage, die längst abgearbeitet sind, nach einem Neu-Import aber
+    wieder Fälle zeigen. Ein Schreibvorgang statt hunderter Einzelklicks.
+    Grund „Altbestand": So bleibt sichtbar, dass hier niemand einzeln
+    entschieden hat, und es lässt sich mit einem Klick zurücknehmen.
+
+    Angehängt, nicht überschrieben — die Erledigt-Liste enthält jede
+    Entscheidung von Hand, die darf ein Lesefehler nie wegwischen.
+
+    → Anzahl geschlossener Fälle
+    """
+    tage = [t for t in verfuegbare_tage() if str(t) <= str(bis)]
+    offen = alle_offenen_fehler(tage)
+    if offen.empty:
+        return 0
+    jetzt = datetime.now().isoformat()
+    neu = pd.DataFrame([{
+        "key": f"{r['Name_norm']}_{r['Datum']}", "date": str(r["Datum"]),
+        "behoben": True, "grund": "altbestand", "betrag": "", "notiz": "",
+        "timestamp": jetzt} for _, r in offen.iterrows()])
+    neu = neu.drop_duplicates(subset=["key"])
+    if not savesheet_append(neu, "corrections"):
+        return 0
+    cache_leeren("corrections")
+    return len(neu)
+
+
+def altbestand_zuruecknehmen() -> int:
+    """Alle mit „Altbestand" geschlossenen Fälle wieder öffnen."""
+    corr = loadsheet("corrections", SHEET_SPALTEN["corrections"])
+    if corr.empty or "grund" not in corr.columns:
+        return 0
+    weg = corr["grund"].astype(str).str.strip() == "altbestand"
+    if not weg.any():
+        return 0
+    savesheet(corr[~weg], "corrections")
+    cache_leeren("corrections")
+    return int(weg.sum())
 
 
 def modul_daten():
@@ -8507,7 +8751,9 @@ Nummern werden automatisch umgewandelt: `0170…` → `+49170…`
         with st.expander("🔄 Neu berechnen", expanded=False):
             box("Rechnet die Auswertung aus den gespeicherten Daten neu — "
                 "ohne dass du etwas hochladen musst. Sinnvoll, wenn sich "
-                "Preise, Tarife oder der Wellpass-Abzug geändert haben.",
+                "Preise, Tarife oder der Wellpass-Abzug geändert haben. "
+                "Der Buchungsexport rechnet mit, sofern er für die Tage "
+                "hochgeladen wurde; die Tage werden vollständig ersetzt.",
                 "info")
 
             n1, n2 = st.columns(2)
@@ -8545,6 +8791,42 @@ Nummern werden automatisch umgewandelt: `0170…` → `+49170…`
                                  use_container_width=True, key="neu_start"):
                         if neu_berechnen(ziel):
                             st.rerun()
+
+        st.markdown("---")
+        with st.expander("🗄 Alte Tage als erledigt markieren"):
+            box("Für Tage, die du längst abgearbeitet hast, die nach dem "
+                "Neu-Import aber wieder offene Fälle zeigen. Alle offenen "
+                "Fälle bis einschliesslich dem gewählten Tag werden auf "
+                "einmal geschlossen, Grund „Altbestand“. Zurücknehmen geht "
+                "jederzeit hier.", "info")
+            tage_alt = verfuegbare_tage()
+            if not tage_alt:
+                box("Noch keine Tage im System.", "info")
+            else:
+                bis = st.selectbox("Bis einschliesslich", tage_alt,
+                                   format_func=datum_lang, key="alt_bis")
+                anzahl_alt = sum(n for t, n in offene_je_tag().items()
+                                 if str(t) <= str(bis))
+                st.caption(f"{anzahl_alt} offene "
+                           + ("Fall" if anzahl_alt == 1 else "Fälle")
+                           + f" bis {datum_kurz(bis)}.")
+                a1, a2 = st.columns(2)
+                with a1:
+                    if st.button(f"🗄 {anzahl_alt} schliessen", type="primary",
+                                 use_container_width=True, key="alt_start",
+                                 disabled=not anzahl_alt):
+                        with st.spinner("Wird gespeichert …"):
+                            n = altbestand_schliessen(bis)
+                        st.toast(f"{n} Fälle geschlossen.")
+                        st.rerun()
+                with a2:
+                    if st.button("↩️ Altbestand wieder öffnen",
+                                 use_container_width=True, key="alt_undo"):
+                        with st.spinner("Wird gespeichert …"):
+                            n = altbestand_zuruecknehmen()
+                        st.toast(f"{n} Fälle wieder offen." if n
+                                 else "Nichts zurückzunehmen.")
+                        st.rerun()
 
         st.markdown("---")
         with st.expander("📆 Einzelne Tage entfernen"):
@@ -8607,7 +8889,8 @@ Nummern werden automatisch umgewandelt: `0170…` → `+49170…`
             b1, b2 = st.columns(2)
             with b1:
                 st.markdown("**Wird geleert**")
-                st.caption("· Zahlungen\n\n· Buchungen\n\n· Check-ins")
+                st.caption("· Zahlungen\n\n· Buchungen\n\n· Check-ins\n\n"
+                           "· abgelegter Buchungsexport")
             with b2:
                 st.markdown("**Bleibt erhalten**")
                 st.caption("· gelernte Namenszuordnungen\n\n"
@@ -8625,9 +8908,10 @@ Nummern werden automatisch umgewandelt: `0170…` → `+49170…`
                          use_container_width=True):
                 ziele = {
                     "Zahlungen (Umsatzbasis)": ["playtomic_raw"],
-                    "Buchungen und Check-ins": ["buchungen", "checkins"],
+                    "Buchungen und Check-ins": ["buchungen", "checkins",
+                                                "buchungsexport"],
                     "Alles außer Zuordnungen": ["playtomic_raw", "buchungen",
-                                                "checkins"],
+                                                "checkins", "buchungsexport"],
                 }[was]
                 for z in ziele:
                     savesheet(pd.DataFrame(), z)
@@ -8640,10 +8924,10 @@ Nummern werden automatisch umgewandelt: `0170…` → `+49170…`
                 st.rerun()
 
             st.markdown("")
-            st.caption("Danach unter *Buchungen + Check-ins* pro Zeitraum "
-                       "hochladen: erst Bookings, dann Payments, dann "
-                       "Check-ins. Mehrere Monate gehen nacheinander — "
-                       "die App erkennt Dubletten selbst.")
+            st.caption("Danach unter *Zahlungen + Check-ins* je Monat die "
+                       "vier Dateien hochladen: Zahlungen bezahlt, offene "
+                       "Posten, Check-ins, Buchungen. Mehrere Monate gehen "
+                       "nacheinander — die App erkennt Dubletten selbst.")
 
         # ── Erledigte Fälle aufräumen ───────────────────────────────────
         with st.expander("✅ Erledigte Fälle aufräumen"):
@@ -10472,6 +10756,15 @@ def schon_gesendet(name_norm: str, datum: str, betrag):
 
 AUTO_SCHWELLE_STANDARD = 95.0
 AUTO_ABSTAND = 8.0     # Vorsprung zum zweitbesten Kandidaten
+# Darunter wird nie automatisch übernommen, egal was eingestellt ist —
+# alles Unsichere ordnest du am Spieltag selbst zu.
+AUTO_SCHWELLE_MIN = 95.0
+
+
+def auto_schwelle() -> float:
+    """Die geltende Schwelle für automatische Zuordnungen, nie unter 95 %."""
+    return max(AUTO_SCHWELLE_MIN,
+               float(einstellung("auto_schwelle", AUTO_SCHWELLE_STANDARD)))
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -10551,8 +10844,8 @@ def auto_kandidaten(tage: list = None, schwelle: float = None) -> list:
     Rechner; in der Cloud entsprechend mehr. Und es kam nichts Neues
     dabei heraus, solange sich an den Daten nichts geändert hat.
     """
-    if schwelle is None:
-        schwelle = float(einstellung("auto_schwelle", AUTO_SCHWELLE_STANDARD))
+    schwelle = max(AUTO_SCHWELLE_MIN,
+                   auto_schwelle() if schwelle is None else float(schwelle))
     if tage is None:
         tage = verfuegbare_tage()
     return _auto_kandidaten_gerechnet(tuple(str(t) for t in tage),
@@ -10663,7 +10956,7 @@ def _wa_auto_block(tage: list):
     if not protokoll:
         return
 
-    schwelle = float(einstellung("auto_schwelle", AUTO_SCHWELLE_STANDARD))
+    schwelle = auto_schwelle()
     box(f"⚡ <b>{len(protokoll)} eindeutige Zuordnungen automatisch "
         f"übernommen</b> (ab {schwelle:.0f} % und mit klarem Vorsprung zum "
         "zweitbesten). Reine Schreibweisen-Unterschiede — der Check-in lag "
@@ -10711,6 +11004,34 @@ def checkin_erklaerung(name_norm: str, datum: str) -> dict:
                 "text": "hat gespielt, aber ohne Wellpass-Rabatt bezahlt — "
                         "es gibt keinen Anspruch dazu",
                 "treffer": str(eigene.iloc[0]["Name"])}
+
+    # Stand laut Buchungsexport mit auf dem Platz, ohne eigene
+    # Zahlungszeile: jemand anderes hat den Platz voll bezahlt. Barbara
+    # Gekeler spielte am 30.08. um 13:00 in Nico Brunos Buchung und stand
+    # als „keine passende Buchung" da. Wer an dem Tag selbst einen Rabatt
+    # hatte, ist hier ausgenommen — da geht es um eine Schreibweise.
+    rabatt_namen = set(tag.loc[tag["Relevant"].astype(str) == "Ja",
+                               "Name_norm"].astype(str))
+    ci_teile = str(name_norm).split()
+    for zeit, _court, namen in teilnehmer_am(str(datum)):
+        for n in namen:
+            tn = normalize_name(n)
+            if tn in rabatt_namen:
+                continue
+            gleich = tn == str(name_norm) or (
+                len(tn.split()) >= 2 and len(ci_teile) >= 2
+                and not namen_sind_verschiedene_personen(tn, str(name_norm))
+                and namen_decken_sich(tn, str(name_norm)))
+            if not gleich:
+                continue
+            bucher = namen[0] if normalize_name(namen[0]) != tn else ""
+            return {"art": "gespielt_ohne_rabatt",
+                    "text": ("hat gespielt"
+                             + (f" (Buchung von {bucher} um {zeit})" if bucher
+                                else f" (Buchung um {zeit})")
+                             + ", aber ohne Wellpass-Rabatt — es gibt keinen "
+                               "Anspruch dazu"),
+                    "treffer": n}
 
     # Ähnlicher Name mit Buchung — vermutlich andere Schreibweise
     kandidaten = tag.drop_duplicates(subset=["Name_norm"])
@@ -13311,7 +13632,7 @@ def modul_matching():
         # Sammelbestätigung, die auch Zweifelsfälle mitnimmt, wäre
         # schlimmer als gar keine.
         sicher = [v for v in vorschlaege
-                  if v["score"] >= 85 and not v.get("eigene_tage")]
+                  if v["score"] >= AUTO_SCHWELLE_MIN and not v.get("eigene_tage")]
         rest = [v for v in vorschlaege if v not in sicher]
 
         if len(sicher) >= 3:
@@ -13463,8 +13784,8 @@ def modul_einstellungen():
                        key="auto_an")
 
         wert = st.slider(
-            "Ab welcher Sicherheit?", min_value=85, max_value=100,
-            value=int(einstellung("auto_schwelle", AUTO_SCHWELLE_STANDARD)),
+            "Ab welcher Sicherheit?", min_value=int(AUTO_SCHWELLE_MIN),
+            max_value=100, value=int(auto_schwelle()),
             step=1, key="auto_schwelle_regler",
             help="Zusätzlich muss der beste Vorschlag mindestens "
                  f"{AUTO_ABSTAND:.0f} Punkte Vorsprung zum zweitbesten haben.")
