@@ -64,6 +64,10 @@ pruefe(not PC.ist_single_court("Padel 4"), "Padel 4 bleibt Double")
 BLATT = {}
 PC.loadsheet = lambda n, cols=None: (BLATT[n].copy() if n in BLATT
                                      else pd.DataFrame(columns=cols or []))
+PC.savesheet = lambda df, n, v=3: BLATT.__setitem__(n, df.copy()) or True
+PC.savesheet_append = lambda df, n, v=3: BLATT.__setitem__(
+    n, pd.concat([BLATT.get(n, pd.DataFrame()), df], ignore_index=True)) or True
+PC.cache_leeren = lambda *a, **k: None
 
 
 def leeren():
@@ -132,6 +136,46 @@ g = {"name": "Steffi Gengenbach", "name_norm": "steffi gengenbach",
 volle = {None: {22.0, 23.0, 24.0, 24.5}}
 pruefe(PC.slot_bewerten(g, volle, {}, {})[0] == "storniert",
        "ganz erstattet + verfallener Rest = storniert, kein offener Fall")
+
+print("\nNACHHOLUNG ZURÜCKNEHMEN")
+# Der Erledigt-Vermerk „nachgeholt" gehört zur Zuordnung. Blieb er stehen,
+# galt der Fall als geschlossen, obwohl ihn nichts mehr deckte — und sein
+# Check-in war wieder frei für einen zweiten Fall.
+BLATT["checkin_zuordnung"] = pd.DataFrame(
+    [zuordnung("2026-09-02", "2026-08-27", "lina schafran")])
+BLATT["corrections"] = pd.DataFrame([
+    {"key": "lina schafran_2026-08-27", "date": "2026-08-27", "behoben": True,
+     "grund": "nachgeholt", "betrag": "", "notiz": "", "timestamp": ""},
+    {"key": "kevin schafran_2026-08-27", "date": "2026-08-27", "behoben": True,
+     "grund": "bezahlt", "betrag": "", "notiz": "", "timestamp": ""}])
+leeren()
+PC.zuordnung_zu_fall_loesen("lina schafran", "2026-08-27")
+leeren()
+behoben = PC.behobene_keys()
+pruefe("lina schafran_2026-08-27" not in behoben,
+       "Zurücknehmen öffnet den Fall wieder")
+pruefe("kevin schafran_2026-08-27" in behoben,
+       "ein von Hand bezahlter Fall bleibt geschlossen")
+
+print("\nCHECK-IN-ABGLEICH")
+# Beide Blätter müssen dasselbe sagen, sonst wird ein verbrauchter
+# Check-in ein zweites Mal angeboten.
+BLATT["buchungen"] = pd.DataFrame([{
+    "analysis_date": "2026-08-25", "Name": "Julian Kalkus",
+    "Name_norm": "julian kalkus", "Relevant": "Ja", "Check-in": "Ja",
+    "Checkin_Name": "julian kalkus"}])
+BLATT["checkins"] = pd.DataFrame([
+    {"analysis_date": "2026-08-25", "Name": "Julian Kalkus",
+     "Name_norm": "julian kalkus", "Gespielt": "Nein", "Checkin_Zeit": "22:30"},
+    {"analysis_date": "2026-08-25", "Name": "Fremd Person",
+     "Name_norm": "fremd person", "Gespielt": "Ja", "Checkin_Zeit": "20:00"}])
+leeren()
+PC.checkins_konsolidieren(["2026-08-25"])
+stand = dict(zip(BLATT["checkins"]["Name_norm"], BLATT["checkins"]["Gespielt"]))
+pruefe(stand["julian kalkus"] == "Ja",
+       "ein Check-in, den eine Buchung deckt, gilt als verbraucht")
+pruefe(stand["fremd person"] == "Nein",
+       "ein Check-in ohne deckende Buchung wird wieder frei")
 
 print("\nCHECK-INS")
 CI = pd.DataFrame([

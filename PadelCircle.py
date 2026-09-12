@@ -3647,6 +3647,17 @@ def zuordnung_zu_fall_loesen(name_norm: str, datum: str) -> bool:
 
     savesheet(df[df["fall_key"].astype(str) != fk], "checkin_zuordnung")
 
+    # Der Erledigt-Vermerk „nachgeholt" gehört zur Zuordnung. Ohne ihn
+    # blieb der Fall geschlossen, obwohl ihn nichts mehr deckt — und sein
+    # Check-in war wieder frei für einen zweiten Fall. Von Hand gesetzte
+    # Gründe (bezahlt, gesperrt) bleiben unangetastet.
+    corr = loadsheet("corrections", SHEET_SPALTEN["corrections"])
+    if not corr.empty and {"key", "grund"} <= set(corr.columns):
+        weg = ((corr["key"].astype(str) == f"{name_norm}_{datum}")
+               & (corr["grund"].astype(str).str.strip() == "nachgeholt"))
+        if weg.any():
+            savesheet(corr[~weg], "corrections")
+
     z = treffer.iloc[0]
     if str(z.get("checkin_datum")) == str(datum):
         ziel = mapping_laden().get(str(name_norm))
@@ -8150,6 +8161,8 @@ def _analysieren_zahlungen(pdf, cdf, bdf=None, tage_ersetzen=None) -> bool:
             "Listenpreis": z["anteil"], "Bezahlt": 0.0, "Betrag": 0.0,
             "Plaetze": 1, "Wellpass_Rabatte": 1, "Teilnehmer": 1,
             "Checkin_Zeit": c["zeit"] if c else "",
+            # Welcher Check-in deckt diesen Platz? Siehe checkins_konsolidieren()
+            "Checkin_Name": c["name_norm"] if c else "",
             "Relevant": "Ja", "Event": "Nein", "Event_Name": "",
             "Event_Id": "", "Event_Courts": 0, "Event_Unklar": "Nein",
             "Check-in": "Ja" if c else "Nein",
@@ -8217,6 +8230,8 @@ def _analysieren_zahlungen(pdf, cdf, bdf=None, tage_ersetzen=None) -> bool:
             "Wellpass_Rabatte": 1 if rabatt else 0,
             "Teilnehmer": 1,
             "Checkin_Zeit": c["zeit"] if c else "",
+            # Welcher Check-in deckt diesen Platz? Siehe checkins_konsolidieren()
+            "Checkin_Name": c["name_norm"] if c else "",
             "Relevant": "Ja" if rabatt else "Nein",
             "Event": "Nein", "Event_Name": "", "Event_Id": "",
             "Event_Courts": 0, "Event_Unklar": "Nein",
@@ -8254,6 +8269,13 @@ def _analysieren_zahlungen(pdf, cdf, bdf=None, tage_ersetzen=None) -> bool:
         neu_c = append_rows(pd.DataFrame(checkins_out), "checkins",
                             ["analysis_date", "Name_norm", "Checkin_Zeit"],
                             aktualisieren=True)
+
+    # Beide Blätter müssen dasselbe sagen — siehe checkins_konsolidieren()
+    korrigiert = checkins_konsolidieren(
+        {b["analysis_date"] for b in buchungen_out}
+        | {c["analysis_date"] for c in checkins_out})
+    if korrigiert:
+        st.caption(f"{korrigiert} Check-ins mit den Buchungen abgeglichen.")
 
     # Selbst erkannte Schreibvarianten festhalten. Ohne das bleibt von
     # so einem Treffer keine Spur: „Zuordnung prüfen" sucht die Buchung
@@ -8401,6 +8423,66 @@ def tage_ersetzen_im_blatt(neu: pd.DataFrame, blatt: str, tage) -> int:
         neu["_hash"] = _zeilen_hash(neu, gemeinsam)
     savesheet(pd.concat([rest, neu], ignore_index=True), blatt)
     return len(neu)
+
+
+def checkins_konsolidieren(tage) -> int:
+    """
+    „Verbraucht" im Check-in-Blatt und „Check-in: Ja" in den Buchungen
+    müssen dasselbe sagen.
+
+    Lädt man einen älteren oder unvollständigen Export nach, rechnet die
+    App dessen Tage neu und schreibt deren Check-ins neu. Die
+    Buchungszeilen aus dem früheren, vollständigeren Import bleiben aber
+    stehen — mitsamt ihrem Check-in. Danach stand derselbe Check-in in
+    der Buchung als verbraucht und im Check-in-Blatt als überzählig. Auf
+    dem Prüfbestand waren das 48 Stück, 45 davon wurden wieder zur
+    Zuordnung angeboten: Ein Check-in hätte zwei Fälle schliessen können,
+    obwohl EGYM einmal zahlt.
+
+    Massgeblich sind die Buchungen. Dort steht seit dieser Änderung in
+    „Checkin_Name", welcher Check-in den Platz deckt. Für Tage, an denen
+    noch Zeilen ohne diese Spalte liegen, wird nur hochgestuft, nie
+    heruntergestuft — was dort steht, lässt sich nicht nachprüfen.
+
+    → Anzahl geänderter Check-in-Zeilen
+    """
+    menge = {str(t) for t in tage}
+    c = loadsheet("checkins")
+    b = loadsheet("buchungen")
+    if c.empty or b.empty or "Gespielt" not in c.columns:
+        return 0
+    if "Checkin_Name" not in b.columns:
+        return 0
+
+    bt = b[b["analysis_date"].astype(str).isin(menge)]
+    belegt, unpruefbar = set(), set()
+    for _, r in bt.iterrows():
+        if str(r.get("Check-in", "")) != "Ja":
+            continue
+        tag = str(r["analysis_date"])
+        name = str(r.get("Checkin_Name", "") or "").strip()
+        if name:
+            belegt.add((tag, name))
+        else:
+            unpruefbar.add(tag)
+
+    neu, geaendert = [], 0
+    for _, r in c.iterrows():
+        tag, nn = str(r["analysis_date"]), str(r["Name_norm"])
+        alt = str(r.get("Gespielt", ""))
+        if tag not in menge:
+            neu.append(alt)
+            continue
+        soll = ("Ja" if (tag, nn) in belegt
+                else "Ja" if (alt == "Ja" and tag in unpruefbar) else "Nein")
+        neu.append(soll)
+        geaendert += soll != alt
+
+    if geaendert:
+        c = c.copy()
+        c["Gespielt"] = neu
+        savesheet(c, "checkins")
+    return geaendert
 
 
 def _verarbeiten_zahlungen(z_datei, c_datei, o_datei=None,

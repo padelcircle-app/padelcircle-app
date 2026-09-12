@@ -111,6 +111,19 @@ Monaten, das ist zumutbar.
 - **Wer hat verknüpft, steht in `confirmed_by`.** „manuell" = Marcel,
   alles andere = die App. Die Anzeige muss das unterscheiden — „bestätigte
   Verknüpfung" für beides las sich, als hätte Marcel zugeordnet.
+- **Ein Import darf einen fremden Check-in nicht freigeben.** Lädt man
+  einen älteren oder unvollständigen Export nach, schreibt er die
+  Check-ins seiner Tage neu, während die Buchungszeilen des früheren,
+  vollständigeren Imports stehen bleiben. Gemessen: 48 Check-ins
+  standen danach in der Buchung als verbraucht und im Check-in-Blatt als
+  frei, 45 wurden wieder zur Zuordnung angeboten. Deshalb steht in jeder
+  Buchungszeile jetzt `Checkin_Name`, und `checkins_konsolidieren()`
+  gleicht nach jedem Import beide Blätter ab.
+- **Erledigt-Vermerk und Zuordnung gehören zusammen.** Das Zurücknehmen
+  einer Nachholung löschte nur die Zuordnung; der Fall blieb als
+  „nachgeholt" geschlossen und sein Check-in war wieder frei. Jetzt geht
+  der Vermerk mit — aber nur der Grund „nachgeholt", nie „bezahlt" oder
+  „gesperrt".
 - **Summen sagen nichts.** Zwei Fehler haben sich hinter einer
   unveränderten Gesamtzahl versteckt. Immer alt gegen neu diffen und
   die geänderten **Zeilen** lesen.
@@ -175,3 +188,33 @@ In dieser Reihenfolge:
 
 Länger offen: Die Datei ist mit 13.700 Zeilen zu gross; beim nächsten
 grösseren Modul in ein Modul je Datei plus Fundament schneiden.
+
+## Was nie geprüft wurde
+
+Geprüft ist alles gegen Juli und August 2026. Was darin nicht vorkommt,
+ist auch nicht belegt:
+
+1. **Offene Zahlung, die später bezahlt wird.** Offene Posten haben keine
+   `Payment id`; kommt dieselbe Zahlung später als bezahlt, liegen zwei
+   Zeilen im Bestand und der Platz zählt doppelt. In Juli und August
+   nie passiert — alle 13 Zeilen, die in beiden Dateien stehen, sind
+   „Voided" und erzeugen keinen Platz. Bleibt ein Risiko bei Uploads zu
+   verschiedenen Zeitpunkten.
+2. **Events und Turniere.** 150-Minuten-Mexicano, Firmenevent, OPEN_PLAY:
+   Dort gilt die Preisliste nicht, die App glaubt den Zahlbeträgen. Nur
+   eine Handvoll Fälle im Bestand.
+3. **Nachholung über die Monatsgrenze** (Check-in im September für einen
+   Fall im August). Logisch abgedeckt, mit echten Septemberdaten nie
+   durchgerechnet. Dazu die EGYM-Frist: laufender Monat + 3 Tage.
+4. **Künftige Preisänderungen.** Court-Preise und Wellpass-Abzug stehen
+   in CONFIG. Ändert der Club sie und niemand pflegt sie nach, rechnet
+   die App still falsch weiter.
+5. **Namenlose Gastplätze** (Maya Bitzer, 30.08.). Steht in keiner Datei,
+   also nicht auflösbar — nur sichtbar machen.
+6. **Zwei Menschen, die in derselben Minute einchecken** und beide nur
+   mit Kurzform in Playtomic stehen. Die Geschwister-Regel greift, die
+   Zeitzuordnung ist dann trotzdem Zufall.
+7. **Google-Grenzen.** `playtomic_raw` hat nach zwei Monaten rund 4.000
+   Zeilen. Wie sich das Schreiben bei einem Jahr verhält, ist ungetestet.
+8. **Zwei Leute gleichzeitig in der App.** Der Sitzungs-Zwischenstand
+   kann dann veralten (siehe Caching).
