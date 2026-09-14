@@ -5122,7 +5122,14 @@ def css_laden():
   font-family: 'Montserrat', -apple-system, BlinkMacSystemFont, sans-serif !important;
  }}
  .block-container {{ padding-top:2.2rem; padding-bottom:3rem; max-width:1240px; }}
- #MainMenu, footer, [data-testid="stToolbar"], [data-testid="stDecoration"] {{ display:none !important; }}
+ /* Nur die Streamlit-Werkzeuge ausblenden, NICHT die ganze Kopfleiste.
+    In neueren Streamlit-Fassungen sitzt der Pfeil zum Wiederaufklappen
+    der Seitenleiste mit in dieser Leiste. Wer sie komplett ausblendet,
+    kommt nach dem Zuklappen nicht mehr ans Menü — genau das ist
+    passiert. */
+ #MainMenu, footer, [data-testid="stDecoration"],
+ [data-testid="stToolbarActions"], [data-testid="stStatusWidget"],
+ [data-testid="stAppDeployButton"] {{ display:none !important; }}
  /* Pfeil zum Wiederaufklappen der Seitenleiste.
     Er sitzt in der Kopfzeile, und die steht oben auf der dunklen
     Seitenfarbe — dadurch war er praktisch unsichtbar. Wer die
@@ -5131,7 +5138,10 @@ def css_laden():
     Streamlit hat die Kennung zwischen den Versionen umbenannt, deshalb
     beide. */
  [data-testid="stSidebarCollapsedControl"],
- [data-testid="collapsedControl"] {{
+ [data-testid="stExpandSidebarButton"],
+ [data-testid="collapsedControl"],
+ button[aria-label="Open sidebar"],
+ button[title="Open sidebar"] {{
   background: {C['ink2']} !important;
   border: 1px solid {C['volt']} !important;
   border-radius: 10px !important;
@@ -5139,8 +5149,16 @@ def css_laden():
   box-shadow: 0 2px 10px rgba(0,0,0,.5) !important;
   opacity: 1 !important;
   visibility: visible !important;
+  /* Fest oben links, damit ihn nichts überdeckt. Streamlit zeigt dieses
+     Element nur, solange die Seitenleiste zugeklappt ist. */
+  display: flex !important;
+  position: fixed !important;
+  top: .55rem !important;
+  left: .55rem !important;
+  z-index: 1000000 !important;
  }}
  [data-testid="stSidebarCollapsedControl"] svg,
+ [data-testid="stExpandSidebarButton"] svg,
  [data-testid="collapsedControl"] svg,
  [data-testid="stSidebarCollapsedControl"] button,
  [data-testid="collapsedControl"] button {{
