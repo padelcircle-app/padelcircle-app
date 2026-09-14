@@ -148,6 +148,16 @@ Monaten, das ist zumutbar.
   durch den Rabattpreis teilbar ist. 18,00 € bei 6,00 € Rabattpreis
   galten in `buchungs_luecken()` als „deckt drei Rabatt-Plätze", und der
   Mitspieler blieb ohne Namen.
+- **Zwei Ansichten, zwei Antworten.** „Zuordnung prüfen" löste den
+  Check-in über die gemerkte Verknüpfung auf und nannte „A. K." — verbraucht
+  hatte ihn aber die Zeile „Alisa" um dieselbe Uhrzeit. Massgeblich ist
+  `Checkin_Name` in der Buchungszeile, nicht die Verknüpfung.
+- **Dieselbe Person unter zwei Schreibweisen am selben Tag.** „Alisa" und
+  „A. K." um 16:00, beide mit Rabatt, ein Check-in: Der zweite Platz ist
+  unbezahlt, kein vergessener Check-in. `rabattierte_buchungen_am()` zählt
+  deshalb über die Verknüpfung hinweg und entdoppelt je Platz (mit
+  `Name_norm`), nicht je Uhrzeit — im Zahlungs-Abgleich ist der Court leer,
+  und beide Zeilen fielen sonst zu einer zusammen.
 - **Summen sagen nichts.** Zwei Fehler haben sich hinter einer
   unveränderten Gesamtzahl versteckt. Immer alt gegen neu diffen und
   die geänderten **Zeilen** lesen.

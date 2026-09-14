@@ -177,6 +177,43 @@ pruefe(stand["julian kalkus"] == "Ja",
 pruefe(stand["fremd person"] == "Nein",
        "ein Check-in ohne deckende Buchung wird wieder frei")
 
+print("\nZWEI PLÄTZE, EIN CHECK-IN")
+# Am 02.09. um 16:00 lagen zwei Rabatt-Plätze derselben Person, unter zwei
+# Schreibweisen, und ein Check-in. Der zweite Platz ist unbezahlt — aber
+# kein vergessener Check-in. Und die Ansicht „Zuordnung prüfen" muss den
+# nennen, der den Check-in wirklich verbraucht hat.
+BLATT["name_mapping"] = pd.DataFrame([
+    {"buchung_name": "a k", "checkin_name": "alisa koellner",
+     "confidence": 100, "timestamp": "", "confirmed_by": "automatisch"},
+    {"buchung_name": "alisa", "checkin_name": "alisa koellner",
+     "confidence": 100, "timestamp": "", "confirmed_by": "automatisch"}])
+BLATT["buchungen"] = pd.DataFrame([
+    {"analysis_date": "2026-09-02", "Datum": "2026-09-02", "Name": "Alisa",
+     "Name_norm": "alisa", "Service_Zeit": "16:00", "Court": "",
+     "Relevant": "Ja", "Check-in": "Ja", "Fehler": "Nein",
+     "Checkin_Zeit": "15:58", "Checkin_Name": "alisa koellner", "Email": ""},
+    {"analysis_date": "2026-09-02", "Datum": "2026-09-02", "Name": "A. K.",
+     "Name_norm": "a k", "Service_Zeit": "16:00", "Court": "",
+     "Relevant": "Ja", "Check-in": "Nein", "Fehler": "Ja",
+     "Checkin_Zeit": "", "Checkin_Name": "", "Email": ""}])
+BLATT["checkins"] = pd.DataFrame([
+    {"analysis_date": "2026-09-02", "Name": "Alisa Köllner",
+     "Name_norm": "alisa koellner", "Gespielt": "Ja", "Checkin_Zeit": "15:58"}])
+BLATT["checkin_zuordnung"] = pd.DataFrame(
+    columns=PC.SHEET_SPALTEN["checkin_zuordnung"])
+PC.st.session_state["name_mapping_cache"] = None
+leeren()
+pruefe(PC.rabattierte_buchungen_am("a k", "2026-09-02") == 2,
+       "zwei Plätze derselben Person am selben Tag zählen als zwei")
+pruefe(bool(PC.ist_zweitbuchung("a k", "2026-09-02")),
+       "der zweite Platz ist eine Zweitbuchung, kein vergessener Check-in")
+zuo = PC.checkin_zuordnungen("2026-09-02")
+pruefe(not zuo.empty and str(zuo.iloc[0]["Zugeordnet zu"]) == "Alisa",
+       "die Ansicht nennt den, der den Check-in verbraucht hat")
+BLATT.pop("name_mapping", None)
+BLATT.pop("checkins", None)
+PC.st.session_state["name_mapping_cache"] = None
+
 print("\nDEINE ENTSCHEIDUNG ZÄHLT")
 # „Fredi" ist die Kurzform von „Frederik" — das sieht ein Mensch, keine
 # Regel. Die App darf so etwas nie selbst verknüpfen, Marcels Klick gilt.

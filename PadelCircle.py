@@ -10880,15 +10880,32 @@ def rabattierte_buchungen_am(name_norm: str, datum: str,
     b = loadsheet("buchungen")
     if b.empty or "analysis_date" not in b.columns:
         return 0
+    # Dieselbe Person kann an einem Tag unter zwei Schreibweisen gebucht
+    # sein: „Alisa" um 16:00 und „A. K." um 16:00, beide mit Rabatt, ein
+    # Check-in. Zählt man nur den exakten Namen, sieht der zweite Platz aus
+    # wie ein vergessener Check-in — dabei ist es ein unbezahlter Platz.
+    gesucht = {str(name_norm)}
+    verknuepfungen = mapping_laden()
+    ziel = verknuepfungen.get(str(name_norm))
+    if ziel:
+        gname = str(ziel["checkin_name"] if isinstance(ziel, dict) else ziel)
+        gesucht |= {str(b_) for b_, z in verknuepfungen.items()
+                    if str(z["checkin_name"] if isinstance(z, dict) else z) == gname}
+
     tag = b[(b["analysis_date"].astype(str) == str(datum)) &
-            (b["Name_norm"].astype(str) == str(name_norm))]
+            (b["Name_norm"].astype(str).isin(gesucht))]
     if tag.empty or "Relevant" not in tag.columns:
         return 0
     if email and "Email" in tag.columns:
         tag = tag[tag["Email"].map(lambda m: gleiche_person(m, email))]
         if tag.empty:
             return 0
-    schluessel = [k for k in ("Service_Zeit", "Court") if k in tag.columns]
+    # Entdoppelt wird je Platz, nicht je Uhrzeit: Im Zahlungs-Abgleich ist
+    # der Court leer, und zwei Plätze derselben Person um 16:00 („Alisa"
+    # und „A. K.") fielen sonst zu einem zusammen — der zweite sah dann aus
+    # wie ein vergessener Check-in statt wie ein unbezahlter Platz.
+    schluessel = [k for k in ("Service_Zeit", "Court", "Name_norm")
+                  if k in tag.columns]
     if schluessel:
         tag = tag.drop_duplicates(subset=schluessel)
     return int((tag["Relevant"].astype(str) == "Ja").sum())
@@ -12127,22 +12144,43 @@ def checkin_zuordnungen(datum: str) -> pd.DataFrame:
             zeilen.append(eintrag)
             continue
 
-        # 2. Direkt über den Namen
-        treffer = (tag_b[tag_b["Name_norm"].astype(str) == ci_norm]
-                   if not tag_b.empty else pd.DataFrame())
-        weg = "Name identisch"
+        # 2. Wer hat ihn wirklich verbraucht? Das steht in der Buchungszeile
+        #    („Checkin_Name"). Vorher löste diese Ansicht über die gemerkte
+        #    Verknüpfung auf und behauptete, der Check-in gehöre zu „A. K." —
+        #    verbraucht hatte ihn aber die Zeile „Alisa" um dieselbe Uhrzeit.
+        #    Zwei Ansichten, zwei Antworten: Die Buchungszeile hat recht.
+        gepflegt = (not tag_b.empty and "Checkin_Name" in tag_b.columns
+                    and tag_b["Checkin_Name"].astype(str).str.strip().ne("").any())
+        genutzt = pd.DataFrame()
+        if not tag_b.empty and "Checkin_Name" in tag_b.columns:
+            genutzt = tag_b[(tag_b["Checkin_Name"].astype(str) == ci_norm)
+                            & (tag_b["Check-in"].astype(str) == "Ja")]
 
-        # 3. Über eine gemerkte Verknüpfung — und wer sie angelegt hat.
-        # Vorher hiess jede „bestätigte Verknüpfung", auch die, die die App
-        # beim Import selbst gelernt hatte. Das las sich, als hättest du
-        # zugeordnet.
-        if treffer.empty and ci_norm in rueck and not tag_b.empty:
-            treffer = tag_b[tag_b["Name_norm"].astype(str).isin(rueck[ci_norm])]
-            gespielt = set(treffer["Name_norm"].astype(str))
-            von_dir = any(_von_dir(mapping.get(b)) for b in rueck[ci_norm]
-                          if b in gespielt)
-            weg = ("von dir verknüpft" if von_dir
-                   else "automatisch verknüpft (App)")
+        treffer = pd.DataFrame()
+        weg = "Name identisch"
+        if not genutzt.empty:
+            treffer = genutzt
+            ziel_norm = str(treffer.iloc[0]["Name_norm"])
+            if ziel_norm == ci_norm:
+                weg = "Name identisch"
+            elif _von_dir(mapping.get(ziel_norm)):
+                weg = "von dir verknüpft"
+            elif ziel_norm in mapping:
+                weg = "automatisch verknüpft (App)"
+            else:
+                weg = "Schreibweise beim Abgleich erkannt"
+        elif not gepflegt:
+            # Zeilen aus der Zeit vor der Spalte: wie bisher über den Namen
+            # und, wenn das nichts ergibt, über die gemerkte Verknüpfung.
+            treffer = (tag_b[tag_b["Name_norm"].astype(str) == ci_norm]
+                       if not tag_b.empty else pd.DataFrame())
+            if treffer.empty and ci_norm in rueck and not tag_b.empty:
+                treffer = tag_b[tag_b["Name_norm"].astype(str).isin(rueck[ci_norm])]
+                gespielt = set(treffer["Name_norm"].astype(str))
+                von_dir = any(_von_dir(mapping.get(b)) for b in rueck[ci_norm]
+                              if b in gespielt)
+                weg = ("von dir verknüpft" if von_dir
+                       else "automatisch verknüpft (App)")
 
         if treffer.empty:
             eintrag["Zugeordnet zu"] = "— keiner Buchung —"
