@@ -2031,14 +2031,15 @@ def mapping_laden() -> dict:
     """
     Die Verknüpfungen, die angewandt werden dürfen.
 
-    Gleicher Nachname, anderer Vorname wird hier ausgesiebt — egal wer
-    die Zuordnung einmal bestätigt hat und egal wie oft sie gespeichert
-    ist. Sie bleibt in der Tabelle stehen und taucht im Name-Abgleich
-    unter „Konflikte" auf, damit sie sichtbar und löschbar ist; wirken
-    tut sie nirgends mehr.
+    Gleicher Nachname bei anderem Vornamen wird ausgesiebt — aber nur,
+    wenn die App die Verknüpfung selbst angelegt hat. Was du von Hand
+    bestätigt hast, gilt: „Fredi Schwarz" ist derselbe Mensch wie
+    „Frederik Schwarz", Kevin und Lina Schafran sind es nicht, und diesen
+    Unterschied kann nur ein Mensch sehen. Zurücknehmen lässt sich jede
+    Verknüpfung im Name-Abgleich.
     """
     return {b: z for b, z in mapping_roh().items()
-            if not namen_sind_verschiedene_personen(
+            if _von_dir(z) or not namen_sind_verschiedene_personen(
                 str(b), str(z["checkin_name"] if isinstance(z, dict) else z))}
 
 
@@ -2057,12 +2058,17 @@ def mapping_speichern(mapping: dict):
 
 
 def mapping_hinzufuegen(buchung_name: str, checkin_name: str, confidence=100):
-    if namen_sind_verschiedene_personen(str(buchung_name), str(checkin_name)):
-        st.error(f"❌ „{buchung_name}“ und „{checkin_name}“ "
-                 "sind zwei verschiedene Menschen — gleicher Nachname, "
-                 "anderer Vorname. Diese Verknüpfung wird nicht "
-                 "gespeichert.")
-        return False
+    """
+    Eine Verknüpfung von Hand bestätigen.
+
+    Gleicher Nachname bei anderem Vornamen bleibt für die App gesperrt —
+    von selbst verknüpft sie nie Geschwister (Kevin und Lina Schafran).
+    Ein Klick von dir steht darüber: „Fredi" ist die Kurzform von
+    „Frederik", und das sieht ein Mensch, keine Regel. Die Verknüpfung
+    wird als deine gespeichert und wirkt dann auch überall.
+    """
+    streitig = namen_sind_verschiedene_personen(str(buchung_name),
+                                                str(checkin_name))
     m = mapping_roh()
     m[buchung_name] = {
         "checkin_name": checkin_name,
@@ -2071,6 +2077,11 @@ def mapping_hinzufuegen(buchung_name: str, checkin_name: str, confidence=100):
         "confirmed_by": "manuell",
     }
     mapping_speichern(m)
+    if streitig:
+        st.warning(f"⚠️ „{buchung_name}“ und „{checkin_name}“ haben denselben "
+                   "Nachnamen, aber verschiedene Vornamen. Von selbst würde "
+                   "die App das nie verknüpfen — gespeichert, weil du es "
+                   "bestätigt hast. Lösen kannst du es im Name-Abgleich.")
     return True
 
 
@@ -2087,9 +2098,11 @@ def mapping_mehrere_hinzufuegen(paare: list, confirmed_by: str = "automatisch"):
     m = mapping_roh()
     jetzt = datetime.now().isoformat()
     for buchung_name, checkin_name, confidence in paare:
-        # Gleicher Nachname, anderer Vorname kommt gar nicht erst rein.
-        if namen_sind_verschiedene_personen(str(buchung_name),
-                                            str(checkin_name)):
+        # Gleicher Nachname, anderer Vorname kommt automatisch nie rein.
+        # Bestätigst du eine Sammelauswahl selbst, gilt deine Entscheidung.
+        if (confirmed_by != "manuell"
+                and namen_sind_verschiedene_personen(str(buchung_name),
+                                                     str(checkin_name))):
             continue
         m[buchung_name] = {
             "checkin_name": checkin_name,

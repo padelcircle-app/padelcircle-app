@@ -177,6 +177,24 @@ pruefe(stand["julian kalkus"] == "Ja",
 pruefe(stand["fremd person"] == "Nein",
        "ein Check-in ohne deckende Buchung wird wieder frei")
 
+print("\nDEINE ENTSCHEIDUNG ZÄHLT")
+# „Fredi" ist die Kurzform von „Frederik" — das sieht ein Mensch, keine
+# Regel. Die App darf so etwas nie selbst verknüpfen, Marcels Klick gilt.
+BLATT["name_mapping"] = pd.DataFrame([
+    {"buchung_name": "fredi schwarz", "checkin_name": "frederik schwarz",
+     "confidence": 100, "timestamp": "", "confirmed_by": "manuell"},
+    {"buchung_name": "lina schafran", "checkin_name": "kevin schafran",
+     "confidence": 100, "timestamp": "", "confirmed_by": "automatisch"}])
+PC.st.session_state["name_mapping_cache"] = None
+leeren()
+m = PC.mapping_laden()
+pruefe("fredi schwarz" in m,
+       "von Hand bestätigt gilt, auch bei gleichem Nachnamen")
+pruefe("lina schafran" not in m,
+       "die App verknüpft Geschwister weiterhin nie von selbst")
+BLATT.pop("name_mapping", None)
+PC.st.session_state["name_mapping_cache"] = None
+
 print("\nDER BUCHER ZAHLT MIT")
 # Eren Can zahlte am 03.09. zweimal 6,00 € statt 18,00 €: einmal für sich,
 # einmal für Koray Sentürk („Paid by the booking owner"). Das sind ZWEI

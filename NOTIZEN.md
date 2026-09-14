@@ -86,9 +86,13 @@ Monaten, das ist zumutbar.
 
 ## Regeln, die nie brechen dürfen
 
-1. **Gleicher Nachname, anderer Vorname = zwei Menschen.** Kevin und
-   Lina Schafran. Gilt beim Abgleich, beim Speichern einer Verknüpfung
-   und beim Anwenden gespeicherter Verknüpfungen.
+1. **Gleicher Nachname, anderer Vorname = zwei Menschen — für die App.**
+   Kevin und Lina Schafran. Gilt beim Abgleich und bei allem, was die App
+   selbst verknüpft. **Marcels Klick steht darüber:** „Fredi Schwarz" ist
+   die Kurzform von „Frederik Schwarz", und diesen Unterschied sieht nur
+   ein Mensch. Von Hand bestätigte Verknüpfungen (`confirmed_by` =
+   „manuell") werden gespeichert und angewandt; die Regel sperrt sie
+   nicht mehr.
 2. **Ein Check-in schliesst genau einen Fall.** EGYM vergütet einmal.
 3. **Nachgeholt wird nach dem Spiel, nie davor.** Und eine Nachholung
    verfällt, sobald ihr Check-in am eigenen Spieltag gebraucht wird.
