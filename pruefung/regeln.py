@@ -36,6 +36,17 @@ for a, b in (("kartal", "necmettin kartal"),
     pruefe(not PC.namen_sind_verschiedene_personen(a, b),
            f"{a} → {b} bleibt erlaubt")
 
+# Eine E-Mail gehört nur dann zu einem Anzeigenamen, wenn der Name darin
+# steckt. Der blosse Nachname reicht nicht — sonst zieht Kim Vorwerk die
+# Zahlung von Hannah Vorwerk an sich, und Hannah wird zum erfundenen Fall.
+for mail, name, erwartet in (
+        ("alisakoellner@gmail.com", "Alisa", True),
+        ("kim.vorwerk@web.de", "Hannah Vorwerk", False),
+        ("mirijamkeil@icloud.com", "Annette Gebhard", False),
+        ("v.schoene97@gmail.com", "Tim Schöne", False)):
+    pruefe(PC._mail_gehoert_zu(mail, name) is erwartet,
+           f"{mail} gehört {'' if erwartet else 'nicht '}zu „{name}“")
+
 print("\nGELD")
 pruefe(PC.WELLPASS_RABATT == 12.0,
        "Playtomic-Rabatt 12,00 € — nur für den Abgleich")

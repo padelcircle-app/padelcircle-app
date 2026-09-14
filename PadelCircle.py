@@ -7840,6 +7840,21 @@ def luecke_beantworten(key: str, name: str, datum: str, zeit: str,
     return True
 
 
+def _mail_gehoert_zu(mail, zahler_name: str) -> bool:
+    """
+    Gehört diese E-Mail-Adresse zu diesem Anzeigenamen?
+
+    Nur, wenn der Name selbst in der Adresse steckt: „alisakoellner@…"
+    gehört zu „Alisa". Der blosse Nachname reicht NICHT. Mit
+    `email_aehnlichkeit` schlug schon der gemeinsame Nachname an — dann
+    zog Kim Vorwerk die Zahlung von Hannah Vorwerk an sich, und Hannah
+    wurde zum erfundenen Fall. Dasselbe bei Schöne, Gebhard, Schneider.
+    """
+    lokal = re.sub(r"[^a-z]", "", normalize_name(str(mail or "").split("@")[0]))
+    teile = [t for t in normalize_name(zahler_name).split() if len(t) >= 3]
+    return bool(lokal) and bool(teile) and all(t in lokal for t in teile)
+
+
 def buchungs_luecken(bdf, slots: list, arten: dict = None,
                      checkins: list = None) -> tuple:
     """
@@ -7882,7 +7897,6 @@ def buchungs_luecken(bdf, slots: list, arten: dict = None,
         return [], {}, []
 
     arten = arten or {}
-    bekannt = {(str(g["datum"]), g["zeit"], g["name_norm"]) for g in slots}
     # Was jeder gezahlt hat, und die einzelnen Plätze dazu. Ohne die
     # Buchung ist ein Betrag mehrdeutig — 9,00 € kann der Viertelanteil
     # eines Double-Courts sein oder 22,00 € minus 13,00 € Wellpass auf
@@ -7899,6 +7913,9 @@ def buchungs_luecken(bdf, slots: list, arten: dict = None,
     # hat an dem Tag überhaupt irgendwo selbst gezahlt?
     eingecheckt = {(str(c["datum"]), c["name_norm"]) for c in (checkins or [])}
     zahler_am_tag = {(str(g["datum"]), g["name_norm"]) for g in slots}
+    slots_je_zeit = {}
+    for g in slots:
+        slots_je_zeit.setdefault((str(g["datum"]), g["zeit"]), []).append(g)
 
     fehlend, korrekturen, unklar, fremd = [], {}, [], 0
     for _, r in bdf.iterrows():
@@ -7939,17 +7956,56 @@ def buchungs_luecken(bdf, slots: list, arten: dict = None,
         if tag not in tage_mit_zahlungen:
             fremd += 1
             continue
-        namen = [str(r.get(f"participant_name_{i}", "") or "").strip()
-                 for i in (1, 2, 3, 4)]
-        namen = [n for n in namen if n and n.lower() != "nan"]
+        namen, mails = [], []
+        for i in (1, 2, 3, 4):
+            n = str(r.get(f"participant_name_{i}", "") or "").strip()
+            if n and n.lower() != "nan":
+                namen.append(n)
+                mails.append(str(r.get(f"participant_email_{i}", "") or "").strip())
 
-        hat = sum(1 for n in namen
-                  if arten.get((tag, zeit, normalize_name(n))) == "wellpass")
+        # Wer von ihnen hat eine eigene Zahlungszeile — auch unter einem
+        # anderen Anzeigenamen?
+        #
+        # Playtomic zeigt dieselbe Person in der Buchung als „A. K." und in
+        # den Zahlungen als „Alisa" (02.09., 16:00, Single Court). Über den
+        # Namen allein findet man das nie. Die Buchung liefert aber die
+        # E-Mail des Teilnehmers, und die passt zum Anzeigenamen der
+        # Zahlung. Ohne diesen Abgleich legte die App für sie einen ZWEITEN
+        # Anspruch an, ihr einziger Check-in deckte nur einen davon, und der
+        # andere stand als offener Fall da — einen Fall, den es nie gab.
+        # In drei Stufen, damit niemand einem anderen die Zahlung wegnimmt:
+        # erst der exakte Name, dann die Schreibvariante, zuletzt die
+        # Adresse. Die Reihenfolge ist wichtig — sonst schnappt sich der
+        # erste Teilnehmer der Liste die Zahlung des zweiten.
+        zugeordnet, vergeben = [], set()
+        rest = list(zip(namen, mails))
+        for stufe in ("exakt", "variante", "mail"):
+            uebrig = []
+            for n, mail in rest:
+                nn = normalize_name(n)
+                treffer_g = None
+                for g in slots_je_zeit.get((tag, zeit), []):
+                    if g["name_norm"] in vergeben:
+                        continue
+                    passt = ((g["name_norm"] == nn) if stufe == "exakt"
+                             else namen_decken_sich(nn, g["name_norm"])
+                             if stufe == "variante"
+                             else bool(mail) and _mail_gehoert_zu(mail, g["name"]))
+                    if passt:
+                        treffer_g = g
+                        break
+                if treffer_g is None:
+                    uebrig.append((n, mail))
+                else:
+                    vergeben.add(treffer_g["name_norm"])
+                    zugeordnet.append((n, treffer_g))
+            rest = uebrig
+        ohne = [n for n, _mail in rest]
+
+        hat = sum(1 for _n, g in zugeordnet
+                  if arten.get((tag, zeit, g["name_norm"])) == "wellpass")
         if hat >= soll:
             continue
-
-        ohne = [n for n in namen
-                if (tag, zeit, normalize_name(n)) not in bekannt]
 
         # Wer eine Zahlungszeile hat, aber nicht als Wellpass gilt: Passt
         # einer seiner Plätze zum Anteil DIESER Buchung minus Abzug, war
@@ -7990,10 +8046,8 @@ def buchungs_luecken(bdf, slots: list, arten: dict = None,
             return treffer
 
         korrigierbar, gaeste = [], 0
-        for n in namen:
-            k = (tag, zeit, normalize_name(n))
-            if k not in bekannt:
-                continue
+        for n, g in zugeordnet:
+            k = (tag, zeit, g["name_norm"])
             d = _deckt(plaetze_von.get(k, []))
             if arten.get(k) == "wellpass":
                 gaeste += max(0, d - 1)     # weitere Plätze gehören Gästen

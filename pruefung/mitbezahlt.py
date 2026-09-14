@@ -105,6 +105,28 @@ stand = lauf(checkins(("Bucher Berg", "20:52"), ("Gast Gast", "21:04")),
 pruefe("Gast Gast" in stand and "Mitspieler von Bucher Berg" not in stand,
        "die Buchungsdatei nennt den Mitspieler beim Namen")
 
+print("\nZWEI ANZEIGENAMEN, EINE PERSON")
+# Playtomic zeigt dieselbe Person in der Buchung als „B. B." und in den
+# Zahlungen als „Birgit". Über den Namen allein findet man das nie — die
+# Buchung liefert aber ihre E-Mail. Ohne diesen Abgleich entstand ein
+# zweiter Anspruch für dieselbe Person, und ihr Check-in deckte nur einen.
+ZWEI_NAMEN = pd.DataFrame([zahlung("Birgit", 6.0, "Z1"),
+                           zahlung("Voll Zahler", 18.0, "Z2")])
+BUCHUNG_MAIL = buchung("B. B.", "Voll Zahler")
+BUCHUNG_MAIL.loc[0, "participant_email_1"] = "birgitbaum@example.com"
+BUCHUNG_MAIL.loc[0, "participant_email_2"] = "voll.zahler@example.com"
+BUCHUNG_MAIL.loc[0, "price"] = "24.00 EUR"
+BLATT.clear()
+PC.st.session_state.clear()
+leeren()
+PC._analysieren_zahlungen(ZWEI_NAMEN, checkins(("Birgit", "20:55")), BUCHUNG_MAIL)
+leeren()
+namen = list(BLATT["buchungen"]["Name"])
+pruefe(namen.count("Birgit") == 1 and "B. B." not in namen,
+       "ein Anspruch statt zwei, wenn die E-Mail zum Zahler passt")
+pruefe(not BLATT["buchungen"][BLATT["buchungen"]["Fehler"] == "Ja"].shape[0],
+       "ihr Check-in deckt ihn, es bleibt kein Fall offen")
+
 print("\nAUSSCHLUSSVERFAHREN")
 # Zwei Teilnehmer ohne eigene Zahlung, aber nur einer hat eingecheckt.
 stand = lauf(checkins(("Bucher Berg", "20:52"), ("Gast Gast", "21:04")),

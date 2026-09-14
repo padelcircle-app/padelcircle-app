@@ -158,6 +158,17 @@ Monaten, das ist zumutbar.
   deshalb über die Verknüpfung hinweg und entdoppelt je Platz (mit
   `Name_norm`), nicht je Uhrzeit — im Zahlungs-Abgleich ist der Court leer,
   und beide Zeilen fielen sonst zu einer zusammen.
+- **Derselbe Mensch, zwei Anzeigenamen.** Playtomic zeigt Alisa Köllner
+  im Buchungsexport als „A. K." und in den Zahlungen als „Alisa". Ohne
+  Abgleich entstand ein zweiter Anspruch für dieselbe Person, ihr einziger
+  Check-in deckte nur einen davon, und der andere stand als Fall da, den es
+  nie gab. `buchungs_luecken()` verbindet Teilnehmer und Zahler deshalb in
+  drei Stufen: exakter Name, Schreibvariante, dann erst die E-Mail.
+- **E-Mail-Ähnlichkeit trifft den Nachnamen.** `email_aehnlichkeit()` sagt
+  bei „kim.vorwerk@web.de" und „Hannah Vorwerk" ja — Familien und Paare
+  werden so vertauscht (gemessen: 7 erfundene Fälle im August). Für die
+  Identität gilt `_mail_gehoert_zu()`: Jeder Namensteil des Zahlers muss in
+  der Adresse stecken.
 - **Summen sagen nichts.** Zwei Fehler haben sich hinter einer
   unveränderten Gesamtzahl versteckt. Immer alt gegen neu diffen und
   die geänderten **Zeilen** lesen.
