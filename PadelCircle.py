@@ -1220,7 +1220,7 @@ ABGELEITETE_CACHES = ("tages_kennzahlen", "verfuegbare_tage", "monats_kennzahlen
                       "verbrauchte_checkins", "anspruch_bilanz", "nachholung_quelle",
                       "mapping_gedeckt_je_tag", "mapping_belegte_checkins",
                       "checkin_erklaerung", "checkin_zuordnungen",
-                      "teilnehmer_am",
+                      "teilnehmer_am", "tage_ohne_buchungsexport",
                       "redundante_korrekturen",
                       "buchungsnamen_am_tag", "abzug_pruefen", "verguetung_wert",
                       "checkins_von_am", "rabattierte_buchungen_am", "checkins_roh_und_verguetet",
@@ -8534,9 +8534,28 @@ def buchungsexport_speichern(bdf: pd.DataFrame) -> int:
     spalten = [c for c in BUCHUNGSEXPORT_SPALTEN if c in bdf.columns]
     n = append_rows(bdf[spalten].copy(), "buchungsexport",
                     id_spalte="booking_id", aktualisieren=True)
-    for fn in ("teilnehmer_am", "checkin_erklaerung"):
+    for fn in ("teilnehmer_am", "checkin_erklaerung", "tage_ohne_buchungsexport"):
         _cache_funktion_leeren(fn)
     return n
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def tage_ohne_buchungsexport() -> list:
+    """
+    Tage im Bestand, für die keine Buchungsdatei abgelegt ist.
+
+    Genau diese Tage überspringt „Neu berechnen" — ohne Buchungsdatei
+    fielen fremdbezahlte Plätze weg. Wer das nicht sieht, klickt und
+    wundert sich, dass sich nichts ändert.
+    """
+    tage = [str(t) for t in verfuegbare_tage()]
+    if not tage:
+        return []
+    df = loadsheet("buchungsexport")
+    if df.empty or "booking_start_date" not in df.columns:
+        return tage
+    da = set(df["booking_start_date"].map(_tag_von))
+    return [t for t in tage if t not in da]
 
 
 def gespeicherter_buchungsexport(tage) -> pd.DataFrame:
@@ -9106,7 +9125,8 @@ Nummern werden automatisch umgewandelt: `0170…` → `+49170…`
                     mime="text/csv", use_container_width=True)
 
         st.markdown("---")
-        with st.expander("🔄 Neu berechnen", expanded=False):
+        with st.expander("🔄 Neu berechnen",
+                         expanded=bool(st.session_state.get("_neu_hinweis"))):
             box("Rechnet die Auswertung aus den gespeicherten Daten neu — "
                 "ohne dass du etwas hochladen musst. Sinnvoll, wenn sich "
                 "Preise, Tarife oder der Wellpass-Abzug geändert haben. "
@@ -9130,6 +9150,19 @@ Nummern werden automatisch umgewandelt: `0170…` → `+49170…`
             # der Hinweis mit dem Neuaufbau der Seite.
             if st.session_state.get("_neu_hinweis"):
                 box(st.session_state.pop("_neu_hinweis"), "warn")
+
+            fehlt = tage_ohne_buchungsexport()
+            if fehlt:
+                box(f"⚠️ Für <b>{len(fehlt)} "
+                    + ("Tag" if len(fehlt) == 1 else "Tage")
+                    + "</b> ist keine Buchungsdatei abgelegt — diese Tage "
+                    "werden übersprungen: "
+                    + ", ".join(datum_kurz(t) for t in fehlt[:12])
+                    + (" …" if len(fehlt) > 12 else "")
+                    + ".<br>Die Buchungsdatei für diesen Zeitraum oben unter "
+                    "<i>Zahlungen + Check-ins</i> mit „Nur Buchungsdatei "
+                    "ablegen“ nachreichen, dann rechnet dieser Knopf sie mit.",
+                    "warn")
 
             tage_alle = verfuegbare_tage()
             if not tage_alle:
