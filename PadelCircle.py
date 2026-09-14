@@ -7349,6 +7349,33 @@ def turnier_vollpreise(slots: list) -> dict:
     return preise
 
 
+def rabatt_plaetze(g: dict) -> int:
+    """
+    Wie viele Plätze dieser Zahlung sind über Wellpass verbilligt?
+
+    Wer für einen Mitspieler mitbezahlt, hat mehrere Zeilen im selben
+    Slot — in Playtomic steht am Platz des Mitspielers „Paid by the
+    booking owner". Jeder verbilligte Platz ist ein eigener
+    Wellpass-Platz, auch wenn nur ein Name daran hängt.
+
+    Genau das fehlte: Eren Can zahlte am 03.09. zweimal 6,00 € statt
+    18,00 €, einmal für sich und einmal für Koray Sentürk. Die App zählte
+    einen Rabatt statt zwei. Korays Check-in stand als überzählig da, und
+    am 02.09. verschwand ein vergessener Check-in ganz.
+    """
+    anteile = moegliche_anteile(g["datum"], g.get("minute", -1))
+    kandidaten = abzug_kandidaten(g["datum"])
+    anzahl = 0
+    for pl in g["plaetze"]:
+        b = pl["betrag"]
+        if pl["frei"] and b == 0:
+            anzahl += 1
+        elif b > 0 and not (anteile and b in anteile) and any(
+                round(b + k, 2) in anteile for k in kandidaten):
+            anzahl += 1
+    return anzahl
+
+
 def slot_bewerten(g: dict, volle, turniere: dict = None,
                   beobachtet: dict = None) -> tuple:
     """
@@ -7870,6 +7897,16 @@ def buchungs_luecken(bdf, slots: list, arten: dict = None) -> tuple:
         def _deckt(betraege) -> int:
             treffer = 0
             for b in betraege:
+                # Ein voller Anteil ist kein Rabatt — auch nicht, wenn er
+                # zufällig durch den Rabattpreis teilbar ist. Kadir zahlte
+                # am 03.09. 18,00 €, der Rabattpreis lag bei 6,00 €:
+                # gelesen als „deckt drei Rabatt-Plätze". Dadurch blieb der
+                # Platz von Koray Sentürk ohne Namen.
+                if anteil > 0.005:
+                    voll_anzahl = b / anteil
+                    if (abs(voll_anzahl - round(voll_anzahl)) < 0.01
+                            and round(voll_anzahl) >= 1):
+                        continue
                 for rest in reste:
                     if rest <= 0.005:
                         if abs(b) < 0.005:
@@ -8091,10 +8128,42 @@ def _analysieren_zahlungen(pdf, cdf, bdf=None, tage_ersetzen=None) -> bool:
         st.caption(f"{len(zusatz)} Spieler aus dem Buchungsexport ergänzt — "
                    "ihr Platz wurde von jemand anderem bezahlt.")
 
+    # Mehrere verbilligte Plätze auf einem Konto sind mehrere
+    # Wellpass-Plätze — siehe rabatt_plaetze(). Nennt die Buchungsdatei
+    # den Mitspieler, steht er schon in `zusatz`. Fehlt sie, kommt der
+    # Platz ohne Namen dazu: sichtbar ist besser als verschwunden.
+    offene_plaetze, zahler = {}, {}
+    for g, art, _t, voll, _a in bewertet:
+        if art != "wellpass":
+            continue
+        k = (str(g["datum"]), g["zeit"])
+        weitere = max(0, rabatt_plaetze(g) - 1)
+        if weitere:
+            offene_plaetze[k] = offene_plaetze.get(k, 0) + weitere
+            if k not in zahler:
+                zahler[k] = (g, voll)
+    for z in zusatz:                      # von der Buchungsdatei benannt
+        k = (str(z["datum"]), z["zeit"])
+        if offene_plaetze.get(k):
+            offene_plaetze[k] -= 1
+    for k, anzahl in offene_plaetze.items():
+        g, voll = zahler[k]
+        for _ in range(anzahl):
+            name = f"Mitspieler von {g['name']}"
+            zusatz.append({
+                "datum": g["datum"], "zeit": g["zeit"], "minute": g["minute"],
+                "name": name, "name_norm": normalize_name(name),
+                "anteil": voll, "court": "", "ohne_namen": True,
+                "grund": (f"0 € — Wellpass-Platz, den {g['name']} mitbezahlt "
+                          "hat · wer das war, steht in Playtomic"),
+            })
+
     ansprueche = [(g, txt) for g, art, txt, _v, _a in bewertet
                   if art == "wellpass"]
-    ansprueche += [(z, f"0 € — Platz von jemand anderem bezahlt "
-                       f"(voller Anteil {euro(z['anteil'])})") for z in zusatz]
+    ansprueche += [(z, z.get("grund") or (f"0 € — Platz von jemand anderem "
+                                          f"bezahlt (voller Anteil "
+                                          f"{euro(z['anteil'])})"))
+                   for z in zusatz]
 
     # Erst die namensgleichen Treffer, dann die Schreibvarianten auf dem,
     # was übrig bleibt. Andernfalls nimmt eine Abkürzung wie „Maximilian
@@ -8133,6 +8202,26 @@ def _analysieren_zahlungen(pdf, cdf, bdf=None, tage_ersetzen=None) -> bool:
             c["benutzt"] = True
             treffer[i] = (c, punkte, abstand, exakt)
 
+    # Ein Platz ohne Namen und genau EIN Check-in in diesem Zeitfenster,
+    # den sonst nichts erklärt: dann gehört er dorthin. Koray Sentürk hat
+    # am 03.09. um 21:0x eingecheckt, sein Platz lief über den Bucher.
+    # Sind es mehrere Check-ins, bleibt der Platz offen — geraten wird
+    # nicht.
+    eigene = {(str(g["datum"]), g["name_norm"]) for g, *_ in bewertet}
+    for i, (g, _txt) in enumerate(ansprueche):
+        if i in treffer or not g.get("ohne_namen"):
+            continue
+        passend = [c for c in checkins
+                   if not c["benutzt"] and c["datum"] == g["datum"]
+                   and c["minute"] >= 0 and g["minute"] >= 0
+                   and CHECKIN_FENSTER[0] <= c["minute"] - g["minute"]
+                   <= CHECKIN_FENSTER[1]
+                   and (str(c["datum"]), c["name_norm"]) not in eigene]
+        if len(passend) == 1:
+            c = passend[0]
+            c["benutzt"] = True
+            treffer[i] = (c, 100.0, c["minute"] - g["minute"], True)
+
     balken = st.progress(0.0)
     status = st.empty()
     mapping = mapping_laden()
@@ -8169,9 +8258,10 @@ def _analysieren_zahlungen(pdf, cdf, bdf=None, tage_ersetzen=None) -> bool:
             "Team": "Ja" if team else "Nein",
             "Fehler": "Ja" if (c is None and not team
                                and not ist_platzhalter(name)) else "Nein",
-            "Quelle": "buchung",       # kam nicht aus der Zahlungsdatei
-            "Rabatt_Grund": ("0 € — Platz von jemand anderem bezahlt"
-                             + (f" · {z['court']}" if z.get("court") else "")),
+            "Quelle": "zahlungen" if z.get("ohne_namen") else "buchung",
+            "Rabatt_Grund": (z.get("grund")
+                             or ("0 € — Platz von jemand anderem bezahlt"
+                                 + (f" · {z['court']}" if z.get("court") else ""))),
             "analysis_date": z["datum"].strftime("%Y-%m-%d"),
         })
 
@@ -11282,17 +11372,21 @@ def _wa_seitenspalte(datum: str, offen_heute: pd.DataFrame):
 
     if len(zugeteilt):
         with st.expander(f"✓ {len(zugeteilt)} bereits einem Tag zugeordnet"):
-            st.caption("Diese Check-ins haben einen älteren Fall geschlossen. "
-                       "Sie sind aufgebraucht — hier stehen sie nur zum "
-                       "Nachschlagen.")
+            st.caption("Diese Check-ins sind aufgebraucht: Sie haben einen "
+                       "älteren Fall geschlossen oder hängen an einer "
+                       "Namensverknüpfung. Steht dort „automatisch "
+                       "verknüpft“, hat das die App selbst gemacht — lösen "
+                       "kannst du es im Name-Abgleich.")
             for _, z in zugeteilt.sort_values(
                     "analysis_date", ascending=False).iterrows():
                 ziel = str(z["_zugeordnet"])
                 zeit = str(z.get("Checkin_Zeit", "")).strip()
+                weg = str(z.get("_weg", "") or "")
                 st.markdown(
                     f'<div class="pc-uez"><div class="nm">{z["Name"]}'
                     f'&nbsp; {chip("zugeordnet zu " + datum_kurz(ziel), "lime")}'
-                    f'</div><div class="mt">Check-in '
+                    + (f'&nbsp; {chip(weg, "soft")}' if weg else '')
+                    + f'</div><div class="mt">Check-in '
                     f'{datum_kurz(str(z["analysis_date"]))}'
                     + (f' · {zeit}' if zeit else '') + '</div></div>',
                     unsafe_allow_html=True)
@@ -13341,6 +13435,8 @@ def offene_checkins_zeitraum(von: date, bis: date,
             wert = verbraucht.get(k)
             return str(wert).split("|", 1)[0] if wert else ""
         df["_zugeordnet"] = df["_key"].map(_ziel)
+        df["_weg"] = df["_key"].map(
+            lambda k: "von dir zugeordnet" if verbraucht.get(k) else "")
     elif verbraucht:
         df = df[~df["_key"].isin(verbraucht.keys())]
 
@@ -13350,9 +13446,18 @@ def offene_checkins_zeitraum(von: date, bis: date,
             lambda r: str(r["Name_norm"]) in belegt.get(
                 str(r["analysis_date"]), set()), axis=1)
         if mit_verbrauchten:
-            # Über eine Verknüpfung gedeckt zählt genauso als zugeordnet
-            df.loc[gedeckt & (df["_zugeordnet"] == ""), "_zugeordnet"] = \
-                df.loc[gedeckt & (df["_zugeordnet"] == ""), "analysis_date"]
+            # Über eine Verknüpfung gedeckt zählt genauso als zugeordnet.
+            # Wer die Verknüpfung angelegt hat, gehört dazu: „zugeordnet"
+            # las sich, als hätte Marcel geklickt — oft war es die App.
+            eigene, fremde = set(), set()
+            for b, d in mapping_laden().items():
+                ziel = str(d["checkin_name"] if isinstance(d, dict) else d)
+                (eigene if _von_dir(d) else fremde).add(ziel)
+            offen = gedeckt & (df["_zugeordnet"] == "")
+            df.loc[offen, "_zugeordnet"] = df.loc[offen, "analysis_date"]
+            df.loc[offen, "_weg"] = df.loc[offen, "Name_norm"].map(
+                lambda n: "von dir verknüpft" if str(n) in eigene
+                else "automatisch verknüpft" if str(n) in fremde else "")
         else:
             df = df[~gedeckt]
 

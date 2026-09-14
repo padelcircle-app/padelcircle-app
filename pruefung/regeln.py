@@ -177,6 +177,23 @@ pruefe(stand["julian kalkus"] == "Ja",
 pruefe(stand["fremd person"] == "Nein",
        "ein Check-in ohne deckende Buchung wird wieder frei")
 
+print("\nDER BUCHER ZAHLT MIT")
+# Eren Can zahlte am 03.09. zweimal 6,00 € statt 18,00 €: einmal für sich,
+# einmal für Koray Sentürk („Paid by the booking owner"). Das sind ZWEI
+# Wellpass-Plätze. Vorher zählte die App einen — Korays Check-in galt als
+# überzählig, und am 02.09. verschwand ein vergessener Check-in ganz.
+from datetime import date as _date
+slot = {"datum": _date(2026, 9, 3), "zeit": "21:00", "minute": 21 * 60,
+        "plaetze": [{"betrag": 6.0, "frei": False}, {"betrag": 6.0, "frei": False}]}
+pruefe(PC.rabatt_plaetze(slot) == 2,
+       "zwei verbilligte Plätze auf einem Konto sind zwei Wellpass-Plätze")
+voll = dict(slot, plaetze=[{"betrag": 18.0, "frei": False}])
+pruefe(PC.rabatt_plaetze(voll) == 0, "ein voller Anteil ist kein Rabatt")
+gemischt = dict(slot, plaetze=[{"betrag": 6.0, "frei": False},
+                               {"betrag": 18.0, "frei": False}])
+pruefe(PC.rabatt_plaetze(gemischt) == 1,
+       "voll plus rabattiert ergibt genau einen Wellpass-Platz")
+
 print("\nCHECK-INS")
 CI = pd.DataFrame([
     {"Name_norm": "kevin schafran", "Gespielt": "Ja",

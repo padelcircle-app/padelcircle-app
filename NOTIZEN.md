@@ -124,6 +124,20 @@ Monaten, das ist zumutbar.
   „nachgeholt" geschlossen und sein Check-in war wieder frei. Jetzt geht
   der Vermerk mit — aber nur der Grund „nachgeholt", nie „bezahlt" oder
   „gesperrt".
+- **Mehrere verbilligte Plätze auf einem Konto sind mehrere
+  Wellpass-Plätze.** Zahlt der Bucher die Zuzahlung eines Mitspielers
+  („Paid by the booking owner"), steht der Mitspieler in KEINER
+  Zahlungszeile — auf dem Konto des Buchers liegen zwei Plätze zu je
+  6,00 €. Die App zählte einen. Folge am 02.09.: ein vergessener
+  Check-in tauchte nie als Fall auf; am 03.09.: der Check-in des
+  Mitspielers galt als überzählig. `rabatt_plaetze()` zählt jetzt jeden
+  verbilligten Platz; ohne Buchungsdatei entsteht ein Platz „Mitspieler
+  von X". In Juli und August: 8 solche Plätze, 6 davon nennt die
+  Buchungsdatei beim Namen.
+- **Ein voller Anteil ist nie ein Rabatt** — auch dann nicht, wenn er
+  durch den Rabattpreis teilbar ist. 18,00 € bei 6,00 € Rabattpreis
+  galten in `buchungs_luecken()` als „deckt drei Rabatt-Plätze", und der
+  Mitspieler blieb ohne Namen.
 - **Summen sagen nichts.** Zwei Fehler haben sich hinter einer
   unveränderten Gesamtzahl versteckt. Immer alt gegen neu diffen und
   die geänderten **Zeilen** lesen.
