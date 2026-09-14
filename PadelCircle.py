@@ -7747,6 +7747,40 @@ def offene_luecken() -> pd.DataFrame:
     return offen.sort_values("datum", ascending=False)
 
 
+def luecken_fragen_zeigen(luecken: pd.DataFrame, prefix: str = "lk",
+                          grenze: int = 20):
+    """
+    Die offenen Fragen als Knöpfe — dieselbe Ansicht in der Daten-Zentrale
+    und in der Tagesarbeit. Ein Klick, und der Fall ist angelegt.
+    """
+    for i, (_, l) in enumerate(luecken.head(grenze).iterrows()):
+        kand = [k.strip() for k in str(l["kandidaten"]).split("|") if k.strip()]
+        with st.container(border=True):
+            st.markdown(f"**{datum_kurz(str(l['datum']))} · {l['zeit']} · "
+                        f"{l['court']}**")
+            st.caption(f"{l['anzahl']} Rabatt fehlt · voller Anteil "
+                       f"{euro(l['anteil'])} · wer hatte Wellpass?")
+            spalten = st.columns(max(2, len(kand) + 1))
+            for j, name in enumerate(kand):
+                with spalten[j]:
+                    if st.button(name[:22], key=f"{prefix}_{i}_{j}",
+                                 use_container_width=True):
+                        if luecke_beantworten(str(l["key"]), name,
+                                              str(l["datum"]), str(l["zeit"]),
+                                              parse_betrag(l["anteil"])):
+                            st.toast(f"{name} angelegt.")
+                            st.rerun()
+            with spalten[len(kand)]:
+                if st.button("Keiner davon", key=f"{prefix}_{i}_x",
+                             use_container_width=True):
+                    if luecke_beantworten(str(l["key"]), "", str(l["datum"]),
+                                          str(l["zeit"]), 0.0):
+                        st.toast("Erledigt.")
+                        st.rerun()
+    if len(luecken) > grenze:
+        st.caption(f"… und {len(luecken) - grenze} weitere.")
+
+
 def luecke_beantworten(key: str, name: str, datum: str, zeit: str,
                        anteil: float) -> bool:
     """
@@ -7806,7 +7840,8 @@ def luecke_beantworten(key: str, name: str, datum: str, zeit: str,
     return True
 
 
-def buchungs_luecken(bdf, slots: list, arten: dict = None) -> tuple:
+def buchungs_luecken(bdf, slots: list, arten: dict = None,
+                     checkins: list = None) -> tuple:
     """
     Spieler, die in der Buchung stehen, aber in den Zahlungen fehlen.
 
@@ -7860,6 +7895,10 @@ def buchungs_luecken(bdf, slots: list, arten: dict = None) -> tuple:
     # würde daraus reihenweise Ansprüche erfinden. Auf dem Prüfbestand
     # waren das 67 aus dem Nichts.
     tage_mit_zahlungen = {str(g["datum"]) for g in slots}
+    # Für das Ausschlussverfahren: Wer hat an dem Tag eingecheckt, und wer
+    # hat an dem Tag überhaupt irgendwo selbst gezahlt?
+    eingecheckt = {(str(c["datum"]), c["name_norm"]) for c in (checkins or [])}
+    zahler_am_tag = {(str(g["datum"]), g["name_norm"]) for g in slots}
 
     fehlend, korrekturen, unklar, fremd = [], {}, [], 0
     for _, r in bdf.iterrows():
@@ -7967,6 +8006,20 @@ def buchungs_luecken(bdf, slots: list, arten: dict = None) -> tuple:
         # Wer gar keine Zahlungszeile hat, braucht kein Gast-Kontingent —
         # bei ihm hat Playtomic die Zeile schlicht nicht angelegt.
         rest_bedarf = soll - hat - len(korrigierbar)
+
+        # Ausschlussverfahren, bevor gefragt wird: Kommen mehr Teilnehmer in
+        # Frage als Rabatte fehlen, entscheidet der Check-in. Wer an dem Tag
+        # eingecheckt hat und sonst nirgends selbst gezahlt hat, war der
+        # Wellpass-Spieler — bleibt danach genau die gesuchte Zahl übrig,
+        # steht der Name fest. Am 20.08. um 15:30 kamen Luca Engstler und
+        # Fabian Shi in Frage; eingecheckt hat nur Luca.
+        if 0 < rest_bedarf < len(ohne):
+            mit_checkin = [n for n in ohne
+                           if (tag, normalize_name(n)) in eingecheckt
+                           and (tag, normalize_name(n)) not in zahler_am_tag]
+            if len(mit_checkin) == rest_bedarf:
+                ohne = mit_checkin
+
         if rest_bedarf != len(ohne):
             unklar.append({
                 "key": f"{tag}|{zeit}|{str(r.get('resource_name', '')).strip()}",
@@ -8131,7 +8184,8 @@ def _analysieren_zahlungen(pdf, cdf, bdf=None, tage_ersetzen=None) -> bool:
              for g, art, _t, _v, _a in bewertet}
     for k in umbuchen:
         arten[k] = ZAHLT_FUER_GAST
-    zusatz, korrekturen, unklar = buchungs_luecken(bdf, slots, arten)
+    zusatz, korrekturen, unklar = buchungs_luecken(bdf, slots, arten,
+                                                  checkins)
     if korrekturen:
         # Die Buchung kennt den echten Anteil und sagt, wie viele Rabatte
         # drinstecken. Wo das mit einem Betrag zusammenpasst, den die
@@ -8177,7 +8231,10 @@ def _analysieren_zahlungen(pdf, cdf, bdf=None, tage_ersetzen=None) -> bool:
         k = (str(z["datum"]), z["zeit"])
         if offene_plaetze.get(k):
             offene_plaetze[k] -= 1
+    fragen = {(str(u["datum"]), u["zeit"]) for u in unklar}
     for k, anzahl in offene_plaetze.items():
+        if k in fragen:
+            continue          # dafür steht schon eine Frage mit Namen offen
         g, voll = zahler[k]
         for _ in range(anzahl):
             name = f"Mitspieler von {g['name']}"
@@ -8833,35 +8890,7 @@ def modul_daten():
                 "kommen mehrere Teilnehmer dafür in Frage. In Playtomic "
                 "steht bei der richtigen Person „Egym Wellpass“ — hier "
                 "einmal auswählen, dann ist der Fall angelegt.", "info")
-            for i, (_, l) in enumerate(luecken.head(20).iterrows()):
-                kand = [k.strip() for k in str(l["kandidaten"]).split("|")
-                        if k.strip()]
-                with st.container(border=True):
-                    st.markdown(
-                        f"**{datum_kurz(str(l['datum']))} · {l['zeit']} · "
-                        f"{l['court']}**")
-                    st.caption(f"{l['anzahl']} Rabatt fehlt · voller Anteil "
-                               f"{euro(l['anteil'])} · wer hatte Wellpass?")
-                    spalten = st.columns(max(2, len(kand) + 1))
-                    for j, name in enumerate(kand):
-                        with spalten[j]:
-                            if st.button(name[:22], key=f"lk_{i}_{j}",
-                                         use_container_width=True):
-                                if luecke_beantworten(
-                                        str(l["key"]), name, str(l["datum"]),
-                                        str(l["zeit"]), parse_betrag(l["anteil"])):
-                                    st.toast(f"{name} angelegt.")
-                                    st.rerun()
-                    with spalten[len(kand)]:
-                        if st.button("Keiner davon", key=f"lk_{i}_x",
-                                     use_container_width=True):
-                            if luecke_beantworten(str(l["key"]), "",
-                                                  str(l["datum"]),
-                                                  str(l["zeit"]), 0.0):
-                                st.toast("Erledigt.")
-                                st.rerun()
-            if len(luecken) > 20:
-                st.caption(f"… und {len(luecken) - 20} weitere.")
+            luecken_fragen_zeigen(luecken, "dz")
 
         with st.expander("Wie gerechnet wird"):
             st.markdown(f"""
@@ -11942,6 +11971,21 @@ def _wa_tagesarbeit():
     links, rechts = st.columns([2, 1], gap="medium")
 
     with links:
+        # Offene Fragen dieses Tages zuerst: Dort fehlt ein Wellpass-Platz,
+        # und es kommen mehrere Teilnehmer der Buchung dafür in Frage.
+        # Bisher standen sie nur in der Daten-Zentrale und wurden übersehen.
+        fragen = offene_luecken()
+        if not fragen.empty:
+            fragen = fragen[fragen["datum"].astype(str) == str(datum)]
+        if not fragen.empty:
+            st.markdown(f"##### 🤔 Wer hatte Wellpass?  ·  {len(fragen)}")
+            box("Hier fehlt ein Wellpass-Rabatt, und mehrere Teilnehmer der "
+                "Buchung kommen dafür in Frage. In Playtomic steht bei der "
+                "richtigen Person „Egym Wellpass“ — ein Klick, dann ist der "
+                "Fall angelegt.", "info")
+            luecken_fragen_zeigen(fragen, f"wa_lk_{datum}")
+            st.markdown("---")
+
         if offen.empty:
             box("✅ Für diesen Tag ist alles geklärt.", "ok")
         else:

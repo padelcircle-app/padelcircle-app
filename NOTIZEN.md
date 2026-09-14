@@ -135,9 +135,15 @@ Monaten, das ist zumutbar.
   6,00 €. Die App zählte einen. Folge am 02.09.: ein vergessener
   Check-in tauchte nie als Fall auf; am 03.09.: der Check-in des
   Mitspielers galt als überzählig. `rabatt_plaetze()` zählt jetzt jeden
-  verbilligten Platz; ohne Buchungsdatei entsteht ein Platz „Mitspieler
-  von X". In Juli und August: 8 solche Plätze, 6 davon nennt die
-  Buchungsdatei beim Namen.
+  verbilligten Platz. Wen es trifft, entscheidet in dieser Reihenfolge:
+  die Buchungsdatei nennt den Teilnehmer ohne eigene Zahlung; kommen
+  mehrere in Frage, **scheidet der Check-in aus** (wer an dem Tag
+  eingecheckt hat und sonst nirgends gezahlt hat, war es — 20.08. Luca
+  Engstler gegen Fabian Shi); bleiben dann noch mehrere, **fragt die App**
+  statt zu raten (13.08. Yigit Sentürk gegen M. D), und die Frage steht
+  jetzt in der Tagesarbeit beim Tag, nicht nur in der Daten-Zentrale.
+  Ohne Buchungsdatei gibt es keine Namen, dann entsteht „Mitspieler von
+  X". In Juli und August: 8 solche Plätze.
 - **Ein voller Anteil ist nie ein Rabatt** — auch dann nicht, wenn er
   durch den Rabattpreis teilbar ist. 18,00 € bei 6,00 € Rabattpreis
   galten in `buchungs_luecken()` als „deckt drei Rabatt-Plätze", und der

@@ -30,6 +30,18 @@ werden nie verknüpft, ein Check-in schliesst genau einen Fall, die
 Preisliste rechnet die Zeitfenster richtig, und die 12,00 € Rabatt
 bleiben von den 12,35 € Vergütung getrennt. **Nach jeder Änderung.**
 
+### `mitbezahlt.py` — zwei Sekunden, keine Dateien
+
+```bash
+python3 pruefung/mitbezahlt.py
+```
+
+Der Fall, der Geld kostet: Der Bucher zahlt die Zuzahlung eines
+Wellpass-Mitspielers, der damit in keiner Zahlungszeile steht. Prüft alle
+Spielarten — mit und ohne Buchungsdatei, mit Ausschlussverfahren über den
+Check-in, und dass die App bei zwei möglichen Personen fragt statt zu
+raten. Erfundene Namen, keine Kundendaten.
+
 ### `abgleich.py` — der ganze Durchlauf
 
 ```bash
