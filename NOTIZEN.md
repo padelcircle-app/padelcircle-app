@@ -263,3 +263,36 @@ ist auch nicht belegt:
    Zeilen. Wie sich das Schreiben bei einem Jahr verhält, ist ungetestet.
 8. **Zwei Leute gleichzeitig in der App.** Der Sitzungs-Zwischenstand
    kann dann veralten (siehe Caching).
+
+## Konten und Zugänge (Stand 16.09.2026)
+
+Die App lief bis zum 16.09.2026 auf dem privaten Sammelkonto
+`padelcircle.app@gmail.com`. Seitdem gehört alles dem Firmenkonto
+**info@padelcircle.de**: das Sheet „Padel Circle Data" (übertragen,
+gleiche ID), das Google-Cloud-Projekt `padel-circle-app`, das
+GitHub-Konto `padelcircle-app` und das Streamlit-Konto. Gmail hat
+nirgends mehr Zugriff.
+
+Wichtig für später: Das Dienstkonto
+`padel-circle-app@padel-circle-app.iam.gserviceaccount.com` gehört dem
+Cloud-Projekt, nicht einer Person. Wechselt nur der Mensch, bleibt der
+Schlüssel in den Streamlit-Secrets unangetastet.
+
+Offen aus dem Umzug:
+
+1. **Zwei-Faktor bei GitHub einschalten.** Passwort ist gesetzt, Google
+   mit info@ verknüpft — 2FA fehlt noch.
+2. **Twilio** (WhatsApp-Versand): Login-Adresse auf info@ ändern. Die
+   Secrets bleiben, wie sie sind.
+3. **Playtomic und EGYM**: prüfen, ob die Zugänge noch auf einer
+   privaten Adresse laufen.
+4. **Repo öffentlich?** `padelcircle-app` und `padelcircle-assets` sind
+   öffentlich. Zugangsdaten stecken in keinem Commit (alle 192 geprüft),
+   aber Preise, EGYM-ID und die ganze Logik sind lesbar. Wird das Repo
+   privat, braucht Streamlit einmal „Private access → Connect here".
+5. **Gmail-Konto nicht löschen**, ein paar Wochen liegen lassen.
+6. **Standort 2**: eigenes Sheet, eigenes Cloud-Projekt mit eigenem
+   Dienstkonto, eigenes Repo mit eigenem SSH-Schlüssel, eigene
+   Streamlit-App, angepasster CONFIG-Block. Der Schlüsselbund auf dem
+   Mac kennt nur einen github.com-Zugang — für ein zweites Konto
+   deshalb SSH statt HTTPS.
