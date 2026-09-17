@@ -334,7 +334,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # Steht unten in der Seitenleiste. Damit lässt sich auf einen Blick
 # sehen, welche Fassung gerade läuft — bei „stimmt immer noch nicht"
 # ist das die erste Frage.
-APP_STAND       = "Fassung 53 · 18.09.2026"
+APP_STAND       = "Fassung 54 · 17.09.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -10619,6 +10619,7 @@ def altbestand_zuruecknehmen() -> int:
 
 DRIVE_API = "https://www.googleapis.com/drive/v3"
 AUFTRAG_DATEI = "auftrag.json"
+STATUS_DATEI = "status.json"
 AUSTAUSCH_ARTEN = {"zahlungen": "Zahlungen · bezahlt",
                    "offen":     "Zahlungen · offene Posten",
                    "checkins":  "Wellpass Check-ins",
@@ -10733,6 +10734,37 @@ def austausch_holen() -> dict:
     return gefunden
 
 
+def austausch_status() -> dict:
+    """
+    Was meldet das Hol-Programm auf dem Mac? → {} wenn es nichts gemeldet hat.
+
+    Die Meldung liegt als `status.json` im selben Ordner. Wie alt sie ist,
+    sagt mehr als ihr Inhalt: Steht dort „läuft" von vor einer Stunde, ist
+    der Mac nicht mehr dran.
+    """
+    try:
+        datei = next((d for d in drive_liste() if d["name"] == STATUS_DATEI),
+                     None)
+        if datei is None:
+            return {}
+        stand = json.loads(drive_inhalt(datei["id"]).decode("utf-8"))
+    except Exception:                           # noqa: BLE001
+        return {}
+    gemeldet = parse_datetime_safe(stand.get("zeit"))
+    if gemeldet is not None:
+        minuten = int((datetime.now() - gemeldet).total_seconds() // 60)
+        stand["alter"] = ("gerade eben" if minuten < 1 else
+                          f"vor {minuten} Min." if minuten < 90 else
+                          f"vor {minuten // 60} Std.")
+        # Ein „läuft", das lange stillsteht, ist in Wahrheit ein Abbruch.
+        if stand.get("zustand") == "laeuft" and minuten > 10:
+            stand["zustand"] = "fehler"
+            stand["text"] = ("Der Mac hat angefangen, aber seit "
+                             f"{stand['alter']} nichts mehr gemeldet. "
+                             "Läuft das Hol-Programm noch?")
+    return stand
+
+
 def fehlende_tage_bis_gestern() -> list:
     """Welche Tage fehlen zwischen dem letzten Tag im Bestand und gestern?"""
     tage = [str(t) for t in verfuegbare_tage()]
@@ -10764,29 +10796,51 @@ def modul_daten():
             box("Alles bis gestern ist da. Neue Dateien kannst du trotzdem "
                 "jederzeit holen.", "ok")
 
-        h1, h2 = st.columns([1, 1])
+        gestern = str(date.today() - timedelta(days=1))
+        h1, h2 = st.columns([2, 1])
+        with h2:
+            zeitraum = st.selectbox(
+                "Zeitraum", ["Gestern", "Letzte 7 Tage", "Diesen Monat"],
+                key="drive_zeitraum", label_visibility="collapsed")
+        von = {"Gestern": gestern,
+               "Letzte 7 Tage": str(date.today() - timedelta(days=7)),
+               "Diesen Monat": str(date.today().replace(day=1))}[zeitraum]
         with h1:
-            if st.button("📥 Daten holen", type="primary",
+            if st.button(f"📥 Daten holen · {zeitraum.lower()}", type="primary",
                          use_container_width=True, key="btn_drive_holen"):
-                with st.spinner("Austausch-Ordner wird gelesen …"):
-                    # Der Auftrag ist für das Hol-Programm auf dem Mac
-                    # gedacht. Liegt dort keins, schadet er nicht — die
-                    # App liest einfach, was schon im Ordner liegt.
-                    try:
-                        drive_schreiben(AUFTRAG_DATEI, json.dumps({
-                            "gestellt": datetime.now().isoformat(timespec="seconds"),
-                            "von": st.session_state.get("nutzer", "App"),
-                            "tage": fehlt or [str(date.today())]}, ensure_ascii=False))
-                    except Exception:           # noqa: BLE001
-                        pass
-                    st.session_state["drive_dateien"] = austausch_holen()
+                with st.spinner("Auftrag geht an den Mac …"):
+                    # Der Auftrag liegt im Austausch-Ordner. Das Hol-Programm
+                    # auf dem Mac sieht ihn dort, lädt die vier Dateien und
+                    # meldet sich über status.json zurück.
+                    st.session_state["drive_auftrag"] = drive_schreiben(
+                        AUFTRAG_DATEI, json.dumps(
+                            {"gestellt": datetime.now().isoformat(timespec="seconds"),
+                             "von": von, "bis": str(date.today())},
+                            ensure_ascii=False))
                 st.rerun()
         with h2:
-            if st.session_state.get("drive_dateien"):
-                if st.button("🗑 Gefundene Dateien vergessen",
-                             use_container_width=True, key="btn_drive_weg"):
-                    st.session_state.pop("drive_dateien", None)
-                    st.rerun()
+            if st.button("🔄 Nachsehen", use_container_width=True,
+                         key="btn_drive_pruefen"):
+                with st.spinner("Austausch-Ordner wird gelesen …"):
+                    st.session_state["drive_dateien"] = austausch_holen()
+                st.rerun()
+
+        # Was meldet der Mac?
+        stand = austausch_status()
+        if stand:
+            zeichen = {"laeuft": "⏳", "fertig": "✅", "bereit": "🟢",
+                       "fehler": "⚠️", "anmeldung_noetig": "🔑"}.get(
+                           stand.get("zustand", ""), "•")
+            art = {"fehler": "err", "anmeldung_noetig": "warn"}.get(
+                stand.get("zustand", ""), "info")
+            box(f"{zeichen} <b>Mac:</b> {stand.get('text', '')} "
+                f"<span style='opacity:.6'>({stand.get('alter', '')})</span>", art)
+            if stand.get("zustand") == "anmeldung_noetig":
+                st.caption("Im Terminal einmal: "
+                           "`python3 robot/hol_programm.py anmelden`")
+        if st.session_state.get("drive_auftrag"):
+            st.caption("Auftrag liegt im Ordner. Der Mac braucht meist unter "
+                       "einer Minute — dann auf „Nachsehen“ drücken.")
 
         gefunden = st.session_state.get("drive_dateien") or {}
         if gefunden.get("_fehler"):
