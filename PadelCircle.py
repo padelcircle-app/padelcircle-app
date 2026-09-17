@@ -334,7 +334,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # Steht unten in der Seitenleiste. Damit lässt sich auf einen Blick
 # sehen, welche Fassung gerade läuft — bei „stimmt immer noch nicht"
 # ist das die erste Frage.
-APP_STAND       = "Fassung 54 · 17.09.2026"
+APP_STAND       = "Fassung 55 · 17.09.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -10663,30 +10663,42 @@ def drive_inhalt(datei_id: str) -> bytes:
     return antwort.content
 
 
-def drive_schreiben(name: str, inhalt: str, ordner: str = None) -> bool:
-    """Kleine Textdatei in den Ordner legen oder ersetzen (Auftrag, Status)."""
+def drive_schreiben(name: str, inhalt: str, ordner: str = None) -> tuple:
+    """
+    Kleine Textdatei in den Ordner legen oder ersetzen (Auftrag, Status).
+    → (geklappt, Meldung)
+
+    In zwei Schritten statt in einem: erst die leere Datei anlegen, dann
+    den Inhalt hineinschreiben. Der gebastelte Mehrteil-Upload war eine
+    Fehlerquelle, und wenn er schiefging, merkte es niemand — der Knopf
+    „Daten holen" tat dann still gar nichts.
+    """
     ordner = ordner or austausch_ordner()
     if not ordner:
-        return False
-    vorhanden = next((d for d in drive_liste(ordner) if d["name"] == name), None)
-    daten = inhalt.encode("utf-8")
-    if vorhanden:
-        antwort = _drive().patch(
-            f"https://www.googleapis.com/upload/drive/v3/files/{vorhanden['id']}",
-            params={"uploadType": "media"}, data=daten,
+        return False, "Kein Austausch-Ordner in der Konfiguration."
+    try:
+        vorhanden = next((d for d in drive_liste(ordner) if d["name"] == name),
+                         None)
+        if vorhanden is None:
+            angelegt = _drive().post(
+                f"{DRIVE_API}/files",
+                json={"name": name, "parents": [ordner],
+                      "mimeType": "application/json"})
+            if not angelegt.ok:
+                return False, f"Anlegen: {angelegt.status_code} {angelegt.text[:160]}"
+            datei_id = angelegt.json()["id"]
+        else:
+            datei_id = vorhanden["id"]
+        geschrieben = _drive().patch(
+            f"https://www.googleapis.com/upload/drive/v3/files/{datei_id}",
+            params={"uploadType": "media"}, data=inhalt.encode("utf-8"),
             headers={"Content-Type": "application/json"})
-    else:
-        grenze = "pcgrenze" + secrets.token_hex(8)
-        koerper = (f"--{grenze}\r\nContent-Type: application/json; charset=UTF-8"
-                   f"\r\n\r\n{json.dumps({'name': name, 'parents': [ordner]})}\r\n"
-                   f"--{grenze}\r\nContent-Type: application/json\r\n\r\n"
-                   f"{inhalt}\r\n--{grenze}--")
-        antwort = _drive().post(
-            "https://www.googleapis.com/upload/drive/v3/files",
-            params={"uploadType": "multipart"},
-            data=koerper.encode("utf-8"),
-            headers={"Content-Type": f"multipart/related; boundary={grenze}"})
-    return antwort.ok
+        if not geschrieben.ok:
+            return False, (f"Schreiben: {geschrieben.status_code} "
+                           f"{geschrieben.text[:160]}")
+        return True, "Auftrag liegt im Ordner."
+    except Exception as e:                      # noqa: BLE001
+        return False, f"{type(e).__name__}: {str(e)[:160]}"
 
 
 def austausch_art(name: str, kopf: bytes) -> str:
@@ -10707,6 +10719,26 @@ def austausch_art(name: str, kopf: bytes) -> str:
         offen = text.count(";Pending;") + text.count(";Voided;")
         return "zahlungen" if bezahlt >= offen else "offen"
     return ""
+
+
+def austausch_zeitraum(inhalt: bytes) -> str:
+    """
+    Welche Spieltage stecken in der Datei? → „16.09.–17.09." oder ""
+
+    Ohne diese Angabe sieht man der Anzeige nicht an, ob die Dateien von
+    gestern sind oder noch vom letzten Lauf liegen geblieben.
+    """
+    text = inhalt.decode("utf-8", "replace")
+    tage = set()
+    for t, m, j in re.findall(r"\b(\d{2})/(\d{2})/(\d{4}) \d{2}:\d{2}", text):
+        tage.add(f"{j}-{m}-{t}")
+    for j, m, t in re.findall(r"\b(\d{4})-(\d{2})-(\d{2})", text):
+        tage.add(f"{j}-{m}-{t}")
+    if not tage:
+        return ""
+    erster, letzter = min(tage), max(tage)
+    return (datum_kurz(erster) if erster == letzter
+            else f"{datum_kurz(erster)}–{datum_kurz(letzter)}")
 
 
 def austausch_holen() -> dict:
@@ -10808,15 +10840,39 @@ def modul_daten():
         with h1:
             if st.button(f"📥 Daten holen · {zeitraum.lower()}", type="primary",
                          use_container_width=True, key="btn_drive_holen"):
-                with st.spinner("Auftrag geht an den Mac …"):
-                    # Der Auftrag liegt im Austausch-Ordner. Das Hol-Programm
-                    # auf dem Mac sieht ihn dort, lädt die vier Dateien und
-                    # meldet sich über status.json zurück.
-                    st.session_state["drive_auftrag"] = drive_schreiben(
-                        AUFTRAG_DATEI, json.dumps(
-                            {"gestellt": datetime.now().isoformat(timespec="seconds"),
-                             "von": von, "bis": str(date.today())},
-                            ensure_ascii=False))
+                # Der Auftrag liegt im Austausch-Ordner. Das Hol-Programm auf
+                # dem Mac sieht ihn dort, lädt die vier Dateien und meldet
+                # sich über status.json zurück. Die App wartet darauf —
+                # sonst müsste man raten, wann man nachsehen soll.
+                gestellt = datetime.now()
+                geklappt, meldung = drive_schreiben(
+                    AUFTRAG_DATEI, json.dumps(
+                        {"gestellt": gestellt.isoformat(timespec="seconds"),
+                         "von": von, "bis": str(date.today())},
+                        ensure_ascii=False))
+                if not geklappt:
+                    st.session_state["drive_fehler"] = meldung
+                else:
+                    st.session_state.pop("drive_fehler", None)
+                    with st.spinner("Der Mac holt die Dateien … "
+                                    "(dauert etwa eine Minute)"):
+                        fertig = False
+                        for _ in range(30):     # bis zu 2½ Minuten
+                            time.sleep(5)
+                            stand = austausch_status()
+                            gemeldet = parse_datetime_safe(stand.get("zeit"))
+                            if gemeldet is None or gemeldet < gestellt:
+                                continue        # noch die alte Meldung
+                            if stand.get("zustand") in ("fertig", "fehler",
+                                                        "anmeldung_noetig"):
+                                fertig = True
+                                break
+                        if fertig:
+                            st.session_state["drive_dateien"] = austausch_holen()
+                        else:
+                            st.session_state["drive_fehler"] = (
+                                "Der Mac hat sich nicht gemeldet. Läuft er, "
+                                "und ist das Hol-Programm gestartet?")
                 st.rerun()
         with h2:
             if st.button("🔄 Nachsehen", use_container_width=True,
@@ -10838,9 +10894,9 @@ def modul_daten():
             if stand.get("zustand") == "anmeldung_noetig":
                 st.caption("Im Terminal einmal: "
                            "`python3 robot/hol_programm.py anmelden`")
-        if st.session_state.get("drive_auftrag"):
-            st.caption("Auftrag liegt im Ordner. Der Mac braucht meist unter "
-                       "einer Minute — dann auf „Nachsehen“ drücken.")
+        if st.session_state.get("drive_fehler"):
+            box("Der Auftrag kam nicht beim Mac an: "
+                f"{st.session_state['drive_fehler']}", "err")
 
         gefunden = st.session_state.get("drive_dateien") or {}
         if gefunden.get("_fehler"):
@@ -10853,8 +10909,10 @@ def modul_daten():
             zeilen = []
             for art, titel in AUSTAUSCH_ARTEN.items():
                 d = gefunden.get(art)
+                zeitraum = austausch_zeitraum(d["inhalt"]) if d else ""
                 zeilen.append(f"{'✅' if d else '—'} <b>{titel}</b>: "
-                              + (f"{d['name']} · {len(d['inhalt']) // 1024} KB"
+                              + (f"{zeitraum or d['name']} · "
+                                 f"{len(d['inhalt']) // 1024} KB"
                                  if d else "fehlt im Ordner"))
             box("<br>".join(zeilen), "info")
 
