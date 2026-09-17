@@ -334,7 +334,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # Steht unten in der Seitenleiste. Damit lässt sich auf einen Blick
 # sehen, welche Fassung gerade läuft — bei „stimmt immer noch nicht"
 # ist das die erste Frage.
-APP_STAND       = "Fassung 55 · 17.09.2026"
+APP_STAND       = "Fassung 56 · 17.09.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -10680,15 +10680,12 @@ def drive_schreiben(name: str, inhalt: str, ordner: str = None) -> tuple:
         vorhanden = next((d for d in drive_liste(ordner) if d["name"] == name),
                          None)
         if vorhanden is None:
-            angelegt = _drive().post(
-                f"{DRIVE_API}/files",
-                json={"name": name, "parents": [ordner],
-                      "mimeType": "application/json"})
-            if not angelegt.ok:
-                return False, f"Anlegen: {angelegt.status_code} {angelegt.text[:160]}"
-            datei_id = angelegt.json()["id"]
-        else:
-            datei_id = vorhanden["id"]
+            # Ein Google-Dienstkonto hat keinen eigenen Speicherplatz und
+            # darf deshalb nichts NEU anlegen — ändern darf es. Die Datei
+            # legt das Hol-Programm auf dem Mac an und hält sie am Leben.
+            return False, (f"Im Austausch-Ordner fehlt „{name}“. Läuft das "
+                           "Hol-Programm auf dem Mac?")
+        datei_id = vorhanden["id"]
         geschrieben = _drive().patch(
             f"https://www.googleapis.com/upload/drive/v3/files/{datei_id}",
             params={"uploadType": "media"}, data=inhalt.encode("utf-8"),
