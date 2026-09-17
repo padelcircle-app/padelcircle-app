@@ -21,3 +21,11 @@ Checkins*.csv
 
 # Pruefwerkzeuge erzeugen Zwischendateien
 pruefung/__pycache__/
+
+# Fehlerarchiv und Tests enthalten Kundennamen. Erst ins Repo, wenn es
+# privat ist (Entscheidung Marcel, Stand 17.09.2026).
+FEHLERLOG.md
+VORSCHLAG-EVENTS.md
+tests/
+robot/
+.github/

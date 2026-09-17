@@ -325,7 +325,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # Steht unten in der Seitenleiste. Damit lässt sich auf einen Blick
 # sehen, welche Fassung gerade läuft — bei „stimmt immer noch nicht"
 # ist das die erste Frage.
-APP_STAND       = "Fassung 51 · 17.09.2026"
+APP_STAND       = "Fassung 52 · 17.09.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -7389,7 +7389,11 @@ def zahlungs_slots(pdf: pd.DataFrame) -> list:
             "einzelzahler": False,
             # Die Playtomic-Konto-ID. Zwei Konten können denselben
             # Anzeigenamen haben („Jenny" 9146648 und „Jenny " 9046526).
-            "user_id": ""})
+            "user_id": "",
+            # Davon noch nicht bezahlt (Pending). Nur die Summenprüfung
+            # beim Event braucht das: Playtomics Gesamtpreis eines Events
+            # enthält offene Anmeldungen mal, mal nicht.
+            "ausstehend": 0.0})
         if hat_sku and str(r.get("Product SKU", "")).strip() == TURNIER_SKU:
             g["turnier"] = True
         if str(r.get("Payment type", "")).strip().lower() == "single payer":
@@ -7428,6 +7432,8 @@ def zahlungs_slots(pdf: pd.DataFrame) -> list:
             g["plaetze"].append({"betrag": round(betrag, 2), "frei": frei})
             if frei:
                 g["frei"] = True
+            if status == "pending":
+                g["ausstehend"] += betrag
 
         # Die ausführlichste Schreibweise gewinnt als Anzeigename
         if len(name) > len(g["name"]):
@@ -7609,6 +7615,126 @@ def turnier_vollpreise(slots: list) -> dict:
     return preise
 
 
+def events_aus_export(bdf) -> list:
+    """
+    Die Events eines Buchungsexports — eines je `tournament_id`.
+
+    Playtomic schreibt ein Event einmal pro belegtem Court. Erst die
+    Kennung macht daraus EINE Veranstaltung mit einer Teilnehmerliste und
+    einem Gesamtpreis. Über die Uhrzeit allein ging das nicht: Am 16.09.
+    liefen zwei „MIXED AMERICANO" gleichzeitig, und die App warf beide in
+    einen Topf.
+
+    → [{id, name, datum, start, ende, courts, teilnehmer, gesamt}]
+    """
+    if bdf is None or getattr(bdf, "empty", True):
+        return []
+    events = {}
+    for _, r in bdf.iterrows():
+        kennung = event_kennung(r)
+        if not kennung:
+            continue
+        if str(r.get("status", "")).strip().upper() == "CANCELED":
+            continue
+        start = parse_datetime_safe(r.get("booking_start_date"))
+        if start is None:
+            continue
+        e = events.setdefault(kennung, {
+            "id": kennung, "name": event_titel(r), "datum": start.date(),
+            "start": start, "ende": parse_datetime_safe(r.get("booking_end_date")),
+            "courts": set(), "teilnehmer": {},
+            # `price` ist der Gesamtumsatz des Events und steht in jeder
+            # Court-Zeile gleich — nicht aufsummieren.
+            "gesamt": parse_betrag(r.get("price"))})
+        court = str(r.get("resource_name", "") or "").strip()
+        if court:
+            e["courts"].add(court)
+        for n, mail in _teilnehmer_liste(r, EVENT_MAX_PLAETZE):
+            nn = normalize_name(n)
+            if nn and nn not in e["teilnehmer"]:
+                e["teilnehmer"][nn] = (n, nn, mail)
+    return list(events.values())
+
+
+def events_zuordnen(slots: list, events: list) -> dict:
+    """
+    Welche Event-Zahlung gehört zu welchem Event? → {id(Slot): Event}
+
+    Die Zahlungsdatei nennt beim Event mal den Beginn, mal das Ende als
+    Spielzeit (09.09.: 18:00 und 20:30 für dasselbe Event). Kandidaten
+    sind deshalb die Events des Tages, deren Beginn ODER Ende passt.
+
+    Gibt es genau einen, ist die Sache klar. Laufen mehrere zur selben
+    Zeit, entscheidet die Teilnehmerliste — mit denselben Stufen wie bei
+    normalen Buchungen (Name, Konto, Schreibvariante, E-Mail). Wer in
+    keiner Liste steht, bleibt ohne Event: Das sind fast immer
+    Abmeldungen, und die sind ohnehin storniert. Geraten wird nicht.
+    """
+    if not events:
+        return {}
+    je_tag = {}
+    for e in events:
+        je_tag.setdefault(e["datum"], []).append(e)
+
+    zuordnung, mehrdeutig = {}, {}
+    for g in slots:
+        if not g.get("turnier"):
+            continue
+        am_tag = je_tag.get(g["datum"], [])
+        passend = [e for e in am_tag
+                   if g["zeit"] in (e["start"].strftime("%H:%M"),
+                                    e["ende"].strftime("%H:%M") if e["ende"] else "")]
+        kandidaten = passend or am_tag
+        if len(kandidaten) == 1:
+            zuordnung[id(g)] = kandidaten[0]
+        elif kandidaten:
+            schluessel = tuple(sorted(e["id"] for e in kandidaten))
+            mehrdeutig.setdefault(schluessel, []).append(g)
+
+    for schluessel, zahler in mehrdeutig.items():
+        vergeben = set()
+        for e in (x for x in events if x["id"] in schluessel):
+            gefunden, _rest = _teilnehmer_zuordnen(
+                list(e["teilnehmer"].values()), zahler, vergeben)
+            for _n, _nn, _mail, g in gefunden:
+                zuordnung[id(g)] = e
+    return zuordnung
+
+
+def event_kennzahlen(slots: list, zuordnung: dict) -> dict:
+    """
+    Je Event: der volle Preis und ob die Summe aufgeht.
+    → {Event-ID: {voll, summe, summe_ohne_offene, stimmt}}
+
+    Voller Preis ist der höchste Preis, den jemand für DIESES Event zahlt
+    — nicht für alles, was um dieselbe Uhrzeit lief. Wellpass-Preise gibt
+    es keine festen: 30 € → 20 €, 22 € → 12 €, 27 € → 15 € kamen alle vor.
+
+    Die Prüfsumme gleicht die Zahlungen gegen den Gesamtpreis aus dem
+    Buchungsexport ab. Playtomic zählt dort offene Anmeldungen (Pending)
+    nicht immer mit, deshalb gelten beide Summen. Geht keine auf, fehlt
+    eine Zahlung oder ist eine falsch zugeordnet — dann wird das Event
+    als unklar markiert, statt eine Zahl zu glauben, die nicht stimmt.
+    """
+    stand = {}
+    for g in slots:
+        e = zuordnung.get(id(g))
+        if e is None or not g["plaetze"]:
+            continue
+        s = stand.setdefault(e["id"], {"voll": 0.0, "summe": 0.0,
+                                       "ausstehend": 0.0, "gesamt": e["gesamt"]})
+        s["voll"] = max(s["voll"], g["preis"])
+        s["summe"] += g["preis"]
+        s["ausstehend"] += g.get("ausstehend", 0.0)
+    for s in stand.values():
+        s["summe"] = round(s["summe"], 2)
+        s["summe_ohne_offene"] = round(s["summe"] - s["ausstehend"], 2)
+        s["stimmt"] = (s["gesamt"] > 0
+                       and (abs(s["summe"] - s["gesamt"]) < 0.01
+                            or abs(s["summe_ohne_offene"] - s["gesamt"]) < 0.01))
+    return stand
+
+
 def _einzelanteile(datum, minute: int) -> frozenset:
     """
     Nur die Anteile EINER Person zu dieser Startzeit — ohne die
@@ -7783,12 +7909,28 @@ def slot_bewerten(g: dict, volle, turniere: dict = None,
         return "storniert", "Zahlungsanteil verfallen", 0.0, 0.0
 
     if g.get("turnier"):
+        # Anmeldung bezahlt und komplett erstattet: abgemeldet. Bei
+        # normalen Buchungen griff das längst, im Event-Zweig fehlte es —
+        # am 16.09. standen neun Abmeldungen als „0,00 € statt 27,00 €"
+        # und damit als Wellpass-Fälle da.
+        if not g["plaetze"]:
+            return "storniert", "Anmeldung erstattet — abgemeldet", 0.0, 0.0
+        # 0 € beim Event ist kein Wellpass-Preis. Wellpass-Spieler zahlen
+        # beim Event immer einen Rest (Marcel, 17.09.). 0 € heisst: frei
+        # eingetragen — das ist kein Fall.
+        if b <= 0:
+            return "vollzahler", "0 € beim Event — frei eingetragen", 0.0, 0.0
         # Turnier: nicht der feste Rabatt zählt, sondern der Vergleich
         # mit den anderen Teilnehmern desselben Turniers.
-        voll = (turniere or {}).get((g["datum"], g["zeit"]), 0.0)
+        # Mit Buchungsexport ist das Event bekannt, und es zählt nur, was
+        # für DIESES Event gezahlt wurde — siehe event_kennzahlen().
+        # Ohne Export bleibt der Vergleich über die Uhrzeit.
+        voll = g.get("event_voll") or (turniere or {}).get(
+            (g["datum"], g["zeit"]), 0.0)
+        titel = g["event"]["name"] if g.get("event") else "Turnier"
         if voll > 0 and b < voll:
             return ("wellpass",
-                    f"{euro(b)} statt {euro(voll)} — Turnier", voll, b)
+                    f"{euro(b)} statt {euro(voll)} — {titel}", voll, b)
         return "vollzahler", "", b, b
 
     # Jeder Platz einzeln prüfen. Wer für Gäste mitzahlt, hat mehrere
@@ -8870,6 +9012,22 @@ def _analysieren_zahlungen(pdf, cdf, bdf=None, tage_ersetzen=None) -> bool:
     volle = _volle_anteile(slots)
     beobachtet = _beobachtete_anteile(slots)
     turniere = turnier_vollpreise(slots)
+    # Events als Einheit: Teilnehmerliste und Gesamtpreis aus dem
+    # Buchungsexport, voller Preis je Event statt je Uhrzeit. Siehe
+    # events_aus_export() und VORSCHLAG-EVENTS.md.
+    event_je_slot = events_zuordnen(slots, events_aus_export(bdf))
+    event_stand = event_kennzahlen(slots, event_je_slot)
+    for g in slots:
+        e = event_je_slot.get(id(g))
+        if e is None:
+            continue
+        g["event"] = e
+        g["event_voll"] = event_stand.get(e["id"], {}).get("voll", 0.0)
+        g["event_stimmt"] = event_stand.get(e["id"], {}).get("stimmt", False)
+        # Check-in-Fenster ab Event-BEGINN. Die Zahlungsdatei nennt oft
+        # das Ende — damit lag das Fenster zweieinhalb Stunden zu spät.
+        # Die Anzeigezeit (g["zeit"]) bleibt, an ihr hängen erledigte Fälle.
+        g["minute"] = e["start"].hour * 60 + e["start"].minute
     bewertet = [(g, *slot_bewerten(g, volle, turniere, beobachtet))
                 for g in slots]
 
@@ -9299,8 +9457,14 @@ def _analysieren_zahlungen(pdf, cdf, bdf=None, tage_ersetzen=None) -> bool:
             # Welcher Check-in deckt diesen Platz? Siehe checkins_konsolidieren()
             "Checkin_Name": c["name_norm"] if c else "",
             "Relevant": "Ja" if rabatt else "Nein",
-            "Event": "Nein", "Event_Name": "", "Event_Id": "",
-            "Event_Courts": 0, "Event_Unklar": "Nein",
+            "Event": "Ja" if g.get("event") else "Nein",
+            "Event_Name": g["event"]["name"] if g.get("event") else "",
+            "Event_Id": g["event"]["id"] if g.get("event") else "",
+            "Event_Courts": len(g["event"]["courts"]) if g.get("event") else 0,
+            # Summe des Events geht nicht auf: Das Ergebnis ist dann nicht
+            # belegt, und so steht es auch da.
+            "Event_Unklar": ("Ja" if g.get("event") and not g.get("event_stimmt")
+                             else "Nein"),
             "Check-in": "Ja" if c else "Nein",
             "Team": "Ja" if team else "Nein",
             "Fehler": "Ja" if fehler else "Nein",
