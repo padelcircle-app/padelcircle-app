@@ -30,6 +30,7 @@ import itertools
 import secrets
 import json
 import hashlib
+import io
 
 import certifi
 import gspread
@@ -153,6 +154,14 @@ CONFIG = {
     "egym_gym_id":         "1042620",                          # ← AUSFÜLLEN
     "egym_einrichtung":    "Padel Circle Memmingen",    # ← PRÜFEN (exakt wie bei EGYM)
     "wellpass_qr_link":    "https://cdn.jsdelivr.net/gh/padelcircle-app/padelcircle-assets/wellpass.jpg",                          # ← AUSFÜLLEN nach QR-Hosting
+
+    # ── Austausch-Ordner in Google Drive ─────────────────────────────────────
+    # Dort landen die vier Exporte, entweder von Hand oder später vom
+    # Hol-Programm auf dem Mac. Die Kennung steht in der Adresszeile von
+    # Drive hinter /folders/. Kein Geheimnis: Wer nicht freigegeben ist,
+    # kommt auch mit der Kennung nicht hinein. Freigegeben ist das
+    # Dienstkonto der App als Mitbearbeiter.
+    "austausch_ordner":    "10_BO4m4hLOz8oXWJ5W5XpwrSBciTPn2j",
 
     # ── Wellpass-Erkennung ───────────────────────────────────────────────────
     # Wer einen Wellpass-Rabatt bekam, musste einchecken.
@@ -325,7 +334,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # Steht unten in der Seitenleiste. Damit lässt sich auf einen Blick
 # sehen, welche Fassung gerade läuft — bei „stimmt immer noch nicht"
 # ist das die erste Frage.
-APP_STAND       = "Fassung 52 · 17.09.2026"
+APP_STAND       = "Fassung 53 · 18.09.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -10597,6 +10606,146 @@ def altbestand_zuruecknehmen() -> int:
     return int(weg.sum())
 
 
+# ── Austausch-Ordner in Google Drive ─────────────────────────────────────────
+#
+# Der kurze Weg am Morgen: Die vier Exporte liegen in einem Drive-Ordner,
+# die App holt sie von dort. Wer sie hineinlegt, ist ihr egal — heute
+# Marcels Chrome, später das Hol-Programm auf dem Mac.
+#
+# Bewusst über Drive und nicht über einen Server: Das Dienstkonto der App
+# hat den Ordner schon freigegeben, es braucht also kein zweites Passwort
+# und keinen zusätzlichen Dienst. Und auf dem Mac liegt kein Schlüssel —
+# dort synchronisiert Google Drive den Ordner wie einen normalen Ordner.
+
+DRIVE_API = "https://www.googleapis.com/drive/v3"
+AUFTRAG_DATEI = "auftrag.json"
+AUSTAUSCH_ARTEN = {"zahlungen": "Zahlungen · bezahlt",
+                   "offen":     "Zahlungen · offene Posten",
+                   "checkins":  "Wellpass Check-ins",
+                   "buchungen": "Buchungen"}
+
+
+@st.cache_resource(show_spinner=False)
+def _drive():
+    """Angemeldete Verbindung zu Google Drive — dasselbe Dienstkonto."""
+    from google.auth.transport.requests import AuthorizedSession
+    creds = Credentials.from_service_account_info(
+        dict(st.secrets["gcp_service_account"]),
+        scopes=["https://www.googleapis.com/auth/drive"])
+    return AuthorizedSession(creds)
+
+
+def austausch_ordner() -> str:
+    return str(einstellung("austausch_ordner", CONFIG.get("austausch_ordner", "")))
+
+
+def drive_liste(ordner: str = None) -> list:
+    """Was liegt im Austausch-Ordner? → [{id, name, geaendert, groesse}]"""
+    ordner = ordner or austausch_ordner()
+    if not ordner:
+        return []
+    antwort = _drive().get(f"{DRIVE_API}/files", params={
+        "q": f"'{ordner}' in parents and trashed = false",
+        "fields": "files(id,name,modifiedTime,size)",
+        "orderBy": "modifiedTime desc", "pageSize": 50})
+    antwort.raise_for_status()
+    return [{"id": f["id"], "name": f["name"],
+             "geaendert": f.get("modifiedTime", ""),
+             "groesse": int(f.get("size", 0) or 0)}
+            for f in antwort.json().get("files", [])]
+
+
+def drive_inhalt(datei_id: str) -> bytes:
+    antwort = _drive().get(f"{DRIVE_API}/files/{datei_id}",
+                           params={"alt": "media"})
+    antwort.raise_for_status()
+    return antwort.content
+
+
+def drive_schreiben(name: str, inhalt: str, ordner: str = None) -> bool:
+    """Kleine Textdatei in den Ordner legen oder ersetzen (Auftrag, Status)."""
+    ordner = ordner or austausch_ordner()
+    if not ordner:
+        return False
+    vorhanden = next((d for d in drive_liste(ordner) if d["name"] == name), None)
+    daten = inhalt.encode("utf-8")
+    if vorhanden:
+        antwort = _drive().patch(
+            f"https://www.googleapis.com/upload/drive/v3/files/{vorhanden['id']}",
+            params={"uploadType": "media"}, data=daten,
+            headers={"Content-Type": "application/json"})
+    else:
+        grenze = "pcgrenze" + secrets.token_hex(8)
+        koerper = (f"--{grenze}\r\nContent-Type: application/json; charset=UTF-8"
+                   f"\r\n\r\n{json.dumps({'name': name, 'parents': [ordner]})}\r\n"
+                   f"--{grenze}\r\nContent-Type: application/json\r\n\r\n"
+                   f"{inhalt}\r\n--{grenze}--")
+        antwort = _drive().post(
+            "https://www.googleapis.com/upload/drive/v3/files",
+            params={"uploadType": "multipart"},
+            data=koerper.encode("utf-8"),
+            headers={"Content-Type": f"multipart/related; boundary={grenze}"})
+    return antwort.ok
+
+
+def austausch_art(name: str, kopf: bytes) -> str:
+    """
+    Welche der vier Dateien ist das? Erkannt am INHALT, nicht am Namen —
+    Playtomic nennt beide Zahlungsdateien gleich (`880ac6b8-….csv`), und
+    ein Name wie „(16)" sagt nichts darüber, was drinsteht.
+    """
+    text = kopf.decode("utf-8", "replace")
+    if "booking_id" in text and "tenant_id" in text:
+        return "buchungen"
+    if "Mitglied;" in text or "Vor- & Nachname" in text:
+        return "checkins"
+    if "Corporate Name;" in text:
+        # Beide Zahlungsdateien haben denselben Kopf. Unterschieden wird
+        # am Status: bezahlt und erstattet gegen ausstehend und verfallen.
+        bezahlt = text.count(";Paid;") + text.count(";Refund;")
+        offen = text.count(";Pending;") + text.count(";Voided;")
+        return "zahlungen" if bezahlt >= offen else "offen"
+    return ""
+
+
+def austausch_holen() -> dict:
+    """
+    Die vier Dateien aus dem Ordner lesen — je Art die neueste.
+    → {art: {name, inhalt, geaendert}}   plus {"_fehler": "…"} bei Problemen
+    """
+    try:
+        dateien = drive_liste()
+    except Exception as e:                      # noqa: BLE001
+        return {"_fehler": str(e)[:200]}
+    gefunden = {}
+    for d in dateien:
+        if not d["name"].lower().endswith(".csv"):
+            continue
+        try:
+            inhalt = drive_inhalt(d["id"])
+        except Exception:                       # noqa: BLE001
+            continue
+        art = austausch_art(d["name"], inhalt[:4000])
+        # Die Liste kommt nach Änderung sortiert — die erste je Art gewinnt.
+        if art and art not in gefunden:
+            gefunden[art] = {"name": d["name"], "inhalt": inhalt,
+                             "geaendert": d["geaendert"]}
+    return gefunden
+
+
+def fehlende_tage_bis_gestern() -> list:
+    """Welche Tage fehlen zwischen dem letzten Tag im Bestand und gestern?"""
+    tage = [str(t) for t in verfuegbare_tage()]
+    gestern = date.today() - timedelta(days=1)
+    if not tage:
+        return [str(gestern)]
+    letzter = parse_date_safe(max(tage))
+    if letzter is None or letzter >= gestern:
+        return []
+    return [str(letzter + timedelta(days=i))
+            for i in range(1, (gestern - letzter).days + 1)]
+
+
 def modul_daten():
     head("Daten-Zentrale", "Playtomic · Wellpass · Kunden")
 
@@ -10605,6 +10754,57 @@ def modul_daten():
 
     # ── Neuer Weg: ohne Buchungsexport ──────────────────────────────────
     with t0:
+        # ── Der kurze Weg: Dateien aus dem Drive-Ordner ──────────────────
+        fehlt = fehlende_tage_bis_gestern()
+        if fehlt:
+            box(f"<b>Die Daten vom {datum_kurz(fehlt[0])}</b> fehlen"
+                + (f" — und {len(fehlt) - 1} weitere Tage." if len(fehlt) > 1
+                   else ".") + " Hol sie dir mit einem Klick.", "warn")
+        else:
+            box("Alles bis gestern ist da. Neue Dateien kannst du trotzdem "
+                "jederzeit holen.", "ok")
+
+        h1, h2 = st.columns([1, 1])
+        with h1:
+            if st.button("📥 Daten holen", type="primary",
+                         use_container_width=True, key="btn_drive_holen"):
+                with st.spinner("Austausch-Ordner wird gelesen …"):
+                    # Der Auftrag ist für das Hol-Programm auf dem Mac
+                    # gedacht. Liegt dort keins, schadet er nicht — die
+                    # App liest einfach, was schon im Ordner liegt.
+                    try:
+                        drive_schreiben(AUFTRAG_DATEI, json.dumps({
+                            "gestellt": datetime.now().isoformat(timespec="seconds"),
+                            "von": st.session_state.get("nutzer", "App"),
+                            "tage": fehlt or [str(date.today())]}, ensure_ascii=False))
+                    except Exception:           # noqa: BLE001
+                        pass
+                    st.session_state["drive_dateien"] = austausch_holen()
+                st.rerun()
+        with h2:
+            if st.session_state.get("drive_dateien"):
+                if st.button("🗑 Gefundene Dateien vergessen",
+                             use_container_width=True, key="btn_drive_weg"):
+                    st.session_state.pop("drive_dateien", None)
+                    st.rerun()
+
+        gefunden = st.session_state.get("drive_dateien") or {}
+        if gefunden.get("_fehler"):
+            box("Der Austausch-Ordner liess sich nicht lesen: "
+                f"{gefunden['_fehler']}<br>Prüfe, ob der Ordner für "
+                "<code>" + str(st.secrets.get("gcp_service_account", {})
+                               .get("client_email", "das Dienstkonto"))
+                + "</code> freigegeben ist.", "err")
+        elif gefunden:
+            zeilen = []
+            for art, titel in AUSTAUSCH_ARTEN.items():
+                d = gefunden.get(art)
+                zeilen.append(f"{'✅' if d else '—'} <b>{titel}</b>: "
+                              + (f"{d['name']} · {len(d['inhalt']) // 1024} KB"
+                                 if d else "fehlt im Ordner"))
+            box("<br>".join(zeilen), "info")
+
+        st.markdown("")
         box("Der Weg für alle neuen Tage. Playtomic liefert keinen "
             "Buchungsexport mehr — gebraucht werden nur noch die Zahlungsdatei "
             "und das Check-in-Protokoll. Wer den Rabatt bekommen hat, steht "
@@ -10641,11 +10841,25 @@ def modul_daten():
                        "Zahlungszeile an — er fehlt dann ganz. Nur der "
                        "Buchungsexport nennt ihn.")
 
+        # Was von Hand hochgeladen wurde, hat Vorrang; sonst zählt, was aus
+        # dem Austausch-Ordner geholt wurde.
+        def _datei_oder_ordner(hochgeladen, art):
+            if hochgeladen is not None:
+                return hochgeladen
+            d = gefunden.get(art)
+            return io.BytesIO(d["inhalt"]) if d else None
+
+        z_datei = _datei_oder_ordner(z_datei, "zahlungen")
+        zc_datei = _datei_oder_ordner(zc_datei, "checkins")
+        o_datei = _datei_oder_ordner(o_datei, "offen")
+        b_datei = _datei_oder_ordner(b_datei, "buchungen")
+
         st.markdown("")
         if st.button("🔄 Abgleichen", type="primary", use_container_width=True,
                      disabled=not (z_datei and zc_datei), key="btn_zahl"):
             with st.spinner(lade_text("verarbeite")):
                 if _verarbeiten_zahlungen(z_datei, zc_datei, o_datei, b_datei):
+                    st.session_state.pop("drive_dateien", None)
                     st.rerun()
 
         if not (z_datei and zc_datei):
