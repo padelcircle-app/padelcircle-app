@@ -334,7 +334,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # Steht unten in der Seitenleiste. Damit lässt sich auf einen Blick
 # sehen, welche Fassung gerade läuft — bei „stimmt immer noch nicht"
 # ist das die erste Frage.
-APP_STAND       = "Fassung 56 · 17.09.2026"
+APP_STAND       = "Fassung 57 · 18.09.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -10847,14 +10847,19 @@ def modul_daten():
                         {"gestellt": gestellt.isoformat(timespec="seconds"),
                          "von": von, "bis": str(date.today())},
                         ensure_ascii=False))
+                st.session_state.pop("drive_wartet", None)
                 if not geklappt:
                     st.session_state["drive_fehler"] = meldung
                 else:
                     st.session_state.pop("drive_fehler", None)
                     with st.spinner("Der Mac holt die Dateien … "
-                                    "(dauert etwa eine Minute)"):
+                                    "(Google Drive braucht ein paar Minuten, "
+                                    "bis der Auftrag drüben ist)"):
                         fertig = False
-                        for _ in range(30):     # bis zu 2½ Minuten
+                        # Grosszügig: Der Weg App → Drive → Mac dauerte
+                        # gemessen bis zu fünf Minuten, bevor der Mac den
+                        # Auftrag überhaupt sah.
+                        for _ in range(96):     # bis zu acht Minuten
                             time.sleep(5)
                             stand = austausch_status()
                             gemeldet = parse_datetime_safe(stand.get("zeit"))
@@ -10867,9 +10872,10 @@ def modul_daten():
                         if fertig:
                             st.session_state["drive_dateien"] = austausch_holen()
                         else:
-                            st.session_state["drive_fehler"] = (
-                                "Der Mac hat sich nicht gemeldet. Läuft er, "
-                                "und ist das Hol-Programm gestartet?")
+                            # Kein Fehler, nur langsam: Der Auftrag liegt im
+                            # Ordner und wird abgearbeitet, sobald Drive ihn
+                            # durchgereicht hat.
+                            st.session_state["drive_wartet"] = True
                 st.rerun()
         with h2:
             if st.button("🔄 Nachsehen", use_container_width=True,
@@ -10894,6 +10900,10 @@ def modul_daten():
         if st.session_state.get("drive_fehler"):
             box("Der Auftrag kam nicht beim Mac an: "
                 f"{st.session_state['drive_fehler']}", "err")
+        if st.session_state.get("drive_wartet"):
+            box("Der Auftrag liegt im Ordner, der Mac hat ihn aber noch "
+                "nicht abgeholt. Google Drive ist manchmal ein paar Minuten "
+                "langsam. Drück gleich noch einmal auf „Nachsehen“.", "warn")
 
         gefunden = st.session_state.get("drive_dateien") or {}
         if gefunden.get("_fehler"):
