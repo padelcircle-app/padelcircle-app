@@ -334,7 +334,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # Steht unten in der Seitenleiste. Damit lässt sich auf einen Blick
 # sehen, welche Fassung gerade läuft — bei „stimmt immer noch nicht"
 # ist das die erste Frage.
-APP_STAND       = "Fassung 57 · 18.09.2026"
+APP_STAND       = "Fassung 58 · 18.09.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -10724,18 +10724,39 @@ def austausch_zeitraum(inhalt: bytes) -> str:
 
     Ohne diese Angabe sieht man der Anzeige nicht an, ob die Dateien von
     gestern sind oder noch vom letzten Lauf liegen geblieben.
+
+    Gelesen wird nur die Spalte mit dem SPIELTAG. Die Zahlungsdatei hat
+    daneben das Zahlungsdatum — wer am 02.09. für den 16.09. bezahlt,
+    liess die Anzeige sonst „02.09.–17.09." sagen.
     """
-    text = inhalt.decode("utf-8", "replace")
-    tage = set()
-    for t, m, j in re.findall(r"\b(\d{2})/(\d{2})/(\d{4}) \d{2}:\d{2}", text):
-        tage.add(f"{j}-{m}-{t}")
-    for j, m, t in re.findall(r"\b(\d{4})-(\d{2})-(\d{2})", text):
-        tage.add(f"{j}-{m}-{t}")
-    if not tage:
-        return ""
-    erster, letzter = min(tage), max(tage)
-    return (datum_kurz(erster) if erster == letzter
-            else f"{datum_kurz(erster)}–{datum_kurz(letzter)}")
+    text = inhalt.decode("utf-8-sig", "replace")
+    zeilen = text.splitlines()
+    spalten_je_art = {";": ("Service date", "Datum"), ",": ("booking_start_date",)}
+    for i, zeile in enumerate(zeilen[:40]):
+        for trenner, namen in spalten_je_art.items():
+            kopf = [s.strip() for s in zeile.split(trenner)]
+            sp = next((kopf.index(n) for n in namen if n in kopf), None)
+            if sp is None:
+                continue
+            tage = set()
+            for z in zeilen[i + 1:]:
+                felder = z.split(trenner)
+                if len(felder) <= sp:
+                    continue
+                wert = felder[sp].strip()
+                m = re.match(r"(\d{2})/(\d{2})/(\d{4})", wert)
+                if m:
+                    tage.add(f"{m.group(3)}-{m.group(2)}-{m.group(1)}")
+                    continue
+                m = re.match(r"(\d{4})-(\d{2})-(\d{2})", wert)
+                if m:
+                    tage.add(m.group(0))
+            if not tage:
+                return ""
+            erster, letzter = min(tage), max(tage)
+            return (datum_kurz(erster) if erster == letzter
+                    else f"{datum_kurz(erster)}–{datum_kurz(letzter)}")
+    return ""
 
 
 def austausch_holen() -> dict:
@@ -10780,6 +10801,12 @@ def austausch_status() -> dict:
     except Exception:                           # noqa: BLE001
         return {}
     gemeldet = parse_datetime_safe(stand.get("zeit"))
+    # Das Warteprogramm frischt alle paar Minuten „lebt" auf. Für die Frage
+    # „ist der Mac da?" zählt das jüngere von beiden.
+    lebt = parse_datetime_safe(stand.get("lebt"))
+    if lebt is not None and (gemeldet is None or lebt > gemeldet) \
+            and stand.get("zustand") != "laeuft":
+        gemeldet = lebt
     if gemeldet is not None:
         minuten = int((datetime.now() - gemeldet).total_seconds() // 60)
         stand["alter"] = ("gerade eben" if minuten < 1 else
@@ -10845,7 +10872,9 @@ def modul_daten():
                 geklappt, meldung = drive_schreiben(
                     AUFTRAG_DATEI, json.dumps(
                         {"gestellt": gestellt.isoformat(timespec="seconds"),
-                         "von": von, "bis": str(date.today())},
+                         # Heute ist noch nicht vorbei — halbe Tage ergäben
+                         # offene Fälle für Leute, die gleich erst spielen.
+                         "von": von, "bis": gestern},
                         ensure_ascii=False))
                 st.session_state.pop("drive_wartet", None)
                 if not geklappt:
