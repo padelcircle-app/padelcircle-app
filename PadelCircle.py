@@ -334,7 +334,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # Steht unten in der Seitenleiste. Damit lässt sich auf einen Blick
 # sehen, welche Fassung gerade läuft — bei „stimmt immer noch nicht"
 # ist das die erste Frage.
-APP_STAND       = "Fassung 60 · 21.09.2026"
+APP_STAND       = "Fassung 61 · 23.09.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -649,7 +649,7 @@ SHEET_SPALTEN = {
                          "kandidaten", "erledigt", "antwort", "timestamp"],
     "wetter":           ["datum", "code", "lage", "t_max", "t_min",
                          "regen_mm", "art", "timestamp"],
-    "auth_tokens":      ["token", "created", "expires"],
+    "auth_tokens":      ["token", "created", "expires", "rolle"],
     "settings":         ["key", "value"],
 }
 
@@ -1400,8 +1400,39 @@ def monatsziel(monat: str = None) -> float:
 # ══════════════════════════════════════════════════════════════════════════════
 #   🔒  LOGIN
 # ══════════════════════════════════════════════════════════════════════════════
+#
+# Zwei Passwörter, zwei Rollen:
+#
+#   chef  — alles, wie bisher (admin_password)
+#   team  — nur die Wellpass-Arbeit (team_password). Keine Umsätze, keine
+#           Ziele, kein Dashboard, keine Analysen, keine Einstellungen.
+#
+# Gedacht für Mitarbeiter: Der Abgleich und die Erinnerungen sind
+# Tagesarbeit, die Geschäftszahlen gehen niemanden sonst etwas an.
 
-def token_speichern(token: str) -> bool:
+ROLLE_CHEF, ROLLE_TEAM = "chef", "team"
+# Was das Team sehen darf. Alles andere taucht gar nicht erst auf.
+TEAM_MODULE = ("daten", "whatsapp", "nachmeldung", "matching")
+
+
+def rolle() -> str:
+    return st.session_state.get("rolle", ROLLE_CHEF)
+
+
+def ist_team() -> bool:
+    return rolle() == ROLLE_TEAM
+
+
+def darf_geld() -> bool:
+    """Umsätze, Ziele und Prognosen sieht nur der Chef."""
+    return not ist_team()
+
+
+def sichtbare_module() -> list:
+    return [m for m in MODULE
+            if not ist_team() or m["id"] in TEAM_MODULE]
+
+def token_speichern(token: str, wer: str = "chef") -> bool:
     try:
         df = loadsheet("auth_tokens", SHEET_SPALTEN["auth_tokens"])
         jetzt = datetime.now()
@@ -1413,12 +1444,24 @@ def token_speichern(token: str) -> bool:
             "token": token,
             "created": jetzt.isoformat(),
             "expires": (jetzt + timedelta(days=30)).isoformat(),
+            "rolle": wer,
         }])
         savesheet(pd.concat([df, neu], ignore_index=True), "auth_tokens")
         loadsheet.clear()
         return True
     except Exception:
         return False
+
+
+def token_rolle(token: str) -> str:
+    """Welche Rolle hängt an diesem Token? Alte Tokens gelten als Chef."""
+    try:
+        df = loadsheet("auth_tokens", SHEET_SPALTEN["auth_tokens"])
+        treffer = df[df["token"].astype(str) == str(token)]
+        wer = str(treffer.iloc[0].get("rolle", "")).strip() if not treffer.empty else ""
+    except Exception:                           # noqa: BLE001
+        wer = ""
+    return ROLLE_TEAM if wer == ROLLE_TEAM else ROLLE_CHEF
 
 
 def token_gueltig(token: str) -> bool:
@@ -1456,6 +1499,7 @@ def login() -> bool:
     url_token = st.query_params.get("auth", None)
     if url_token and token_gueltig(url_token):
         st.session_state["auth_ok"] = True
+        st.session_state["rolle"] = token_rolle(url_token)
         return True
 
     if st.session_state.get("auth_ok", False):
@@ -1463,12 +1507,17 @@ def login() -> bool:
 
     def pruefen():
         eingabe = st.session_state.get("pw_input", "")
-        soll = st.secrets.get("passwords", {}).get("admin_password", "")
-        if eingabe and soll and eingabe == soll:
+        passwoerter = st.secrets.get("passwords", {})
+        chef = passwoerter.get("admin_password", "")
+        team = passwoerter.get("team_password", "")
+        wer = (ROLLE_CHEF if eingabe and chef and eingabe == chef
+               else ROLLE_TEAM if eingabe and team and eingabe == team else "")
+        if wer:
             t = secrets.token_urlsafe(32)
-            if token_speichern(t):
+            if token_speichern(t, wer):
                 st.query_params["auth"] = t
             st.session_state["auth_ok"] = True
+            st.session_state["rolle"] = wer
             st.session_state["auth_fehler"] = False
             st.session_state.pop("pw_input", None)
         elif eingabe:
@@ -1496,6 +1545,8 @@ def login() -> bool:
                       label_visibility="collapsed")
         if st.session_state.get("auth_fehler"):
             st.error("Falsches Passwort.")
+        st.caption("Mitarbeiter melden sich mit dem Team-Passwort an und "
+                   "sehen nur die Wellpass-Arbeit.")
         st.caption("Nach dem Login steht ein Token in der URL — "
                    "als Lesezeichen speichern und du bleibst 30 Tage angemeldet.")
 
@@ -16450,7 +16501,7 @@ def modul_nachmeldung():
     with c1:
         kpi("Nachmeldbar", str(len(kandidaten)), "innerhalb der EGYM-Frist")
     with c2:
-        kpi("Wert", euro(len(kandidaten) * WELLPASS_WERT),
+        kpi("Wert", euro(len(kandidaten) * WELLPASS_WERT) if darf_geld() else "—",
             "wenn EGYM bestätigt")
 
     st.markdown("---")
@@ -16512,7 +16563,7 @@ def modul_nachmeldung():
     with c1:
         kpi("Bereit", str(len(eintraege)), "vollständige Einträge")
     with c2:
-        kpi("Wert", euro(len(eintraege) * WELLPASS_WERT))
+        kpi("Wert", euro(len(eintraege) * WELLPASS_WERT) if darf_geld() else "—")
 
     st.markdown("")
     st.download_button("⬇️ CSV für den Nachmeldungs-Bot",
@@ -17408,15 +17459,19 @@ def command_center():
         mk = monats_kennzahlen(monat_akt)
         ziel = monatsziel(monat_akt)
 
-        c1, c2, c3, c4 = st.columns(4)
+        if darf_geld():
+            c1, c2, c3, c4 = st.columns(4)
+            with c2:
+                kpi("Umsatz Tag", euro(k["gesamt_effektiv"]), "inkl. Wellpass")
+            with c3:
+                kpi("Monat bisher", euro(mk["gesamt_effektiv"]),
+                    f"{MONATE_DE[int(monat_akt[5:7])-1]}")
+        else:
+            # Team-Modus: dieselbe Zeile ohne Geld.
+            c1, c4 = st.columns(2)
         with c1:
             kpi("Letzter Spieltag", datum_kurz(tage[0]),
                 WOCHENTAGE_DE[datetime.strptime(tage[0], "%Y-%m-%d").weekday()])
-        with c2:
-            kpi("Umsatz Tag", euro(k["gesamt_effektiv"]), "inkl. Wellpass")
-        with c3:
-            kpi("Monat bisher", euro(mk["gesamt_effektiv"]),
-                f"{MONATE_DE[int(monat_akt[5:7])-1]}")
         with c4:
             kpi("Offene Fälle", str(offen_gesamt), "letzte 7 Tage")
 
@@ -17445,7 +17500,7 @@ def command_center():
         st.markdown("")
         c1, c2 = st.columns([1.2, 1])
         with c1:
-            if ziel > 0:
+            if ziel > 0 and darf_geld():
                 erreicht = prozent(mk["gesamt_effektiv"], ziel)
                 rest = max(0.0, ziel - mk["gesamt_effektiv"])
                 fortschritts_ring(
@@ -17458,16 +17513,17 @@ def command_center():
             if serie >= 2:
                 streak_banner(serie)
             elif offen_gesamt:
-                box(f"⚠️ {offen_gesamt} Spieler ohne Check-in — "
-                    f"{euro(offen_gesamt * WELLPASS_WERT)} liegen auf der Strasse.",
-                    "warn")
+                box(f"⚠️ {offen_gesamt} Spieler ohne Check-in"
+                    + (f" — {euro(offen_gesamt * WELLPASS_WERT)} liegen auf "
+                       "der Strasse." if darf_geld() else "."), "warn")
 
         st.markdown("")
 
     # ── Kacheln ─────────────────────────────────────────────────────────
-    for start in range(0, len(MODULE), 3):
+    kacheln = sichtbare_module()
+    for start in range(0, len(kacheln), 3):
         spalten = st.columns(3)
-        for sp, modul in zip(spalten, MODULE[start:start + 3]):
+        for sp, modul in zip(spalten, kacheln[start:start + 3]):
             with sp:
                 st.markdown(f"""
                 <div class="pc-tile {'soon' if not modul['an'] else ''}">
@@ -17548,7 +17604,7 @@ def main():
         except Exception:
             mit_court = True
 
-        for modul in MODULE:
+        for modul in sichtbare_module():
             if modul["id"] == "events" and not mit_court:
                 continue
             beschriftung = f"{modul['ic']}  {modul['ti']}"
@@ -17576,7 +17632,8 @@ def main():
             st.query_params.clear()
             st.rerun()
 
-        st.caption(CONFIG["firma"])
+        st.caption(CONFIG["firma"]
+                   + (" · Team-Modus" if ist_team() else ""))
         st.caption(f"{COURTS_GESAMT} Courts · {CONFIG['stadt']}")
         st.caption(f"Stand {APP_STAND}")
 
@@ -17584,7 +17641,7 @@ def main():
     if aktiv is None:
         command_center()
     else:
-        modul = next((m for m in MODULE if m["id"] == aktiv), None)
+        modul = next((m for m in sichtbare_module() if m["id"] == aktiv), None)
         if modul and modul["fn"]:
             modul["fn"]()
         else:
