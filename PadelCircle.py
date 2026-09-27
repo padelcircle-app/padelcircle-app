@@ -334,7 +334,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # Steht unten in der Seitenleiste. Damit lässt sich auf einen Blick
 # sehen, welche Fassung gerade läuft — bei „stimmt immer noch nicht"
 # ist das die erste Frage.
-APP_STAND       = "Fassung 61 · 23.09.2026"
+APP_STAND       = "Fassung 62 · 27.09.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -9652,7 +9652,8 @@ def _analysieren_zahlungen(pdf, cdf, bdf=None, tage_ersetzen=None) -> bool:
             "Datum": str(g["datum"]),
             "Name": name,
             "Name_norm": nn,
-            "Email": g.get("email") or email_fuer(name) or "",
+            "Email": (g.get("email")
+                      or email_fuer(name, g.get("user_id", "")) or ""),
             "Court": "",                    # steht nicht in der Zahlungsdatei
             "Service_Zeit": g["zeit"],
             "Dauer": 0,
@@ -13177,49 +13178,93 @@ def kontakt_index() -> dict:
     Telefon und E-Mail aller Kunden — EINMAL aufgebaut, danach nur noch
     nachgeschlagen.
 
-    Vorher wurde für jeden einzelnen Aufruf die komplette customers-Tabelle
-    geladen und alle Namen neu normalisiert. Bei acht Fällen und 160
-    überzähligen Check-ins waren das hunderte Durchläufe pro Seitenaufruf.
+    Zwei Schlüssel, und der wichtigere ist die Playtomic-KONTO-ID. Über
+    den Namen allein ging es schief: „Daniel" tragen mehrere Konten, die
+    App nahm den erstbesten und zeigte am 25.09. eine fremde Nummer an —
+    angeschrieben worden wäre jemand, der gar nicht gespielt hat.
 
-    → {name_norm: {"phone": …, "email": …}}
+    → {"konto": {id: {phone, email, name}},
+       "name":  {name_norm: {phone, email}},
+       "mehrdeutig": {name_norm, …}}   Namen mit mehreren Konten
     """
     kunden = loadsheet("customers")
-    idx = {}
+    leer = {"konto": {}, "name": {}, "mehrdeutig": set()}
     if kunden.empty or "name" not in kunden.columns:
-        return idx
-
-    hat_tel = "phone_number" in kunden.columns
-    hat_mail = "email" in kunden.columns
+        return leer
 
     anzahl = len(kunden)
-    namen = kunden["name"].tolist()
-    tele = kunden["phone_number"].tolist() if hat_tel else [""] * anzahl
-    mails = kunden["email"].tolist() if hat_mail else [""] * anzahl
+    spalte = lambda s: (kunden[s].tolist() if s in kunden.columns
+                        else [""] * anzahl)
+    nach_konto, nach_name, mehrdeutig = {}, {}, set()
 
-    for roh_name, roh_tel, roh_mail in zip(namen, tele, mails):
+    for roh_name, roh_tel, roh_mail, roh_id in zip(
+            kunden["name"].tolist(), spalte("phone_number"),
+            spalte("email"), spalte("id")):
         norm = normalize_name(roh_name)
         if not norm:
             continue
-        eintrag = idx.setdefault(norm, {"phone": "", "email": ""})
+        tel = telefon_normalisieren(roh_tel)
+        mail = str(roh_mail or "").strip()
+        mail = mail if "@" in mail else ""
+        konto = str(roh_id or "").strip()
+        if konto and konto.lower() not in ("nan", "none", "-"):
+            nach_konto[konto] = {"phone": tel, "email": mail, "name": str(roh_name)}
 
-        if not eintrag["phone"]:
-            tel = telefon_normalisieren(roh_tel)
-            if tel:
-                eintrag["phone"] = tel
-        if not eintrag["email"]:
-            mail = str(roh_mail or "").strip()
-            if "@" in mail:
-                eintrag["email"] = mail
+        eintrag = nach_name.get(norm)
+        if eintrag is None:
+            nach_name[norm] = {"phone": tel, "email": mail}
+            continue
+        # Schon ein Eintrag zu diesem Namen: Ist es dieselbe Person?
+        # Andere Nummer oder andere Adresse heisst, der Name taugt nicht
+        # mehr als Schlüssel.
+        if (tel and eintrag["phone"] and tel != eintrag["phone"]) or \
+                (mail and eintrag["email"] and mail != eintrag["email"]):
+            mehrdeutig.add(norm)
+        eintrag["phone"] = eintrag["phone"] or tel
+        eintrag["email"] = eintrag["email"] or mail
 
-    return idx
+    return {"konto": nach_konto, "name": nach_name, "mehrdeutig": mehrdeutig}
 
 
-def telefon_fuer(name: str) -> str:
-    return kontakt_index().get(normalize_name(name), {}).get("phone", "")
+def kontakt_fuer(name: str, user_id: str = "") -> dict:
+    """
+    Die Kontaktdaten zu einem Fall.
+    → {"phone", "email", "unsicher", "grund"}
+
+    Zuerst über das Playtomic-Konto der Zahlung — das ist eindeutig.
+    Erst wenn keins bekannt ist, zählt der Name, und auch nur, solange
+    ihn nicht mehrere Konten tragen. Lieber keine Nummer als die
+    falsche: Eine falsche Nummer schreibt einen Fremden an.
+    """
+    idx = kontakt_index()
+    konto = str(user_id or "").strip()
+    if konto and konto in idx["konto"]:
+        eintrag = idx["konto"][konto]
+        return {"phone": eintrag["phone"], "email": eintrag["email"],
+                "unsicher": False, "grund": ""}
+    norm = normalize_name(name)
+    if norm in idx["mehrdeutig"]:
+        return {"phone": "", "email": "", "unsicher": True,
+                "grund": (f"Mehrere Playtomic-Konten heissen „{name}“ — "
+                          "welches gemeint ist, steht in der Buchung. "
+                          "Ohne Konto-Nummer verschicke ich nichts.")}
+    eintrag = idx["name"].get(norm, {})
+    if konto and eintrag:
+        # Konto bekannt, aber nicht in der Kundenliste: Die Liste ist
+        # womöglich älter als die Buchung.
+        return {"phone": eintrag.get("phone", ""),
+                "email": eintrag.get("email", ""), "unsicher": False,
+                "grund": ""}
+    return {"phone": eintrag.get("phone", ""),
+            "email": eintrag.get("email", ""), "unsicher": False, "grund": ""}
 
 
-def email_fuer(name: str) -> str:
-    return kontakt_index().get(normalize_name(name), {}).get("email", "")
+def telefon_fuer(name: str, user_id: str = "") -> str:
+    return kontakt_fuer(name, user_id)["phone"]
+
+
+def email_fuer(name: str, user_id: str = "") -> str:
+    return kontakt_fuer(name, user_id)["email"]
 
 
 # ── Nachrichtenvorlagen ───────────────────────────────────────────────────────
@@ -14284,8 +14329,11 @@ def _wa_fall(r, i: int, datum: str, angeboten: set = None, rang: int = 0):
     betrag = r.get("Betrag", 0)
     zeit = str(r.get("Service_Zeit", "")).strip()
     court = str(r.get("Court", "")).strip()
-    nummer = telefon_fuer(name)
-    mail = email_fuer(name)
+    # Über das Playtomic-Konto, nicht über den Namen: „Daniel" tragen
+    # mehrere Konten. Am 25.09. stand deshalb eine fremde Nummer am Fall.
+    konto = str(r.get("User_Id", "") or "")
+    kontakt = kontakt_fuer(name, konto)
+    nummer, mail = kontakt["phone"], kontakt["email"]
     gesendet = schon_gesendet(nn, datum, betrag)
 
     liste_r = parse_betrag(r.get("Listenpreis", 0))
@@ -14334,6 +14382,8 @@ def _wa_fall(r, i: int, datum: str, angeboten: set = None, rang: int = 0):
         st.caption(f"📱 {nummer}" if len(nummer) > 5 else "📱 keine Nummer")
     with k2:
         st.caption(f"✉️ {mail}" if mail else "✉️ keine E-Mail")
+    if kontakt["unsicher"]:
+        box(f"⚠️ <b>Kontakt nicht eindeutig.</b> {kontakt['grund']}", "warn")
 
     # Vorab freigegeben: Die Sperre ist aufgehoben, der Check-in zugesagt.
     vorab = vorab_freigaben_laden().get(f"{nn}_{datum}")
@@ -14613,7 +14663,12 @@ def _wa_tagesarbeit():
             box("✅ Für diesen Tag ist alles geklärt.", "ok")
         else:
             offen = offen.copy()
-            offen["_nummer"] = offen["Name"].map(telefon_fuer)
+            # Auch hier über das Playtomic-Konto: Beim Sammelversand fällt
+            # eine falsche Nummer sonst gar nicht erst auf.
+            offen["_nummer"] = [
+                telefon_fuer(str(z.get("Name", "")),
+                             str(z.get("User_Id", "") or ""))
+                for _, z in offen.iterrows()]
             erreichbar = offen[offen["_nummer"].astype(str).str.len() > 5]
 
             if twilio_bereit() and not erreichbar.empty:
