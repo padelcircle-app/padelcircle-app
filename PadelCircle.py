@@ -334,7 +334,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # Steht unten in der Seitenleiste. Damit lässt sich auf einen Blick
 # sehen, welche Fassung gerade läuft — bei „stimmt immer noch nicht"
 # ist das die erste Frage.
-APP_STAND       = "Fassung 67 · 28.09.2026"
+APP_STAND       = "Fassung 68 · 28.09.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -17559,6 +17559,85 @@ def _plan_rechnung_zeigen(start: datetime, dauer, courts, teilnehmer,
                + f" · {geld(r['je_platz'])} je Court-Stunde")
 
 
+def _plan_kalender(woche: dict, montag: date) -> str:
+    """
+    Die Woche als Kalenderraster — Stunden als Zeilen, Tage als Spalten.
+
+    Eine Liste je Tag sagt nichts darüber, wann die Halle voll ist. Erst
+    im Raster sieht man, dass zwei Events übereinander liegen oder dass
+    der Freitagabend noch frei ist.
+
+    Gezeigt wird nur der Ausschnitt, in dem etwas stattfindet — sonst
+    scrollt man an sechzehn leeren Stunden vorbei.
+    """
+    termine = [(tag, z) for tag in range(7) for z, _d in woche[tag]]
+
+    def _minute(zeile) -> int:
+        teile = str(zeile.get("start", "18:00")).split(":")
+        try:
+            return int(teile[0]) * 60 + int(teile[1])
+        except (ValueError, IndexError):
+            return 18 * 60
+
+    if termine:
+        von = min(_minute(z) for _t, z in termine) // 60
+        bis = max((_minute(z) + float(z.get("dauer", 90) or 90))
+                  for _t, z in termine) / 60
+        von, bis = max(CONFIG["oeffnung_von"], von - 1), min(CONFIG["oeffnung_bis"], int(bis) + 2)
+    else:
+        von, bis = 16, 23
+    stunden = max(2, bis - von)
+    hoehe = 46                       # Pixel je Stunde
+
+    kopf = "".join(
+        f'<div style="flex:1;text-align:center;padding:.4rem 0;'
+        f'border-left:1px solid rgba(255,255,255,.07)">'
+        f'<b>{WOCHENTAGE_DE[i][:2]}</b> '
+        f'<span style="opacity:.6">{(montag + timedelta(days=i)).strftime("%d.%m.")}'
+        f'</span></div>' for i in range(7))
+
+    # Linke Stundenleiste und waagerechte Linien
+    achse = "".join(
+        f'<div style="position:absolute;top:{(s - von) * hoehe}px;left:0;'
+        f'right:0;border-top:1px solid rgba(255,255,255,.07);'
+        f'height:{hoehe}px"></div>'
+        f'<div style="position:absolute;top:{(s - von) * hoehe + 2}px;left:4px;'
+        f'font-size:.7rem;opacity:.45">{s:02d}:00</div>'
+        for s in range(von, bis + 1))
+
+    spalten = ""
+    for i in range(7):
+        bloecke = ""
+        for zeile, _datum in woche[i]:
+            start = _minute(zeile)
+            dauer = float(zeile.get("dauer", 90) or 90)
+            oben = (start - von * 60) / 60 * hoehe
+            hoch = max(24, dauer / 60 * hoehe - 4)
+            bloecke += (
+                f'<div style="position:absolute;top:{oben:.0f}px;left:3px;'
+                f'right:3px;height:{hoch:.0f}px;background:{C["volt"]};'
+                f'color:#0B0C10;border-radius:10px;padding:.25rem .4rem;'
+                f'overflow:hidden;font-size:.72rem;line-height:1.15">'
+                f'<b>{zeile.get("start", "")}</b> '
+                f'{str(zeile.get("name", ""))[:22]}<br>'
+                f'<span style="opacity:.75">{zeile.get("courts", "")} Courts · '
+                f'{zeile.get("teilnehmer", "")} Pers.</span></div>')
+        spalten += (f'<div style="flex:1;position:relative;'
+                    f'border-left:1px solid rgba(255,255,255,.07)">'
+                    f'{bloecke}</div>')
+
+    return (f'<div style="border:1px solid rgba(255,255,255,.1);'
+            f'border-radius:14px;overflow:hidden;margin:.5rem 0">'
+            f'<div style="display:flex;background:rgba(255,255,255,.04)">'
+            f'<div style="width:46px"></div>{kopf}</div>'
+            f'<div style="display:flex;position:relative;'
+            f'height:{stunden * hoehe + 8}px">'
+            f'<div style="width:46px;position:relative">{achse}</div>'
+            f'<div style="flex:1;display:flex;position:relative">'
+            f'<div style="position:absolute;inset:0">{achse}</div>'
+            f'{spalten}</div></div></div>')
+
+
 def modul_plan():
     head("Wochenplan", "Events planen und vorher durchrechnen")
 
@@ -17583,22 +17662,10 @@ def modul_plan():
             st.rerun()
 
     woche = plan_der_woche(montag)
-    spalten = st.columns(7)
-    for i, sp in enumerate(spalten):
-        tag = montag + timedelta(days=i)
-        with sp:
-            st.markdown(f"**{WOCHENTAGE_DE[i][:2]}** {tag.strftime('%d.%m.')}")
-            if not woche[i]:
-                st.caption("—")
-            for zeile, _datum in woche[i]:
-                dauer = float(zeile.get("dauer", 0) or 0)
-                st.markdown(
-                    f'<div class="pc-tile" style="padding:.6rem;margin:.3rem 0">'
-                    f'<b>{zeile.get("start", "")}</b><br>{zeile.get("name", "")}'
-                    f'<br><span style="opacity:.6">{int(dauer)} Min. · '
-                    f'{zeile.get("courts", "")} Courts · '
-                    f'{zeile.get("teilnehmer", "")} Pers.</span></div>',
-                    unsafe_allow_html=True)
+    st.markdown(_plan_kalender(woche, montag), unsafe_allow_html=True)
+    anzahl = sum(len(v) for v in woche.values())
+    st.caption(f"{anzahl} Termin{'e' if anzahl != 1 else ''} in dieser Woche"
+               if anzahl else "Diese Woche ist nichts geplant.")
 
     st.markdown("---")
     st.markdown("##### Neues Event anlegen")
