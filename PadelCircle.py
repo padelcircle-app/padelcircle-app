@@ -16,7 +16,7 @@ SETUP:   siehe Setup-Anleitung.docx
 import streamlit as st
 import pandas as pd
 from rapidfuzz import fuzz
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, time as dtime
 from calendar import monthrange
 from functools import lru_cache
 import ssl
@@ -334,7 +334,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # Steht unten in der Seitenleiste. Damit lässt sich auf einen Blick
 # sehen, welche Fassung gerade läuft — bei „stimmt immer noch nicht"
 # ist das die erste Frage.
-APP_STAND       = "Fassung 65 · 28.09.2026"
+APP_STAND       = "Fassung 66 · 28.09.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -645,6 +645,9 @@ SHEET_SPALTEN = {
                          "freigegeben_am", "notiz", "timestamp"],
     "auffaellige":      ["name_norm", "name", "art", "notiz", "timestamp"],
     "geschenke":        ["checkin_key", "datum", "name", "grund", "timestamp"],
+    "event_plan":       ["id", "name", "wochentag", "start", "dauer", "courts",
+                         "teilnehmer", "preis", "kosten", "rhythmus", "ab",
+                         "bis", "notiz", "timestamp"],
     "buchungs_luecken": ["key", "datum", "zeit", "court", "anzahl", "anteil",
                          "kandidaten", "erledigt", "antwort", "timestamp"],
     "wetter":           ["datum", "code", "lage", "t_max", "t_min",
@@ -17376,6 +17379,289 @@ Single ab 16 / WE · **{euro(CONFIG['preis_single_prime'])}**
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#   🗓  WOCHENPLAN
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# Wiederkehrende Veranstaltungen planen, bevor sie in Playtomic stehen.
+#
+# Zwei Fragen beantwortet dieser Plan, und mehr soll er nicht können:
+#   • Was läuft in einer Woche wann und auf wie vielen Courts?
+#   • Lohnt sich das? Ein Event belegt Courts, die sonst vermietet wären —
+#     der Vergleich mit dem normalen Platzpreis ist die eigentliche Rechnung.
+#
+# Bewusst OHNE Verbindung zu Playtomic und zum Wellpass-Abgleich: Hier
+# steht, was geplant ist, nicht was passiert ist.
+
+RHYTHMEN = {"woechentlich": ("Jede Woche", 7),
+            "zweiwoechentlich": ("Alle zwei Wochen", 14),
+            "vierwoechentlich": ("Alle vier Wochen", 28),
+            "einmalig": ("Einmalig", 0)}
+
+
+def eventplan_laden() -> pd.DataFrame:
+    return loadsheet("event_plan", SHEET_SPALTEN["event_plan"])
+
+
+def eventplan_speichern(zeile: dict) -> bool:
+    """Eine Serie anlegen. Die Kennung wird hier vergeben."""
+    zeile = dict(zeile)
+    zeile.setdefault("id", secrets.token_hex(6))
+    zeile["timestamp"] = datetime.now().isoformat(timespec="seconds")
+    ok = savesheet_append(pd.DataFrame([zeile]), "event_plan")
+    cache_leeren("event_plan")
+    return ok
+
+
+def eventplan_loeschen(kennung: str) -> bool:
+    df = eventplan_laden()
+    if df.empty or "id" not in df.columns:
+        return False
+    ok = savesheet(df[df["id"].astype(str) != str(kennung)], "event_plan")
+    cache_leeren("event_plan")
+    return ok
+
+
+def event_rechnung(start: datetime, dauer: float, courts: int,
+                   teilnehmer: int, preis: float, kosten: float = 0.0) -> dict:
+    """
+    Was bringt ein Event — verglichen damit, die Courts normal zu vermieten?
+
+    Der Platzwert ist der ehrliche Massstab: Wer fünf Courts für zweieinhalb
+    Stunden blockiert, verzichtet auf deren Miete. Ein Event, das weniger
+    einbringt als das, kostet Geld, auch wenn die Kasse voll aussieht.
+
+    → {einnahmen, platzwert, kosten, ergebnis, je_platz, mindestpreis,
+       plaetze, frei}
+    """
+    courts = max(0, int(courts or 0))
+    teilnehmer = max(0, int(teilnehmer or 0))
+    einnahmen = round(teilnehmer * float(preis or 0), 2)
+    platzwert = round(listenpreis(start, dauer, False) * courts, 2)
+    kosten = round(float(kosten or 0), 2)
+    ergebnis = round(einnahmen - platzwert - kosten, 2)
+    plaetze = courts * COURT_SPIELER[False]
+    return {
+        "einnahmen": einnahmen,
+        "platzwert": platzwert,
+        "kosten": kosten,
+        "ergebnis": ergebnis,
+        # Was hereinkommt, gemessen an der belegten Court-Stunde.
+        "je_platz": round(einnahmen / (courts * dauer / 60), 2)
+                    if courts and dauer else 0.0,
+        # Ab diesem Preis je Person trägt sich das Event gerade so.
+        "mindestpreis": round((platzwert + kosten) / teilnehmer, 2)
+                        if teilnehmer else 0.0,
+        "plaetze": plaetze,
+        "frei": max(0, plaetze - teilnehmer),
+    }
+
+
+def plan_termine(zeile, von: date, bis: date) -> list:
+    """Alle Termine einer Serie im Zeitraum. → [date, …]"""
+    try:
+        ab = parse_date_safe(zeile.get("ab")) or von
+        schritt = RHYTHMEN.get(str(zeile.get("rhythmus", "")),
+                               ("", 7))[1]
+        wochentag = int(zeile.get("wochentag", ab.weekday()))
+    except (TypeError, ValueError):
+        return []
+    ende = parse_date_safe(zeile.get("bis"))
+    # Erster Termin: der passende Wochentag ab dem Starttag.
+    erster = ab + timedelta(days=(wochentag - ab.weekday()) % 7)
+    if schritt == 0:                       # einmalig
+        return [erster] if von <= erster <= bis and (
+            ende is None or erster <= ende) else []
+    termine, tag = [], erster
+    while tag <= bis:
+        if tag >= von and (ende is None or tag <= ende):
+            termine.append(tag)
+        tag += timedelta(days=schritt)
+    return termine
+
+
+def plan_der_woche(montag: date) -> dict:
+    """Was steht in dieser Woche an? → {wochentag: [(zeile, datum), …]}"""
+    df = eventplan_laden()
+    woche = {i: [] for i in range(7)}
+    if df.empty:
+        return woche
+    sonntag = montag + timedelta(days=6)
+    for _, zeile in df.iterrows():
+        for tag in plan_termine(zeile, montag, sonntag):
+            woche[tag.weekday()].append((zeile, tag))
+    for eintraege in woche.values():
+        eintraege.sort(key=lambda x: str(x[0].get("start", "")))
+    return woche
+
+
+def _plan_rechnung_zeigen(start: datetime, dauer, courts, teilnehmer,
+                          preis, kosten):
+    """Die Vorschau beim Anlegen — dieselbe Rechnung wie später im Plan."""
+    r = event_rechnung(start, dauer, courts, teilnehmer, preis, kosten)
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        kpi("Einnahmen", euro(r["einnahmen"]), f"{teilnehmer} × {euro(preis)}")
+    with c2:
+        kpi("Platzwert", euro(r["platzwert"]),
+            f"{courts} Courts · {int(dauer)} Min.")
+    with c3:
+        kpi("Weitere Kosten", euro(r["kosten"]), "Trainer, Material")
+    with c4:
+        kpi("Ergebnis", euro(r["ergebnis"]),
+            "mehr als normale Vermietung" if r["ergebnis"] >= 0
+            else "weniger als normale Vermietung")
+    if r["ergebnis"] >= 0:
+        box(f"✅ Das Event bringt <b>{euro(r['ergebnis'])}</b> mehr als die "
+            f"Courts normal zu vermieten. Kostendeckend wärst du ab "
+            f"<b>{euro(r['mindestpreis'])}</b> pro Person.", "ok")
+    else:
+        box(f"⚠️ Das Event bringt <b>{euro(abs(r['ergebnis']))}</b> weniger "
+            "als die normale Vermietung. Kostendeckend ab "
+            f"<b>{euro(r['mindestpreis'])}</b> pro Person — oder weniger "
+            "Courts belegen.", "warn")
+    st.caption(f"{r['plaetze']} Plätze auf {courts} Courts · "
+               + (f"{r['frei']} frei" if r["frei"] else "voll besetzt")
+               + f" · {euro(r['je_platz'])} je Court-Stunde")
+
+
+def modul_plan():
+    head("Wochenplan", "Events planen und vorher durchrechnen")
+
+    heute = date.today()
+    versatz = int(st.session_state.get("plan_woche", 0))
+    montag = heute - timedelta(days=heute.weekday()) + timedelta(weeks=versatz)
+
+    n1, n2, n3 = st.columns([1, 2, 1])
+    with n1:
+        if st.button("← Woche zurück", use_container_width=True, key="plan_zur"):
+            st.session_state["plan_woche"] = versatz - 1
+            st.rerun()
+    with n2:
+        st.markdown(f"<div style='text-align:center;padding-top:.5rem'><b>"
+                    f"{montag.strftime('%d.%m.')} – "
+                    f"{(montag + timedelta(days=6)).strftime('%d.%m.%Y')}</b>"
+                    + ("  ·  diese Woche" if versatz == 0 else "")
+                    + "</div>", unsafe_allow_html=True)
+    with n3:
+        if st.button("Woche vor →", use_container_width=True, key="plan_vor"):
+            st.session_state["plan_woche"] = versatz + 1
+            st.rerun()
+
+    woche = plan_der_woche(montag)
+    spalten = st.columns(7)
+    for i, sp in enumerate(spalten):
+        tag = montag + timedelta(days=i)
+        with sp:
+            st.markdown(f"**{WOCHENTAGE_DE[i][:2]}** {tag.strftime('%d.%m.')}")
+            if not woche[i]:
+                st.caption("—")
+            for zeile, _datum in woche[i]:
+                dauer = float(zeile.get("dauer", 0) or 0)
+                st.markdown(
+                    f'<div class="pc-tile" style="padding:.6rem;margin:.3rem 0">'
+                    f'<b>{zeile.get("start", "")}</b><br>{zeile.get("name", "")}'
+                    f'<br><span style="opacity:.6">{int(dauer)} Min. · '
+                    f'{zeile.get("courts", "")} Courts · '
+                    f'{zeile.get("teilnehmer", "")} Pers.</span></div>',
+                    unsafe_allow_html=True)
+
+    st.markdown("---")
+    st.markdown("##### Neues Event anlegen")
+    st.caption("Erst rechnen, dann anlegen: Die Zahlen unten aktualisieren "
+               "sich mit jeder Eingabe.")
+
+    e1, e2, e3 = st.columns(3)
+    with e1:
+        name = st.text_input("Name", key="plan_name",
+                             placeholder="z. B. Mixed Americano")
+        wochentag = st.selectbox("Wochentag", range(7), key="plan_wt",
+                                 format_func=lambda i: WOCHENTAGE_DE[i])
+    with e2:
+        startzeit = st.time_input("Beginn", value=dtime(18, 0), key="plan_zeit",
+                                  step=1800)
+        dauer = st.number_input("Dauer (Minuten)", 30, 360, 150, 30,
+                                key="plan_dauer")
+    with e3:
+        courts = st.number_input("Courts", 1, COURTS_GESAMT, 2, 1,
+                                 key="plan_courts")
+        teilnehmer = st.number_input("Teilnehmer", 1, 80, 8, 1,
+                                     key="plan_tn")
+
+    f1, f2, f3 = st.columns(3)
+    with f1:
+        preis = st.number_input("Preis je Person (€)", 0.0, 200.0, 27.0, 1.0,
+                                key="plan_preis")
+    with f2:
+        kosten = st.number_input("Weitere Kosten (€)", 0.0, 2000.0, 0.0, 10.0,
+                                 key="plan_kosten",
+                                 help="Trainer, Bälle, Preise — alles, was "
+                                      "zusätzlich anfällt.")
+    with f3:
+        rhythmus = st.selectbox("Rhythmus", list(RHYTHMEN),
+                                format_func=lambda k: RHYTHMEN[k][0],
+                                key="plan_rhythmus")
+
+    g1, g2 = st.columns(2)
+    with g1:
+        ab = st.date_input("Ab", value=heute, key="plan_ab")
+    with g2:
+        bis_an = st.checkbox("Enddatum festlegen", key="plan_bis_an")
+        bis = st.date_input("Bis", value=heute + timedelta(days=90),
+                            key="plan_bis", disabled=not bis_an)
+
+    start_dt = datetime.combine(ab, startzeit)
+    st.markdown("")
+    _plan_rechnung_zeigen(start_dt, dauer, courts, teilnehmer, preis, kosten)
+
+    vorschau = plan_termine(
+        {"ab": str(ab), "bis": str(bis) if bis_an else "",
+         "rhythmus": rhythmus, "wochentag": wochentag},
+        ab, ab + timedelta(days=56))
+    if vorschau:
+        st.caption("Nächste Termine: "
+                   + ", ".join(d.strftime("%d.%m.") for d in vorschau[:6])
+                   + (" …" if len(vorschau) > 6 else ""))
+
+    if st.button("➕ Serie anlegen", type="primary", use_container_width=True,
+                 disabled=not name.strip(), key="plan_neu"):
+        if eventplan_speichern({
+                "name": name.strip(), "wochentag": int(wochentag),
+                "start": startzeit.strftime("%H:%M"), "dauer": int(dauer),
+                "courts": int(courts), "teilnehmer": int(teilnehmer),
+                "preis": float(preis), "kosten": float(kosten),
+                "rhythmus": rhythmus, "ab": str(ab),
+                "bis": str(bis) if bis_an else "", "notiz": ""}):
+            st.success(f"✅ „{name}“ angelegt.")
+            st.rerun()
+        else:
+            st.error("Konnte nicht gespeichert werden.")
+
+    df = eventplan_laden()
+    if not df.empty:
+        st.markdown("---")
+        st.markdown("##### Angelegte Serien")
+        for _, zeile in df.iterrows():
+            s1, s2 = st.columns([5, 1])
+            with s1:
+                rh = RHYTHMEN.get(str(zeile.get("rhythmus", "")), ("?", 0))[0]
+                st.markdown(
+                    f"**{zeile.get('name', '')}** · "
+                    f"{WOCHENTAGE_DE[int(zeile.get('wochentag', 0) or 0)]} "
+                    f"{zeile.get('start', '')} · {rh} · "
+                    f"{zeile.get('courts', '')} Courts · "
+                    f"{zeile.get('teilnehmer', '')} Personen à "
+                    f"{euro(zeile.get('preis', 0))}")
+                st.caption(f"ab {datum_kurz(str(zeile.get('ab', '')))}"
+                           + (f" bis {datum_kurz(str(zeile.get('bis', '')))}"
+                              if str(zeile.get("bis", "")).strip() else ""))
+            with s2:
+                if st.button("🗑", key=f"plan_weg_{zeile.get('id', '')}",
+                             use_container_width=True):
+                    eventplan_loeschen(str(zeile.get("id", "")))
+                    st.rerun()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #   🏠  COMMAND CENTER
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -17402,6 +17688,9 @@ MODULE = [
     {"id": "analysen",  "ic": "🔬", "ti": "Analysen",
      "de": "Bindung, Netzwerk, Wirtschaftlichkeit", "an": True,
      "fn": lambda: modul_analysen()},
+    {"id": "plan",      "ic": "🗓", "ti": "Wochenplan",
+     "de": "Events planen und durchrechnen", "an": True,
+     "fn": lambda: modul_plan()},
     {"id": "punkte",    "ic": "🏆", "ti": "Circle Points",
      "de": "Rangliste nach Spieltagen", "an": True,
      "fn": lambda: modul_punkte()},
