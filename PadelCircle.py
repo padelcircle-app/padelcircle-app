@@ -334,7 +334,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # Steht unten in der Seitenleiste. Damit lässt sich auf einen Blick
 # sehen, welche Fassung gerade läuft — bei „stimmt immer noch nicht"
 # ist das die erste Frage.
-APP_STAND       = "Fassung 71 · 28.09.2026"
+APP_STAND       = "Fassung 72 · 28.09.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -680,6 +680,7 @@ SHEET_SPALTEN = {
     "geschenke":        ["checkin_key", "datum", "name", "grund", "timestamp"],
     "event_plan":       ["id", "name", "wochentag", "start", "dauer", "courts",
                          "teilnehmer", "preis", "kosten", "posten",
+                         "level_von", "level_bis",
                          "rhythmus", "ab", "bis", "notiz", "timestamp"],
     "buchungs_luecken": ["key", "datum", "zeit", "court", "anzahl", "anteil",
                          "kandidaten", "erledigt", "antwort", "timestamp"],
@@ -17608,6 +17609,19 @@ def _plan_rechnung_zeigen(start: datetime, dauer, courts, teilnehmer,
         kpi("Kostendeckend ab", geld(r["mindestpreis"]), "je Person")
 
 
+def _level_text(zeile) -> str:
+    """„ · 1,00–3,00" oder leer, wenn keine Spanne hinterlegt ist."""
+    try:
+        von = float(zeile.get("level_von", 0) or 0)
+        bis = float(zeile.get("level_bis", 0) or 0)
+    except (TypeError, ValueError):
+        return ""
+    if bis <= 0:
+        return ""
+    return (f" · {von:.2f}".replace(".", ",")
+            + f"–{bis:.2f}".replace(".", ","))
+
+
 def _plan_kalender(woche: dict, montag: date) -> str:
     """
     Die Woche als Kalenderraster — Stunden als Zeilen, Tage als Spalten.
@@ -17670,7 +17684,8 @@ def _plan_kalender(woche: dict, montag: date) -> str:
                 f'<b>{zeile.get("start", "")}</b> '
                 f'{str(zeile.get("name", ""))[:22]}<br>'
                 f'<span style="opacity:.75">{zeile.get("courts", "")} Courts · '
-                f'{zeile.get("teilnehmer", "")} Pers.</span></div>')
+                f'{zeile.get("teilnehmer", "")} Pers.'
+                f'{_level_text(zeile)}</span></div>')
         spalten += (f'<div style="flex:1;position:relative;'
                     f'border-left:1px solid rgba(255,255,255,.07)">'
                     f'{bloecke}</div>')
@@ -17772,6 +17787,21 @@ def modul_plan():
             f"{euro(p['summe'])}" for p in posten)
             + f"  →  zusammen {euro(kosten)}")
 
+    # Playtomic führt für jeden Spieler eine Spielstärke von 0 bis 7.
+    # Ein Americano „für alle" wird selten gut: Wer 1,2 spielt, hat gegen
+    # 3,5 nichts zu lachen. Deshalb gehört die Spanne zum Event.
+    l1, l2 = st.columns(2)
+    with l1:
+        level = st.slider("Spielstärke (Playtomic-Level)", 0.0, 7.0,
+                          (1.0, 3.0), 0.25, key="plan_level",
+                          help="Von–bis. Für ein offenes Event einfach die "
+                               "ganze Spanne stehen lassen.")
+    with l2:
+        st.caption("")
+        st.caption(f"Eingeladen sind Spieler von **{level[0]:.2f}** bis "
+                   f"**{level[1]:.2f}** — das ist die Zahl, die in Playtomic "
+                   "neben dem Spielernamen steht.")
+
     g1, g2 = st.columns(2)
     with g1:
         ab = st.date_input("Ab", value=heute, key="plan_ab")
@@ -17801,6 +17831,7 @@ def modul_plan():
                 "courts": int(courts), "teilnehmer": int(teilnehmer),
                 "preis": float(preis), "kosten": float(kosten),
                 "posten": json.dumps(posten, ensure_ascii=False),
+                "level_von": float(level[0]), "level_bis": float(level[1]),
                 "rhythmus": rhythmus, "ab": str(ab),
                 "bis": str(bis) if bis_an else "", "notiz": ""}):
             st.success(f"✅ „{name}“ angelegt.")
@@ -17822,7 +17853,9 @@ def modul_plan():
                     f"{zeile.get('start', '')} · {rh} · "
                     f"{zeile.get('courts', '')} Courts · "
                     f"{zeile.get('teilnehmer', '')} Personen à "
-                    f"{geld(zeile.get('preis', 0))}")
+                    f"{geld(zeile.get('preis', 0))}"
+                    + (f" · Level{_level_text(zeile)}" if _level_text(zeile)
+                       else ""))
                 st.caption(f"ab {datum_kurz(str(zeile.get('ab', '')))}"
                            + (f" bis {datum_kurz(str(zeile.get('bis', '')))}"
                               if str(zeile.get("bis", "")).strip() else "")
