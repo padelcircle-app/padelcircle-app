@@ -334,7 +334,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # Steht unten in der Seitenleiste. Damit lässt sich auf einen Blick
 # sehen, welche Fassung gerade läuft — bei „stimmt immer noch nicht"
 # ist das die erste Frage.
-APP_STAND       = "Fassung 63 · 28.09.2026"
+APP_STAND       = "Fassung 64 · 28.09.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -1430,9 +1430,13 @@ def darf_geld() -> bool:
 
     Der Schalter in der Seitenleiste ist für den Moment gedacht, in dem
     jemand mitschaut: Der Abgleich läuft weiter, die Geschäftszahlen sind
-    weg. Er gilt nur für diese Sitzung, nach dem Abmelden ist er zurück.
+    weg. Er gilt nur für diese Sitzung.
+
+    VORAUSGEWÄHLT IST „AUS": Beim Öffnen sind die Zahlen verdeckt, auch
+    beim Chef. Wer sie sehen will, legt den Schalter um. So steht nie
+    aus Versehen der Umsatz auf dem Bildschirm, wenn jemand danebensteht.
     """
-    return not ist_team() and not st.session_state.get("geld_aus", False)
+    return not ist_team() and not st.session_state.get("geld_aus", True)
 
 
 def sichtbare_module() -> list:
@@ -17689,10 +17693,9 @@ def main():
 
         st.markdown("---")
         if not ist_team():
-            st.toggle("🙈  Zahlen ausblenden", key="geld_aus",
-                      help="Blendet Umsatz, Ziele und Werte aus — für den "
-                           "Moment, in dem jemand mitschaut. Gilt nur für "
-                           "diese Sitzung.")
+            st.toggle("🙈  Zahlen ausblenden", key="geld_aus", value=True,
+                      help="Beim Öffnen immer an. Umschalten zeigt Umsatz, "
+                           "Ziele und Werte — nur für diese Sitzung.")
         if st.button("🚪  Abmelden", use_container_width=True, key="nav_logout"):
             token_widerrufen(st.query_params.get("auth"))
             st.session_state.clear()
