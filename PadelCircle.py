@@ -334,7 +334,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # Steht unten in der Seitenleiste. Damit lässt sich auf einen Blick
 # sehen, welche Fassung gerade läuft — bei „stimmt immer noch nicht"
 # ist das die erste Frage.
-APP_STAND       = "Fassung 66 · 28.09.2026"
+APP_STAND       = "Fassung 67 · 28.09.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -544,6 +544,39 @@ def euro(val) -> str:
         return f"{float(val):,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".")
     except (TypeError, ValueError):
         return "0,00 €"
+
+
+def geld(val) -> str:
+    """
+    Ein Geldbetrag für die Anzeige — oder XXX, wenn die Zahlen verdeckt sind.
+
+    Bewusst getrennt von euro(): euro() steckt auch in gespeicherten Texten
+    („1,50 € statt 13,50 €") und in den WhatsApp-Nachrichten. Würde dort
+    maskiert, stünde XXX dauerhaft im Blatt oder beim Kunden in der
+    Nachricht. Maskiert wird nur, was auf dem Bildschirm steht.
+    """
+    return euro(val) if darf_geld() else "XXX €"
+
+
+# Spalten, in denen Geld steht — erkannt am Namen, damit eine neue
+# Tabelle nicht versehentlich Beträge zeigt, wenn die Zahlen verdeckt sind.
+GELD_WOERTER = ("umsatz", "einnahm", "betrag", "preis", "wert", "gebühr",
+                "gebuehr", "rabatt", "netto", "brutto", "zahlung", "ziel",
+                "summe", "€", "eur", "kosten", "bezahlt", "offen €")
+
+
+def ohne_geld(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Eine Tabelle für die Anzeige — Geldspalten maskiert, falls die Zahlen
+    verdeckt sind. Sonst unverändert.
+    """
+    if darf_geld() or df is None or getattr(df, "empty", True):
+        return df
+    zeig = df.copy()
+    for spalte in zeig.columns:
+        if any(w in str(spalte).lower() for w in GELD_WOERTER):
+            zeig[spalte] = "XXX"
+    return zeig
 
 
 def prozent(teil, ganz) -> float:
@@ -1446,14 +1479,12 @@ def sichtbare_module() -> list:
     """
     Welche Module sind gerade erreichbar?
 
-    Sind die Zahlen verdeckt, verschwinden die Geld-Module ganz — Dashboard,
-    Analysen, Events, Spieler & Community, Circle Points, Einstellungen.
-    Einzelne Beträge auszublenden reicht nicht: Im Dashboard steckt Geld in
-    Kacheln, Tabellen und Diagrammen, und eine davon wird immer vergessen.
-    Übrig bleibt die Wellpass-Arbeit, die ohne Umsatzzahlen auskommt.
+    Alles bleibt erreichbar — auch mit verdeckten Zahlen. Dort stehen dann
+    XXX statt Beträgen, und Diagramme mit Geld bleiben leer. Nur wer sich
+    mit dem Team-Passwort anmeldet, sieht die Geld-Module gar nicht erst.
     """
     return [m for m in MODULE
-            if darf_geld() or m["id"] in TEAM_MODULE]
+            if not ist_team() or m["id"] in TEAM_MODULE]
 
 def token_speichern(token: str, wer: str = "chef") -> bool:
     try:
@@ -11311,7 +11342,7 @@ def modul_daten():
 
         with st.expander("Wie gerechnet wird"):
             st.markdown(f"""
-**Der Wellpass-Rabatt beträgt zurzeit {euro(wellpass_abzug())} je Person und
+**Der Wellpass-Rabatt beträgt zurzeit {geld(wellpass_abzug())} je Person und
 Buchung.** Er hat sich schon geändert — bis 03.08.2026 waren es 13,00 €. Jeder
 Tag rechnet mit dem Wert, der damals galt.
 Wer weniger als den vollen Anteil gezahlt hat, genau um diesen Betrag, hat den
@@ -11464,7 +11495,7 @@ Nummern werden automatisch umgewandelt: `0170…` → `+49170…`
             with d2:
                 kpi("Erfasste Tage", str(len(je_tag)))
             with d3:
-                kpi("Ø pro Tag", euro(je_tag["summe"].mean()))
+                kpi("Ø pro Tag", geld(je_tag["summe"].mean()))
 
             auffaellig = je_tag[je_tag["summe"] > je_tag["summe"].median() * 2.5]
             if not auffaellig.empty:
@@ -11859,13 +11890,13 @@ def _dash_tag():
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        kpi("Gesamt effektiv", euro(k["gesamt_effektiv"]), "inkl. Wellpass",
+        kpi("Gesamt effektiv", geld(k["gesamt_effektiv"]), "inkl. Wellpass",
             delta=delta_umsatz, delta_text="ggü. Vortag")
     with c2:
-        kpi("Playtomic", euro(k["umsatz"]), f"{k['buchungen']} Buchungen")
+        kpi("Playtomic", geld(k["umsatz"]), f"{k['buchungen']} Buchungen")
     with c3:
         kpi("Wellpass", str(k["wellpass_anzahl"]),
-            f"{euro(k['wellpass_wert'])} von EGYM")
+            f"{geld(k['wellpass_wert'])} von EGYM")
     with c4:
         kpi("Spieler", str(k["spieler"]), "eindeutige Personen")
 
@@ -11873,11 +11904,11 @@ def _dash_tag():
         st.markdown("")
         c1, c2, c3 = st.columns(3)
         with c1:
-            kpi("Guthaben", euro(k["guthaben"]))
+            kpi("Guthaben", geld(k["guthaben"]))
         with c2:
-            kpi("Leihschläger", euro(k["schlaeger"]))
+            kpi("Leihschläger", geld(k["schlaeger"]))
         with c3:
-            kpi("Bälle", euro(k["baelle"]))
+            kpi("Bälle", geld(k["baelle"]))
 
 
 def _dash_monat():
@@ -11896,14 +11927,14 @@ def _dash_monat():
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        kpi("Gesamt effektiv", euro(k["gesamt_effektiv"]), "inkl. Wellpass")
+        kpi("Gesamt effektiv", geld(k["gesamt_effektiv"]), "inkl. Wellpass")
     with c2:
-        kpi("Playtomic", euro(k["umsatz"]))
+        kpi("Playtomic", geld(k["umsatz"]))
     with c3:
-        kpi("Wellpass", euro(k["wellpass_wert"]),
+        kpi("Wellpass", geld(k["wellpass_wert"]),
             f"{k['wellpass_anzahl']} Check-ins")
     with c4:
-        kpi("Ø pro Tag", euro(pg["schnitt_pro_tag"]),
+        kpi("Ø pro Tag", geld(pg["schnitt_pro_tag"]),
             f"{pg['tage_erfasst']} Tage erfasst")
 
     # ── Zielfortschritt ─────────────────────────────────────────────────
@@ -11912,9 +11943,9 @@ def _dash_monat():
         st.markdown("")
         erreicht = prozent(k["gesamt_effektiv"], ziel)
         rest = max(0.0, ziel - k["gesamt_effektiv"])
-        prog_text = (f"Hochrechnung Monatsende: <b>{euro(pg['prognose'])}</b><br>"
-                     f"Ziel: {euro(ziel)} · "
-                     + (f"noch {euro(rest)}" if rest > 0 else "Ziel erreicht 🎉"))
+        prog_text = (f"Hochrechnung Monatsende: <b>{geld(pg['prognose'])}</b><br>"
+                     f"Ziel: {geld(ziel)} · "
+                     + (f"noch {geld(rest)}" if rest > 0 else "Ziel erreicht 🎉"))
         fortschritts_ring(erreicht, f"{erreicht:.0f}%",
                           f"{MONATE_DE[int(monat[5:7])-1]} {monat[:4]}", prog_text)
 
@@ -11931,6 +11962,10 @@ def _dash_monat():
 
     st.markdown("")
     st.markdown("**Umsatz pro Tag**")
+    if not darf_geld():
+        box("Das Diagramm zeigt Umsätze — mit verdeckten Zahlen bleibt es "
+            "leer. Schalter in der Seitenleiste umlegen.", "info")
+        return
     fig = go.Figure()
     fig.add_trace(go.Bar(x=df["tag"], y=df["Playtomic"], name="Playtomic",
                          marker_color=C["blue_soft"]))
@@ -11954,7 +11989,7 @@ def _dash_monat():
                     kpi("Wellpass-pflichtig", str(len(pflicht)))
                 with c2:
                     kpi("vergessen", str(len(verg)),
-                        f"entgangen: {euro(len(verg) * WELLPASS_WERT)}")
+                        f"entgangen: {geld(len(verg) * WELLPASS_WERT)}")
                 with c3:
                     kpi("Vergess-Quote", f"{quote:.1f} %",
                         "unter 10 % ist gut")
@@ -12317,7 +12352,7 @@ def _dash_abgleich():
         kpi("Nicht vergütet", str(fehlend),
             "Rabatt gegeben, kein Check-in")
     with c4:
-        kpi("Offen (roh)", euro(fehlend * wellpass_wert_am(f"{monat}-01")),
+        kpi("Offen (roh)", geld(fehlend * wellpass_wert_am(f"{monat}-01")),
             "vor Klärung — Bilanz unten")
 
     st.markdown("")
@@ -12326,7 +12361,7 @@ def _dash_abgleich():
             "Check-in vor.", "ok")
     else:
         box(f"⚠️ <b>{fehlend} Rabatte ohne Vergütung</b> — das sind "
-            f"{euro(fehlend * wellpass_wert_am(f'{monat}-01'))}, die dir für diesen Monat fehlen.",
+            f"{geld(fehlend * wellpass_wert_am(f'{monat}-01'))}, die dir für diesen Monat fehlen.",
             "warn")
 
     if doppelt:
@@ -12379,7 +12414,7 @@ def _dash_abgleich():
                 f"+{vermutet_gesamt} über Namensvariante" if vermutet_gesamt else None)
         with g3:
             kpi("Ungedeckt", str(int(ab["luecke_sicher"].sum())),
-                euro(float(ab["verlust"].sum())))
+                geld(float(ab["verlust"].sum())))
 
         if vermutet_gesamt:
             betroffen = int((ab["vermutete_checkins"] > 0).sum())
@@ -12401,7 +12436,7 @@ def _dash_abgleich():
             zeig["verlust"] = zeig["verlust"].map(euro)
             zeig.columns = ["Spieler", "Rabatte", "Check-ins",
                             "davon Namensvariante", "Lücke", "Entgangen"]
-            st.dataframe(zeig, use_container_width=True, hide_index=True,
+            st.dataframe(ohne_geld(zeig), use_container_width=True, hide_index=True,
                          height=300)
             st.download_button(
                 "⬇️ Als CSV",
@@ -12451,7 +12486,7 @@ def _dash_abgleich():
             zeig.columns = [{"analysis_date": "Datum", "Service_Zeit": "Zeit",
                              "Listenpreis": "Liste", "Bezahlt": "Gezahlt",
                              "Email": "E-Mail"}.get(x, x) for x in spalten]
-            st.dataframe(zeig.sort_values("Datum", ascending=False),
+            st.dataframe(ohne_geld(zeig.sort_values("Datum", ascending=False)),
                          use_container_width=True, hide_index=True, height=330)
             st.download_button(
                 "⬇️ Als CSV", data=zeig.to_csv(index=False, sep=";").encode("utf-8-sig"),
@@ -12472,7 +12507,7 @@ def _dash_abgleich():
                     "geklärt.", "info")
                 zeig2 = ohne[["analysis_date", "Name", "Checkin_Zeit"]].rename(
                     columns={"analysis_date": "Datum", "Checkin_Zeit": "Uhrzeit"})
-                st.dataframe(zeig2.sort_values("Datum", ascending=False),
+                st.dataframe(ohne_geld(zeig2.sort_values("Datum", ascending=False)),
                              use_container_width=True, hide_index=True, height=330)
 
 
@@ -12589,12 +12624,12 @@ def _dash_einnahmen():
 
     e1, e2, e3 = st.columns(3)
     with e1:
-        kpi("Playtomic", euro(playtomic), f"{k['buchungen']} Buchungen")
+        kpi("Playtomic", geld(playtomic), f"{k['buchungen']} Buchungen")
     with e2:
-        kpi("Wellpass", euro(wellpass),
+        kpi("Wellpass", geld(wellpass),
             f"{k['wellpass_anzahl']} vergütete Check-ins")
     with e3:
-        kpi("Gesamt", euro(gesamt), monat_lang(monat))
+        kpi("Gesamt", geld(gesamt), monat_lang(monat))
 
     # ── Wie sich die Wellpass-Zahl ergibt ───────────────────────────────
     roh, verguetet, doppelte = checkins_roh_und_verguetet(monat)
@@ -12629,12 +12664,12 @@ def _dash_einnahmen():
         ("Sonstiges", k["sonstige"]),
     ]
     tabelle = pd.DataFrame(
-        [{"Posten": name, "Betrag": euro(wert)}
+        [{"Posten": name, "Betrag": geld(wert)}
          for name, wert in posten if abs(wert) > 0.005])
     if tabelle.empty:
         box("Keine Umsätze in diesem Monat.", "info")
     else:
-        st.dataframe(tabelle, use_container_width=True, hide_index=True)
+        st.dataframe(ohne_geld(tabelle), use_container_width=True, hide_index=True)
 
     # ── Tag für Tag ─────────────────────────────────────────────────────
     st.markdown("---")
@@ -12660,16 +12695,16 @@ def _dash_einnahmen():
     zeig = df.copy()
     for spalte in ("Playtomic", "Wellpass", "Gesamt"):
         zeig[spalte] = zeig[spalte].map(euro)
-    st.dataframe(zeig, use_container_width=True, hide_index=True, height=340)
+    st.dataframe(ohne_geld(zeig), use_container_width=True, hide_index=True, height=340)
 
     summe = pd.DataFrame([{
         "Datum": "Summe",
-        "Playtomic": euro(df["Playtomic"].sum()),
-        "Wellpass": euro(df["Wellpass"].sum()),
+        "Playtomic": geld(df["Playtomic"].sum()),
+        "Wellpass": geld(df["Wellpass"].sum()),
         "Check-ins": int(df["Check-ins"].sum()),
-        "Gesamt": euro(df["Gesamt"].sum()),
+        "Gesamt": geld(df["Gesamt"].sum()),
     }])
-    st.dataframe(summe, use_container_width=True, hide_index=True)
+    st.dataframe(ohne_geld(summe), use_container_width=True, hide_index=True)
 
     st.download_button(
         "⬇️ Als CSV",
@@ -14659,7 +14694,7 @@ def _wa_tagesarbeit():
         kpi("Angeschrieben", str(angeschrieben),
             f"{len(offen) - angeschrieben} noch nicht")
     with k3:
-        kpi("Offener Wert", euro(len(offen) * wellpass_wert_am(datum)))
+        kpi("Offener Wert", geld(len(offen) * wellpass_wert_am(datum)))
 
     st.markdown("")
 
@@ -15924,7 +15959,7 @@ def modul_events():
 
         k1, k2, k3, k4 = st.columns(4)
         with k1:
-            kpi("Umsatz", euro(float(zeile["Umsatz"])))
+            kpi("Umsatz", geld(float(zeile["Umsatz"])))
         with k2:
             kpi("Wellpass", str(int(zeile["Wellpass"])),
                 prozent_text(int(zeile["Wellpass"]), int(zeile["Teilnehmer"])))
@@ -15947,7 +15982,7 @@ def modul_events():
             st.markdown("")
             st.markdown("---")
             st.markdown("##### Alle Events im Vergleich")
-            st.dataframe(events.drop(columns=["Event_Id", "Unklar"]),
+            st.dataframe(ohne_geld(events.drop(columns=["Event_Id", "Unklar"])),
                          use_container_width=True, hide_index=True)
 
 
@@ -16539,9 +16574,9 @@ def modul_nachmeldung():
     head("Wellpass-Nachmeldung", "Vergessene Check-ins bei EGYM nachreichen")
 
     box(f"Zwei Wege wenn jemand den Check-in vergisst:<br><br>"
-        f"<b>Weg A · Gebühr</b> — du berechnest {euro(ADMIN_GEBUEHR)} an den Spieler.<br>"
+        f"<b>Weg A · Gebühr</b> — du berechnest {geld(ADMIN_GEBUEHR)} an den Spieler.<br>"
         f"<b>Weg B · Nachmeldung</b> — du reichst bei EGYM nach. Der Spieler zahlt "
-        f"nichts, du bekommst trotzdem deine {euro(WELLPASS_WERT)}. "
+        f"nichts, du bekommst trotzdem deine {geld(WELLPASS_WERT)}. "
         f"Geht nur im laufenden Monat (+ 3 Kulanztage).<br><br>"
         f"Weg B ist fast immer besser.", "info")
 
@@ -16572,14 +16607,14 @@ def modul_nachmeldung():
     if not kandidaten:
         box("Keine nachmeldbaren Fälle. Entweder ist alles sauber, oder die "
             f"offenen Fälle liegen ausserhalb der EGYM-Frist — die laufen dann "
-            f"über die Gebühr ({euro(ADMIN_GEBUEHR)}).", "ok")
+            f"über die Gebühr ({geld(ADMIN_GEBUEHR)}).", "ok")
         return
 
     c1, c2 = st.columns(2)
     with c1:
         kpi("Nachmeldbar", str(len(kandidaten)), "innerhalb der EGYM-Frist")
     with c2:
-        kpi("Wert", euro(len(kandidaten) * WELLPASS_WERT) if darf_geld() else "—",
+        kpi("Wert", geld(len(kandidaten) * WELLPASS_WERT) if darf_geld() else "—",
             "wenn EGYM bestätigt")
 
     st.markdown("---")
@@ -16641,7 +16676,7 @@ def modul_nachmeldung():
     with c1:
         kpi("Bereit", str(len(eintraege)), "vollständige Einträge")
     with c2:
-        kpi("Wert", euro(len(eintraege) * WELLPASS_WERT) if darf_geld() else "—")
+        kpi("Wert", geld(len(eintraege) * WELLPASS_WERT) if darf_geld() else "—")
 
     st.markdown("")
     st.download_button("⬇️ CSV für den Nachmeldungs-Bot",
@@ -17128,7 +17163,7 @@ def modul_einstellungen():
         abzug_hist = wellpass_abzug_saetze()
         st.dataframe(pd.DataFrame([{
             "Gültig ab": datum_kurz(x["ab"]) if x["ab"] > "2001" else "Beginn",
-            "Abzug je Spieler": euro(x["abzug"]),
+            "Abzug je Spieler": geld(x["abzug"]),
         } for x in abzug_hist]), use_container_width=True, hide_index=True)
 
         box("Massgeblich ist der Tag der <b>Buchung</b>, nicht der Spieltag. "
@@ -17286,7 +17321,7 @@ def modul_einstellungen():
                         with c2:
                             kpi("Buchungen", str(int(s["buchungen"])))
                         with c3:
-                            kpi("Umsatz", euro(s["umsatz"]))
+                            kpi("Umsatz", geld(s["umsatz"]))
                         with c4:
                             kpi("Zuletzt", f"vor {int(s['tage_her'])} T.")
 
@@ -17298,7 +17333,7 @@ def modul_einstellungen():
                             z.columns = [{"analysis_date": "Datum",
                                           "Service_Zeit": "Zeit"}.get(c, c)
                                          for c in sp]
-                            st.dataframe(z.sort_values("Datum", ascending=False),
+                            st.dataframe(ohne_geld(z.sort_values("Datum", ascending=False)),
                                          use_container_width=True, hide_index=True)
 
     # ── System ──────────────────────────────────────────────────────────
@@ -17333,19 +17368,19 @@ def modul_einstellungen():
         c1, c2 = st.columns(2)
         with c1:
             st.caption("**Wellpass-Vergütung**")
-            st.markdown(f"{euro(CONFIG['wellpass_brutto'])} × "
+            st.markdown(f"{geld(CONFIG['wellpass_brutto'])} × "
                         f"{CONFIG['wellpass_anteil']*100:.0f} % = "
-                        f"**{euro(WELLPASS_WERT)}** pro Check-in")
+                        f"**{geld(WELLPASS_WERT)}** pro Check-in")
             st.caption("**Bearbeitungsgebühr**")
-            st.markdown(f"**{euro(ADMIN_GEBUEHR)}** bei vergessenem Check-in")
+            st.markdown(f"**{geld(ADMIN_GEBUEHR)}** bei vergessenem Check-in")
         with c2:
             st.caption("**Court-Preise (60 Min)**")
             st.markdown(f"""
-Double 6–12 Uhr · **{euro(CONFIG['preis_double_frueh'])}**
-Double 12–16 Uhr · **{euro(CONFIG['preis_double_mittag'])}**
-Double ab 16 / WE · **{euro(CONFIG['preis_double_prime'])}**
-Single bis 16 Uhr · **{euro(CONFIG['preis_single_tag'])}**
-Single ab 16 / WE · **{euro(CONFIG['preis_single_prime'])}**
+Double 6–12 Uhr · **{geld(CONFIG['preis_double_frueh'])}**
+Double 12–16 Uhr · **{geld(CONFIG['preis_double_mittag'])}**
+Double ab 16 / WE · **{geld(CONFIG['preis_double_prime'])}**
+Single bis 16 Uhr · **{geld(CONFIG['preis_single_tag'])}**
+Single ab 16 / WE · **{geld(CONFIG['preis_single_prime'])}**
 """)
 
         st.markdown("---")
@@ -17500,28 +17535,28 @@ def _plan_rechnung_zeigen(start: datetime, dauer, courts, teilnehmer,
     r = event_rechnung(start, dauer, courts, teilnehmer, preis, kosten)
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        kpi("Einnahmen", euro(r["einnahmen"]), f"{teilnehmer} × {euro(preis)}")
+        kpi("Einnahmen", geld(r["einnahmen"]), f"{teilnehmer} × {geld(preis)}")
     with c2:
-        kpi("Platzwert", euro(r["platzwert"]),
+        kpi("Platzwert", geld(r["platzwert"]),
             f"{courts} Courts · {int(dauer)} Min.")
     with c3:
-        kpi("Weitere Kosten", euro(r["kosten"]), "Trainer, Material")
+        kpi("Weitere Kosten", geld(r["kosten"]), "Trainer, Material")
     with c4:
-        kpi("Ergebnis", euro(r["ergebnis"]),
+        kpi("Ergebnis", geld(r["ergebnis"]),
             "mehr als normale Vermietung" if r["ergebnis"] >= 0
             else "weniger als normale Vermietung")
     if r["ergebnis"] >= 0:
-        box(f"✅ Das Event bringt <b>{euro(r['ergebnis'])}</b> mehr als die "
+        box(f"✅ Das Event bringt <b>{geld(r['ergebnis'])}</b> mehr als die "
             f"Courts normal zu vermieten. Kostendeckend wärst du ab "
-            f"<b>{euro(r['mindestpreis'])}</b> pro Person.", "ok")
+            f"<b>{geld(r['mindestpreis'])}</b> pro Person.", "ok")
     else:
-        box(f"⚠️ Das Event bringt <b>{euro(abs(r['ergebnis']))}</b> weniger "
+        box(f"⚠️ Das Event bringt <b>{geld(abs(r['ergebnis']))}</b> weniger "
             "als die normale Vermietung. Kostendeckend ab "
-            f"<b>{euro(r['mindestpreis'])}</b> pro Person — oder weniger "
+            f"<b>{geld(r['mindestpreis'])}</b> pro Person — oder weniger "
             "Courts belegen.", "warn")
     st.caption(f"{r['plaetze']} Plätze auf {courts} Courts · "
                + (f"{r['frei']} frei" if r["frei"] else "voll besetzt")
-               + f" · {euro(r['je_platz'])} je Court-Stunde")
+               + f" · {geld(r['je_platz'])} je Court-Stunde")
 
 
 def modul_plan():
@@ -17650,7 +17685,7 @@ def modul_plan():
                     f"{zeile.get('start', '')} · {rh} · "
                     f"{zeile.get('courts', '')} Courts · "
                     f"{zeile.get('teilnehmer', '')} Personen à "
-                    f"{euro(zeile.get('preis', 0))}")
+                    f"{geld(zeile.get('preis', 0))}")
                 st.caption(f"ab {datum_kurz(str(zeile.get('ab', '')))}"
                            + (f" bis {datum_kurz(str(zeile.get('bis', '')))}"
                               if str(zeile.get("bis", "")).strip() else ""))
@@ -17826,9 +17861,9 @@ def command_center():
         if darf_geld():
             c1, c2, c3, c4 = st.columns(4)
             with c2:
-                kpi("Umsatz Tag", euro(k["gesamt_effektiv"]), "inkl. Wellpass")
+                kpi("Umsatz Tag", geld(k["gesamt_effektiv"]), "inkl. Wellpass")
             with c3:
-                kpi("Monat bisher", euro(mk["gesamt_effektiv"]),
+                kpi("Monat bisher", geld(mk["gesamt_effektiv"]),
                     f"{MONATE_DE[int(monat_akt[5:7])-1]}")
         else:
             # Team-Modus: dieselbe Zeile ohne Geld.
@@ -17870,15 +17905,15 @@ def command_center():
                 fortschritts_ring(
                     erreicht, f"{erreicht:.0f}%",
                     f"Monatsziel {MONATE_DE[int(monat_akt[5:7])-1]}",
-                    (f"{euro(mk['gesamt_effektiv'])} von {euro(ziel)}<br>"
-                     + (f"noch {euro(rest)}" if rest > 0
+                    (f"{geld(mk['gesamt_effektiv'])} von {geld(ziel)}<br>"
+                     + (f"noch {geld(rest)}" if rest > 0
                         else "Ziel erreicht 🎉")))
         with c2:
             if serie >= 2:
                 streak_banner(serie)
             elif offen_gesamt:
                 box(f"⚠️ {offen_gesamt} Spieler ohne Check-in"
-                    + (f" — {euro(offen_gesamt * WELLPASS_WERT)} liegen auf "
+                    + (f" — {geld(offen_gesamt * WELLPASS_WERT)} liegen auf "
                        "der Strasse." if darf_geld() else "."), "warn")
 
         st.markdown("")
