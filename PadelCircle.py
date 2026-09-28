@@ -334,7 +334,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # Steht unten in der Seitenleiste. Damit lässt sich auf einen Blick
 # sehen, welche Fassung gerade läuft — bei „stimmt immer noch nicht"
 # ist das die erste Frage.
-APP_STAND       = "Fassung 68 · 28.09.2026"
+APP_STAND       = "Fassung 69 · 28.09.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -17429,6 +17429,7 @@ Single ab 16 / WE · **{geld(CONFIG['preis_single_prime'])}**
 
 RHYTHMEN = {"woechentlich": ("Jede Woche", 7),
             "zweiwoechentlich": ("Alle zwei Wochen", 14),
+            "dreiwoechentlich": ("Alle drei Wochen", 21),
             "vierwoechentlich": ("Alle vier Wochen", 28),
             "einmalig": ("Einmalig", 0)}
 
