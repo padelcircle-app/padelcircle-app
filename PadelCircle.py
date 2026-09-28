@@ -334,7 +334,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # Steht unten in der Seitenleiste. Damit lässt sich auf einen Blick
 # sehen, welche Fassung gerade läuft — bei „stimmt immer noch nicht"
 # ist das die erste Frage.
-APP_STAND       = "Fassung 70 · 28.09.2026"
+APP_STAND       = "Fassung 71 · 28.09.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -17593,17 +17593,19 @@ def _plan_rechnung_zeigen(start: datetime, dauer, courts, teilnehmer,
                + f" · {geld(r['je_platz'])} je Court-Stunde")
 
     # Was das Event je Kopf kostet — die Frage, die beim Preissetzen zählt.
-    j1, j2, j3 = st.columns(3)
+    j1, j2, j3, j4 = st.columns(4)
     with j1:
-        kpi("Platz je Person", geld(r["platz_je_person"]),
-            f"{courts} Courts ÷ {teilnehmer}")
+        kpi("Kostet dich je Person", geld(r["platz_je_person"]
+                                          + r["kosten_je_person"]),
+            f"{geld(r['platz_je_person'])} Platz + "
+            f"{geld(r['kosten_je_person'])} Material")
     with j2:
-        kpi("Material je Person", geld(r["kosten_je_person"]),
-            "Bälle, Getränke, Trainer")
+        kpi("Zahlt der Teilnehmer", geld(preis), "dein Teilnahmepreis")
     with j3:
-        kpi("Deckt der Preis?", geld(r["ueberschuss_je_person"]),
-            "Überschuss je Person" if r["ueberschuss_je_person"] >= 0
-            else "fehlt je Person")
+        kpi("Bleibt je Person", geld(r["ueberschuss_je_person"]),
+            "Überschuss" if r["ueberschuss_je_person"] >= 0 else "Verlust")
+    with j4:
+        kpi("Kostendeckend ab", geld(r["mindestpreis"]), "je Person")
 
 
 def _plan_kalender(woche: dict, montag: date) -> str:
@@ -17738,8 +17740,10 @@ def modul_plan():
 
     f1, f2 = st.columns(2)
     with f1:
-        preis = st.number_input("Preis je Person (€)", 0.0, 200.0, 27.0, 1.0,
-                                key="plan_preis")
+        preis = st.number_input("Teilnahmepreis je Person (€)", 0.0, 200.0,
+                                27.0, 1.0, key="plan_preis",
+                                help="Was der Teilnehmer zahlt. Was es dich "
+                                     "kostet, rechnet die App darunter aus.")
     with f2:
         rhythmus = st.selectbox("Rhythmus", list(RHYTHMEN),
                                 format_func=lambda k: RHYTHMEN[k][0],
