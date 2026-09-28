@@ -334,7 +334,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # Steht unten in der Seitenleiste. Damit lässt sich auf einen Blick
 # sehen, welche Fassung gerade läuft — bei „stimmt immer noch nicht"
 # ist das die erste Frage.
-APP_STAND       = "Fassung 64 · 28.09.2026"
+APP_STAND       = "Fassung 65 · 28.09.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -1440,8 +1440,17 @@ def darf_geld() -> bool:
 
 
 def sichtbare_module() -> list:
+    """
+    Welche Module sind gerade erreichbar?
+
+    Sind die Zahlen verdeckt, verschwinden die Geld-Module ganz — Dashboard,
+    Analysen, Events, Spieler & Community, Circle Points, Einstellungen.
+    Einzelne Beträge auszublenden reicht nicht: Im Dashboard steckt Geld in
+    Kacheln, Tabellen und Diagrammen, und eine davon wird immer vergessen.
+    Übrig bleibt die Wellpass-Arbeit, die ohne Umsatzzahlen auskommt.
+    """
     return [m for m in MODULE
-            if not ist_team() or m["id"] in TEAM_MODULE]
+            if darf_geld() or m["id"] in TEAM_MODULE]
 
 def token_speichern(token: str, wer: str = "chef") -> bool:
     try:
