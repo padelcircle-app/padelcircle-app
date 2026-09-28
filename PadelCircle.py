@@ -334,7 +334,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # Steht unten in der Seitenleiste. Damit lässt sich auf einen Blick
 # sehen, welche Fassung gerade läuft — bei „stimmt immer noch nicht"
 # ist das die erste Frage.
-APP_STAND       = "Fassung 69 · 28.09.2026"
+APP_STAND       = "Fassung 70 · 28.09.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -679,8 +679,8 @@ SHEET_SPALTEN = {
     "auffaellige":      ["name_norm", "name", "art", "notiz", "timestamp"],
     "geschenke":        ["checkin_key", "datum", "name", "grund", "timestamp"],
     "event_plan":       ["id", "name", "wochentag", "start", "dauer", "courts",
-                         "teilnehmer", "preis", "kosten", "rhythmus", "ab",
-                         "bis", "notiz", "timestamp"],
+                         "teilnehmer", "preis", "kosten", "posten",
+                         "rhythmus", "ab", "bis", "notiz", "timestamp"],
     "buchungs_luecken": ["key", "datum", "zeit", "court", "anzahl", "anteil",
                          "kandidaten", "erledigt", "antwort", "timestamp"],
     "wetter":           ["datum", "code", "lage", "t_max", "t_min",
@@ -17457,6 +17457,32 @@ def eventplan_loeschen(kennung: str) -> bool:
     return ok
 
 
+def _plan_posten_lesen(df) -> list:
+    """
+    Die eingetippte Kostenliste in saubere Zahlen verwandeln.
+    → [{posten, menge, preis, summe}, …]
+
+    Leere Zeilen und Zeilen ohne Betrag fliegen raus — im Eingabefeld
+    steht immer eine leere Zeile zum Weiterschreiben.
+    """
+    out = []
+    if df is None or getattr(df, "empty", True):
+        return out
+    for _, z in df.iterrows():
+        name = str(z.get("Posten", "") or "").strip()
+        try:
+            menge = float(z.get("Menge", 0) or 0)
+            preis = float(z.get("Preis je Stück", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        summe = round(menge * preis, 2)
+        if not name and summe <= 0:
+            continue
+        out.append({"posten": name or "ohne Namen", "menge": menge,
+                    "preis": preis, "summe": summe})
+    return out
+
+
 def event_rechnung(start: datetime, dauer: float, courts: int,
                    teilnehmer: int, preis: float, kosten: float = 0.0) -> dict:
     """
@@ -17481,6 +17507,13 @@ def event_rechnung(start: datetime, dauer: float, courts: int,
         "platzwert": platzwert,
         "kosten": kosten,
         "ergebnis": ergebnis,
+        # Was das Event je Kopf kostet — Platz und Material getrennt,
+        # damit man sieht, woran es liegt, wenn der Preis nicht reicht.
+        "platz_je_person": round(platzwert / teilnehmer, 2) if teilnehmer else 0.0,
+        "kosten_je_person": round(kosten / teilnehmer, 2) if teilnehmer else 0.0,
+        "aufwand": round(platzwert + kosten, 2),
+        "ueberschuss_je_person": round(
+            (einnahmen - platzwert - kosten) / teilnehmer, 2) if teilnehmer else 0.0,
         # Was hereinkommt, gemessen an der belegten Court-Stunde.
         "je_platz": round(einnahmen / (courts * dauer / 60), 2)
                     if courts and dauer else 0.0,
@@ -17558,6 +17591,19 @@ def _plan_rechnung_zeigen(start: datetime, dauer, courts, teilnehmer,
     st.caption(f"{r['plaetze']} Plätze auf {courts} Courts · "
                + (f"{r['frei']} frei" if r["frei"] else "voll besetzt")
                + f" · {geld(r['je_platz'])} je Court-Stunde")
+
+    # Was das Event je Kopf kostet — die Frage, die beim Preissetzen zählt.
+    j1, j2, j3 = st.columns(3)
+    with j1:
+        kpi("Platz je Person", geld(r["platz_je_person"]),
+            f"{courts} Courts ÷ {teilnehmer}")
+    with j2:
+        kpi("Material je Person", geld(r["kosten_je_person"]),
+            "Bälle, Getränke, Trainer")
+    with j3:
+        kpi("Deckt der Preis?", geld(r["ueberschuss_je_person"]),
+            "Überschuss je Person" if r["ueberschuss_je_person"] >= 0
+            else "fehlt je Person")
 
 
 def _plan_kalender(woche: dict, montag: date) -> str:
@@ -17690,19 +17736,37 @@ def modul_plan():
         teilnehmer = st.number_input("Teilnehmer", 1, 80, 8, 1,
                                      key="plan_tn")
 
-    f1, f2, f3 = st.columns(3)
+    f1, f2 = st.columns(2)
     with f1:
         preis = st.number_input("Preis je Person (€)", 0.0, 200.0, 27.0, 1.0,
                                 key="plan_preis")
     with f2:
-        kosten = st.number_input("Weitere Kosten (€)", 0.0, 2000.0, 0.0, 10.0,
-                                 key="plan_kosten",
-                                 help="Trainer, Bälle, Preise — alles, was "
-                                      "zusätzlich anfällt.")
-    with f3:
         rhythmus = st.selectbox("Rhythmus", list(RHYTHMEN),
                                 format_func=lambda k: RHYTHMEN[k][0],
                                 key="plan_rhythmus")
+
+    st.markdown("**Kosten des Events**")
+    st.caption("Alles, was zusätzlich anfällt — Bälle, Getränke, Trainer, "
+               "Preise. Der Platzwert kommt automatisch dazu.")
+    posten_df = st.data_editor(
+        pd.DataFrame(st.session_state.get("plan_posten_start",
+                                          [{"Posten": "Bälle", "Menge": 5.0,
+                                            "Preis je Stück": 7.0}])),
+        num_rows="dynamic", use_container_width=True, hide_index=True,
+        key="plan_posten",
+        column_config={
+            "Posten": st.column_config.TextColumn("Posten", width="medium"),
+            "Menge": st.column_config.NumberColumn("Menge", min_value=0.0,
+                                                   step=1.0, format="%.0f"),
+            "Preis je Stück": st.column_config.NumberColumn(
+                "Preis je Stück (€)", min_value=0.0, step=0.5, format="%.2f")})
+    posten = _plan_posten_lesen(posten_df)
+    kosten = round(sum(p["summe"] for p in posten), 2)
+    if posten:
+        st.caption(" · ".join(
+            f"{p['posten']}: {p['menge']:.0f} × {euro(p['preis'])} = "
+            f"{euro(p['summe'])}" for p in posten)
+            + f"  →  zusammen {euro(kosten)}")
 
     g1, g2 = st.columns(2)
     with g1:
@@ -17732,6 +17796,7 @@ def modul_plan():
                 "start": startzeit.strftime("%H:%M"), "dauer": int(dauer),
                 "courts": int(courts), "teilnehmer": int(teilnehmer),
                 "preis": float(preis), "kosten": float(kosten),
+                "posten": json.dumps(posten, ensure_ascii=False),
                 "rhythmus": rhythmus, "ab": str(ab),
                 "bis": str(bis) if bis_an else "", "notiz": ""}):
             st.success(f"✅ „{name}“ angelegt.")
@@ -17756,7 +17821,17 @@ def modul_plan():
                     f"{geld(zeile.get('preis', 0))}")
                 st.caption(f"ab {datum_kurz(str(zeile.get('ab', '')))}"
                            + (f" bis {datum_kurz(str(zeile.get('bis', '')))}"
-                              if str(zeile.get("bis", "")).strip() else ""))
+                              if str(zeile.get("bis", "")).strip() else "")
+                           + (f" · Kosten {geld(zeile.get('kosten', 0))}"
+                              if parse_betrag(zeile.get("kosten", 0)) else ""))
+                try:
+                    liste = json.loads(str(zeile.get("posten", "") or "[]"))
+                except json.JSONDecodeError:
+                    liste = []
+                if liste:
+                    st.caption("   " + " · ".join(
+                        f"{p.get('posten', '')} {p.get('menge', 0):.0f} × "
+                        f"{geld(p.get('preis', 0))}" for p in liste))
             with s2:
                 if st.button("🗑", key=f"plan_weg_{zeile.get('id', '')}",
                              use_container_width=True):
