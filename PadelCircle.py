@@ -334,7 +334,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # Steht unten in der Seitenleiste. Damit lässt sich auf einen Blick
 # sehen, welche Fassung gerade läuft — bei „stimmt immer noch nicht"
 # ist das die erste Frage.
-APP_STAND       = "Fassung 72 · 28.09.2026"
+APP_STAND       = "Fassung 73 · 29.09.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -13812,6 +13812,31 @@ def _wa_auto_block(tage: list):
 
 
 @st.cache_data(ttl=600, show_spinner=False)
+def checkin_zuordnung_status(datum: str, name_norm: str) -> str:
+    """
+    Steht zu diesem Check-in eine Zuordnung im Blatt — und gilt sie noch?
+
+    Ohne diese Zeile ist nicht zu sehen, warum ein Check-in wieder in der
+    Liste auftaucht, obwohl man ihn schon einmal zugeordnet hat. Eine
+    Zuordnung kann nachträglich hinfällig werden, etwa wenn die Person an
+    ihrem eigenen Check-in-Tag doch einen Rabatt bekommen hat.
+    """
+    ck = checkin_schluessel(str(datum), str(name_norm))
+    zuo = loadsheet("checkin_zuordnung", SHEET_SPALTEN["checkin_zuordnung"])
+    if zuo.empty or "checkin_key" not in zuo.columns:
+        return "keine Zuordnung hinterlegt"
+    treffer = zuo[zuo["checkin_key"].astype(str) == ck]
+    if treffer.empty:
+        return "keine Zuordnung hinterlegt"
+    zeile = treffer.iloc[0]
+    fall = str(zeile.get("fall_datum", "") or
+               str(zeile.get("fall_key", "")).split("|")[0])
+    if ck in verbrauchte_checkins():
+        return f"zugeordnet zum Fall vom {datum_kurz(fall)}"
+    return (f"war dem Fall vom {datum_kurz(fall)} zugeordnet — gilt nicht "
+            "mehr, weil dieser Check-in an seinem eigenen Tag gebraucht wird")
+
+
 def checkin_erklaerung(name_norm: str, datum: str) -> dict:
     """
     Warum steht dieser Check-in in der Liste?
@@ -14222,6 +14247,9 @@ def _wa_seitenspalte(datum: str, offen_heute: pd.DataFrame):
             f'<div class="mt">{datum_kurz(ci_datum)}'
             + (f' · {ci_zeit}' if ci_zeit else '')
             + f' · {hinweis}</div></div>', unsafe_allow_html=True)
+        # Warum steht der hier? Ohne diese Zeile sieht es aus, als hätte
+        # eine frühere Zuordnung nichts bewirkt.
+        st.caption(checkin_zuordnung_status(ci_datum, ci_norm))
 
         # Hat die Person an ihrem Check-in-Tag selbst mit Wellpass
         # gespielt, und dieser Platz ist noch offen? Dann gehört der
@@ -17756,9 +17784,10 @@ def modul_plan():
     f1, f2 = st.columns(2)
     with f1:
         preis = st.number_input("Teilnahmepreis je Person (€)", 0.0, 200.0,
-                                27.0, 1.0, key="plan_preis",
-                                help="Was der Teilnehmer zahlt. Was es dich "
-                                     "kostet, rechnet die App darunter aus.")
+                                27.0, 0.50, key="plan_preis", format="%.2f",
+                                help="Was der Teilnehmer zahlt — Cent gehen "
+                                     "auch, z. B. 12.50. Beim Tippen einen "
+                                     "Punkt statt Komma verwenden.")
     with f2:
         rhythmus = st.selectbox("Rhythmus", list(RHYTHMEN),
                                 format_func=lambda k: RHYTHMEN[k][0],
@@ -17775,15 +17804,17 @@ def modul_plan():
         key="plan_posten",
         column_config={
             "Posten": st.column_config.TextColumn("Posten", width="medium"),
+            # Auch Teilmengen: ein halber Kasten Wasser, 1,5 Stunden Trainer.
             "Menge": st.column_config.NumberColumn("Menge", min_value=0.0,
-                                                   step=1.0, format="%.0f"),
+                                                   step=1.0, format="%.2f"),
             "Preis je Stück": st.column_config.NumberColumn(
-                "Preis je Stück (€)", min_value=0.0, step=0.5, format="%.2f")})
+                "Preis je Stück (€)", min_value=0.0, step=0.05,
+                format="%.2f")})
     posten = _plan_posten_lesen(posten_df)
     kosten = round(sum(p["summe"] for p in posten), 2)
     if posten:
         st.caption(" · ".join(
-            f"{p['posten']}: {p['menge']:.0f} × {euro(p['preis'])} = "
+            f"{p['posten']}: {p['menge']:g} × {euro(p['preis'])} = "
             f"{euro(p['summe'])}" for p in posten)
             + f"  →  zusammen {euro(kosten)}")
 
@@ -17867,7 +17898,7 @@ def modul_plan():
                     liste = []
                 if liste:
                     st.caption("   " + " · ".join(
-                        f"{p.get('posten', '')} {p.get('menge', 0):.0f} × "
+                        f"{p.get('posten', '')} {p.get('menge', 0):g} × "
                         f"{geld(p.get('preis', 0))}" for p in liste))
             with s2:
                 if st.button("🗑", key=f"plan_weg_{zeile.get('id', '')}",
