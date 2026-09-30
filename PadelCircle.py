@@ -334,7 +334,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # Steht unten in der Seitenleiste. Damit lässt sich auf einen Blick
 # sehen, welche Fassung gerade läuft — bei „stimmt immer noch nicht"
 # ist das die erste Frage.
-APP_STAND       = "Fassung 74 · 30.09.2026"
+APP_STAND       = "Fassung 75 · 30.09.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -10887,7 +10887,8 @@ STATUS_DATEI = "status.json"
 AUSTAUSCH_ARTEN = {"zahlungen": "Zahlungen · bezahlt",
                    "offen":     "Zahlungen · offene Posten",
                    "checkins":  "Wellpass Check-ins",
-                   "buchungen": "Buchungen"}
+                   "buchungen": "Buchungen",
+                   "kunden":    "Spielerliste"}
 
 
 @st.cache_resource(show_spinner=False)
@@ -10971,6 +10972,11 @@ def austausch_art(name: str, kopf: bytes) -> str:
     text = kopf.decode("utf-8", "replace")
     if "booking_id" in text and "tenant_id" in text:
         return "buchungen"
+    # Die Spielerliste bringt die Playtomic-Konto-Nummern mit. Ohne sie
+    # findet die App zu einem Fall keine Telefonnummer.
+    erste = text.splitlines()[0].lower() if text.strip() else ""
+    if erste.startswith("id,") and "phone_number" in erste:
+        return "kunden"
     if "Mitglied;" in text or "Vor- & Nachname" in text:
         return "checkins"
     if "Corporate Name;" in text:
@@ -11378,6 +11384,30 @@ leer. Lieber eine Lücke als eine geratene Zahl.
             "info")
 
         k_datei = st.file_uploader("Kundenliste (.csv)", type=["csv"], key="up_k")
+
+        # Der bequeme Weg: Das Hol-Programm legt die Spielerliste mit den
+        # Konto-Nummern in den Austausch-Ordner. Ohne die Nummern findet
+        # die App zu einem Fall keine Telefonnummer.
+        if k_datei is None:
+            if st.button("📥 Spielerliste aus dem Ordner holen",
+                         use_container_width=True, key="btn_kunden_ordner"):
+                with st.spinner("Austausch-Ordner wird gelesen …"):
+                    gefunden_k = austausch_holen()
+                if gefunden_k.get("_fehler"):
+                    box(f"Ordner nicht lesbar: {gefunden_k['_fehler']}", "err")
+                elif gefunden_k.get("kunden"):
+                    st.session_state["kunden_ordner"] = gefunden_k["kunden"]
+                    st.rerun()
+                else:
+                    box("Im Ordner liegt keine Spielerliste. Hol die Daten "
+                        "einmal über „Daten holen“ — sie kommt dann mit.",
+                        "warn")
+            aus_ordner = st.session_state.get("kunden_ordner")
+            if aus_ordner:
+                st.caption(f"✓ {aus_ordner['name']} · "
+                           f"{len(aus_ordner['inhalt']) // 1024} KB aus dem "
+                           "Austausch-Ordner")
+                k_datei = io.BytesIO(aus_ordner["inhalt"])
 
         if k_datei and st.button("📤 Speichern", type="primary",
                                  use_container_width=True):
