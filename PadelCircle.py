@@ -334,7 +334,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # Steht unten in der Seitenleiste. Damit lässt sich auf einen Blick
 # sehen, welche Fassung gerade läuft — bei „stimmt immer noch nicht"
 # ist das die erste Frage.
-APP_STAND       = "Fassung 73 · 29.09.2026"
+APP_STAND       = "Fassung 74 · 30.09.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -13290,30 +13290,38 @@ def kontakt_fuer(name: str, user_id: str = "") -> dict:
     Die Kontaktdaten zu einem Fall.
     → {"phone", "email", "unsicher", "grund"}
 
-    Zuerst über das Playtomic-Konto der Zahlung — das ist eindeutig.
-    Erst wenn keins bekannt ist, zählt der Name, und auch nur, solange
-    ihn nicht mehrere Konten tragen. Lieber keine Nummer als die
-    falsche: Eine falsche Nummer schreibt einen Fremden an.
+    Steht an der Zahlung ein Playtomic-Konto, entscheidet AUSSCHLIESSLICH
+    dieses Konto. Findet die Kundenliste es nicht, gibt es keine Nummer —
+    kein Rückfall auf den Namen.
+
+    Genau dieser Rückfall hat am 29.09. wieder einen Fremden erwischt:
+    Daniel (Konto 16100214) fehlte in der Kundenliste, ein anderes Konto
+    heisst ebenfalls „Daniel", und dessen Nummer stand am Fall. Ein Name
+    ist kein Ausweis; das Konto ist einer. Lieber keine Nachricht als
+    eine an den Falschen.
+
+    Ohne Konto-Nummer bleibt nur der Name — und auch der nur, solange
+    ihn in der Kundenliste nicht mehrere Konten tragen.
     """
     idx = kontakt_index()
     konto = str(user_id or "").strip()
-    if konto and konto in idx["konto"]:
-        eintrag = idx["konto"][konto]
-        return {"phone": eintrag["phone"], "email": eintrag["email"],
-                "unsicher": False, "grund": ""}
+    if konto:
+        eintrag = idx["konto"].get(konto)
+        if eintrag:
+            return {"phone": eintrag["phone"], "email": eintrag["email"],
+                    "unsicher": False, "grund": ""}
+        return {"phone": "", "email": "", "unsicher": True,
+                "grund": (f"Das Playtomic-Konto {konto} steht nicht in der "
+                          "Kundenliste. Wer dahinter steckt, weiss nur "
+                          "Playtomic — hol die Kundenliste neu, dann ist "
+                          "die Nummer da.")}
     norm = normalize_name(name)
     if norm in idx["mehrdeutig"]:
         return {"phone": "", "email": "", "unsicher": True,
-                "grund": (f"Mehrere Playtomic-Konten heissen „{name}“ — "
-                          "welches gemeint ist, steht in der Buchung. "
-                          "Ohne Konto-Nummer verschicke ich nichts.")}
+                "grund": (f"Mehrere Playtomic-Konten heissen „{name}“, und "
+                          "an dieser Zahlung hängt keine Konto-Nummer. "
+                          "Ohne sie verschicke ich nichts.")}
     eintrag = idx["name"].get(norm, {})
-    if konto and eintrag:
-        # Konto bekannt, aber nicht in der Kundenliste: Die Liste ist
-        # womöglich älter als die Buchung.
-        return {"phone": eintrag.get("phone", ""),
-                "email": eintrag.get("email", ""), "unsicher": False,
-                "grund": ""}
     return {"phone": eintrag.get("phone", ""),
             "email": eintrag.get("email", ""), "unsicher": False, "grund": ""}
 
