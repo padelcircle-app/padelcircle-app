@@ -334,7 +334,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # Steht unten in der Seitenleiste. Damit lässt sich auf einen Blick
 # sehen, welche Fassung gerade läuft — bei „stimmt immer noch nicht"
 # ist das die erste Frage.
-APP_STAND       = "Fassung 75 · 30.09.2026"
+APP_STAND       = "Fassung 76 · 30.09.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -6163,9 +6163,29 @@ def plotly_layout(fig, hoehe=340, titel_y="€"):
 #   📦  MODUL · DATEN-ZENTRALE
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _kunden_konto(eintrag) -> str:
+    """Die Playtomic-Konto-ID einer Kundenzeile — leer heisst: unbekannt."""
+    konto = str(eintrag.get("id", "") or "").strip()
+    return "" if konto.lower() in ("", "nan", "none", "nat", "-", "0") else konto
+
+
+def _kunden_schluessel(eintrag) -> str:
+    """
+    Wer ist das? Der Name UND das Playtomic-Konto.
+
+    Drei Konten heissen schlicht „Daniel". Solange die Kundenliste nur
+    nach dem Namen sortiert war, überlebte von den dreien genau einer —
+    und am offenen Fall stand die Telefonnummer des Falschen. Deshalb
+    gehört die Konto-Nummer in den Schlüssel: gleicher Name, anderes
+    Konto, eigene Zeile.
+    """
+    return (str(eintrag.get("name_norm", "") or "").strip() + "|"
+            + _kunden_konto(eintrag))
+
+
 def _kunden_index(df: pd.DataFrame) -> dict:
     """
-    Kundentabelle in ein Wörterbuch nach name_norm verwandeln.
+    Kundentabelle in ein Wörterbuch nach Name und Konto verwandeln.
 
     Doppelte Einträge werden zusammengeführt statt einen Fehler
     auszulösen — bei mehreren Zeilen zur selben Person gewinnt
@@ -6175,19 +6195,58 @@ def _kunden_index(df: pd.DataFrame) -> dict:
         return {}
     out = {}
     for _, zeile in df.iterrows():
-        schluessel = str(zeile.get("name_norm", "") or "").strip()
-        if not schluessel or schluessel.lower() in ("nan", "none"):
+        norm = str(zeile.get("name_norm", "") or "").strip()
+        if not norm or norm.lower() in ("nan", "none"):
             continue
-        eintrag = out.setdefault(schluessel, {})
+        eintrag = out.setdefault(_kunden_schluessel(zeile), {"name_norm": norm})
         for spalte in df.columns:
-            if spalte == "name_norm":
-                continue
             wert = str(zeile.get(spalte, "") or "").strip()
             if wert and wert.lower() not in ("nan", "none", "nat", "<na>"):
                 eintrag[spalte] = wert
             elif spalte not in eintrag:
                 eintrag[spalte] = ""
     return out
+
+
+def _kunden_merken(zusammen: dict, neu: dict, nur_luecken: bool = False) -> bool:
+    """
+    Eine Kundenzeile einsortieren.
+
+    Kommt eine Konto-Nummer zu einem Namen dazu, der bisher ohne Konto
+    in der Liste stand, wird die alte Zeile aufgewertet statt eine
+    zweite anzulegen. `nur_luecken` füllt nur, was leer ist — dafür,
+    dass gelernte Nebenbei-Daten keine gepflegte Nummer überschreiben.
+    → True, wenn sich etwas geändert hat
+    """
+    norm = str(neu.get("name_norm", "") or "").strip()
+    konto = _kunden_konto(neu)
+    schluessel = norm + "|" + konto
+    ohne_konto = norm + "|"
+    if konto and schluessel not in zusammen and ohne_konto in zusammen:
+        zusammen[schluessel] = zusammen.pop(ohne_konto)
+    eintrag = zusammen.setdefault(schluessel, {"name_norm": norm})
+    eintrag["name_norm"] = norm
+    geaendert = False
+    for feld, roh in neu.items():
+        if feld == "name_norm":
+            continue
+        wert = str(roh or "").strip()
+        if not wert or wert.lower() in ("nan", "none", "nat", "<na>"):
+            eintrag.setdefault(feld, "")
+            continue
+        if nur_luecken and str(eintrag.get(feld, "") or "").strip():
+            continue
+        if str(eintrag.get(feld, "") or "") != wert:
+            eintrag[feld] = wert
+            geaendert = True
+    return geaendert
+
+
+def _kunden_tabelle(zusammen: dict) -> pd.DataFrame:
+    """Aus dem Wörterbuch wieder eine Tabelle fürs Blatt machen."""
+    spalten = ["name_norm"] + sorted({s for v in zusammen.values()
+                                      for s in v if s != "name_norm"})
+    return pd.DataFrame(list(zusammen.values()), columns=spalten).fillna("")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -7519,17 +7578,10 @@ def _analysieren(bdf, cdf, pdf=None, zahlungen_index=None) -> bool:
             # Bestehende Telefonnummern nicht überschreiben
             zusammen = _kunden_index(alt)
             for _, r in kdf.iterrows():
-                nn = r["name_norm"]
-                if nn in zusammen:
-                    if not str(zusammen[nn].get("email", "")).strip():
-                        zusammen[nn]["email"] = r["email"]
-                        neu_k += 1
-                else:
-                    zusammen[nn] = {"name": r["name"], "email": r["email"],
-                                    "phone_number": ""}
-                    neu_k += 1
-            neu_df = pd.DataFrame([{"name_norm": k, **v} for k, v in zusammen.items()])
-            savesheet(neu_df, "customers")
+                neu_k += int(_kunden_merken(zusammen, {
+                    "name_norm": r["name_norm"], "name": r["name"],
+                    "email": r["email"]}, nur_luecken=True))
+            savesheet(_kunden_tabelle(zusammen), "customers")
         else:
             savesheet(kdf, "customers")
             neu_k = len(kdf)
@@ -10546,24 +10598,12 @@ def kunden_ergaenzen(gelernt: list) -> int:
             nn = normalize_name(name)
             if not nn:
                 continue
-            eintrag = zusammen.setdefault(nn, {"name": name, "email": "",
-                                              "phone_number": "", "id": ""})
-            neu = False
-            if not str(eintrag.get("name", "")).strip():
-                eintrag["name"] = name
-            if "@" not in str(eintrag.get("email", "")) and e["email"]:
-                eintrag["email"] = e["email"]
-                neu = True
-            if not str(eintrag.get("id", "")).strip() and e["id"]:
-                eintrag["id"] = e["id"]
-                neu = True
-            geaendert += int(neu)
+            geaendert += int(_kunden_merken(zusammen, {
+                "name_norm": nn, "name": name, "email": e["email"],
+                "id": e["id"], "phone_number": ""}, nur_luecken=True))
     if not geaendert:
         return 0
-    spalten = ["name_norm"] + sorted({s for v in zusammen.values() for s in v})
-    neu_df = pd.DataFrame([{"name_norm": k, **v} for k, v in zusammen.items()],
-                          columns=spalten).fillna("")
-    if savesheet(neu_df, "customers"):
+    if savesheet(_kunden_tabelle(zusammen), "customers"):
         cache_leeren()
         return geaendert
     return 0
@@ -11432,20 +11472,15 @@ leer. Lieber eine Lücke als eine geratene Zahl.
                 if not alt_df.empty and "name_norm" in alt_df.columns:
                     zusammen = _kunden_index(alt_df)
                     for _, r in df.iterrows():
-                        nn = r["name_norm"]
-                        eintrag = zusammen.get(nn, {})
                         # „id" ist die Playtomic-Konto-ID — die Brücke
-                        # zwischen Zahlung und Buchung, siehe kunden_nach_id().
-                        for feld in ("name", "email", "phone_number",
-                                     "geburtstag", "id"):
-                            wert = str(r.get(feld, "") or "").strip()
-                            if wert and wert.lower() not in ("nan", "none"):
-                                eintrag[feld] = wert
-                            elif feld not in eintrag:
-                                eintrag[feld] = ""
-                        zusammen[nn] = eintrag
-                    df = pd.DataFrame([{"name_norm": k, **v}
-                                       for k, v in zusammen.items()])
+                        # zwischen Zahlung und Buchung, siehe kunden_nach_id(),
+                        # und zugleich die Unterscheidung zwischen drei
+                        # Menschen, die alle „Daniel" heissen.
+                        _kunden_merken(zusammen, {
+                            feld: r.get(feld, "")
+                            for feld in ("name_norm", "name", "email",
+                                         "phone_number", "geburtstag", "id")})
+                    df = _kunden_tabelle(zusammen)
 
                 if savesheet(df, "customers"):
                     cache_leeren()
@@ -16702,7 +16737,14 @@ def modul_nachmeldung():
 
         if hat_kunden:
             tr = kunden[kunden["_n"] == k["name_norm"]]
-            if not tr.empty:
+            # Mehrere Konten mit demselben Namen: dann steht hier nichts
+            # vor. Eine falsche Adresse in der EGYM-Nachmeldung ist
+            # schlimmer als ein leeres Feld.
+            mails = {str(m).strip().lower() for m in tr.get("email", [])
+                     if "@" in str(m)} if not tr.empty else set()
+            if len(mails) > 1:
+                pass                       # mehrdeutig → nichts vorfüllen
+            elif not tr.empty:
                 m = str(tr.iloc[0].get("email", ""))
                 mail_vor = m if "@" in m else ""
                 gb_vor = parse_date_safe(tr.iloc[0].get("geburtstag"))
