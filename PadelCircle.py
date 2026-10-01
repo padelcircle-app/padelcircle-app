@@ -334,7 +334,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # Steht unten in der Seitenleiste. Damit lässt sich auf einen Blick
 # sehen, welche Fassung gerade läuft — bei „stimmt immer noch nicht"
 # ist das die erste Frage.
-APP_STAND       = "Fassung 78 · 01.10.2026"
+APP_STAND       = "Fassung 79 · 01.10.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -2183,6 +2183,60 @@ def parse_kunden(datei) -> pd.DataFrame:
 # ══════════════════════════════════════════════════════════════════════════════
 #   🔍  NAME-MATCHING
 # ══════════════════════════════════════════════════════════════════════════════
+
+def kundenliste_uebernehmen(datei) -> dict:
+    """
+    Eine Spielerliste in die Kundentabelle übernehmen.
+
+    Ergänzt, was da ist, statt zu überschreiben: Je Playtomic-Konto eine
+    Zeile, und eine alte Zeile ohne Konto wird aufgewertet statt
+    verdoppelt (siehe _kunden_merken).
+
+    → {"fehler", "warnung", "spalten", "kunden", "mit_telefon", "neu"}
+    """
+    leer = {"fehler": "", "warnung": "", "spalten": [], "kunden": 0,
+            "mit_telefon": 0, "neu": 0}
+    df = parse_kunden(datei)
+    if df.empty:
+        return {**leer, "fehler": "Datei konnte nicht gelesen werden."}
+    if "name" not in df.columns:
+        return {**leer, "fehler": "Spalte mit Namen fehlt.",
+                "spalten": list(df.columns)}
+
+    df["name_norm"] = df["name"].map(normalize_name)
+    warnung = ""
+    if "phone_number" in df.columns:
+        df["phone_number"] = df["phone_number"].map(telefon_normalisieren)
+    else:
+        warnung = ("In dieser Datei wurde keine Telefonspalte gefunden. Die "
+                   "Spalte sollte Telefon, Handy, Mobil oder Phone heissen. "
+                   "Gefundene Spalten: <b>"
+                   + ", ".join(str(c) for c in df.columns) + "</b>")
+
+    alt_df = loadsheet("customers")
+    vorher = len(alt_df)
+    if not alt_df.empty and "name_norm" in alt_df.columns:
+        zusammen = _kunden_index(alt_df)
+        for _, r in df.iterrows():
+            # „id" ist die Playtomic-Konto-ID — die Brücke zwischen
+            # Zahlung und Buchung, siehe kunden_nach_id(), und zugleich
+            # die Unterscheidung zwischen drei Menschen, die alle
+            # „Daniel" heissen.
+            _kunden_merken(zusammen, {
+                feld: r.get(feld, "")
+                for feld in ("name_norm", "name", "email", "phone_number",
+                             "geburtstag", "id")})
+        df = _kunden_tabelle(zusammen)
+
+    if not savesheet(df, "customers"):
+        return {**leer, "fehler": "Die Kundenliste liess sich nicht speichern."}
+    cache_leeren()
+    mit_tel = (int((df["phone_number"].astype(str).str.len() > 5).sum())
+               if "phone_number" in df.columns else 0)
+    return {"fehler": "", "warnung": warnung, "spalten": [],
+            "kunden": len(df), "mit_telefon": mit_tel,
+            "neu": max(0, len(df) - vorher)}
+
 
 def mapping_roh() -> dict:
     """Alle gespeicherten Verknüpfungen — auch die unmöglichen."""
@@ -11377,6 +11431,21 @@ def modul_daten():
         st.markdown("")
         if st.button("🔄 Abgleichen", type="primary", use_container_width=True,
                      disabled=not (z_datei and zc_datei), key="btn_zahl"):
+            # Die Spielerliste kommt mit jedem „Daten holen" mit. Sie
+            # hier gleich zu übernehmen spart den Umweg über den Reiter
+            # Kundenliste — und ohne sie steht an einem frischen Fall
+            # „Das Playtomic-Konto … steht nicht in der Kundenliste",
+            # also genau dort keine Telefonnummer, wo gleich eine
+            # WhatsApp hingehen soll. Ergänzt wird nur, nichts fällt weg.
+            k_aus_ordner = gefunden.get("kunden")
+            if k_aus_ordner:
+                with st.spinner("Spielerliste wird übernommen …"):
+                    k_erg = kundenliste_uebernehmen(
+                        io.BytesIO(k_aus_ordner["inhalt"]))
+                if k_erg["fehler"]:
+                    box("Spielerliste: " + k_erg["fehler"], "warn")
+                else:
+                    st.toast(f"Spielerliste: {k_erg['kunden']} Konten")
             with st.spinner(lade_text("verarbeite")):
                 if _verarbeiten_zahlungen(z_datei, zc_datei, o_datei, b_datei):
                     st.session_state.pop("drive_dateien", None)
@@ -11513,44 +11582,17 @@ leer. Lieber eine Lücke als eine geratene Zahl.
 
         if k_datei and st.button("📤 Speichern", type="primary",
                                  use_container_width=True):
-            df = parse_kunden(k_datei)
-            if df.empty:
-                st.error("❌ Datei konnte nicht gelesen werden.")
-            elif "name" not in df.columns:
-                st.error("❌ Spalte mit Namen fehlt.")
-                st.caption("Gefunden: " + ", ".join(df.columns))
+            ergebnis = kundenliste_uebernehmen(k_datei)
+            if ergebnis["fehler"]:
+                st.error("❌ " + ergebnis["fehler"])
+                if ergebnis["spalten"]:
+                    st.caption("Gefunden: " + ", ".join(ergebnis["spalten"]))
             else:
-                df["name_norm"] = df["name"].map(normalize_name)
-                if "phone_number" in df.columns:
-                    df["phone_number"] = df["phone_number"].map(telefon_normalisieren)
-                else:
-                    spalten = ", ".join(str(c) for c in df.columns)
-                    box("In dieser Datei wurde keine Telefonspalte gefunden. "
-                        "Die Spalte sollte Telefon, Handy, Mobil oder Phone "
-                        f"heissen. Gefundene Spalten: <b>{spalten}</b>", "warn")
-
-                # Bestehende Daten ergänzen statt überschreiben
-                alt_df = loadsheet("customers")
-                if not alt_df.empty and "name_norm" in alt_df.columns:
-                    zusammen = _kunden_index(alt_df)
-                    for _, r in df.iterrows():
-                        # „id" ist die Playtomic-Konto-ID — die Brücke
-                        # zwischen Zahlung und Buchung, siehe kunden_nach_id(),
-                        # und zugleich die Unterscheidung zwischen drei
-                        # Menschen, die alle „Daniel" heissen.
-                        _kunden_merken(zusammen, {
-                            feld: r.get(feld, "")
-                            for feld in ("name_norm", "name", "email",
-                                         "phone_number", "geburtstag", "id")})
-                    df = _kunden_tabelle(zusammen)
-
-                if savesheet(df, "customers"):
-                    cache_leeren()
-                    mit_tel = (int((df["phone_number"].astype(str).str.len() > 5).sum())
-                               if "phone_number" in df.columns else 0)
-                    st.success(f"✅ {len(df)} Kunden gespeichert · "
-                               f"{mit_tel} mit Telefonnummer")
-                    st.rerun()
+                if ergebnis["warnung"]:
+                    box(ergebnis["warnung"], "warn")
+                st.success(f"✅ {ergebnis['kunden']} Kunden gespeichert · "
+                           f"{ergebnis['mit_telefon']} mit Telefonnummer")
+                st.rerun()
 
         kunden = loadsheet("customers")
         if not kunden.empty:
