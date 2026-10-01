@@ -334,7 +334,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # Steht unten in der Seitenleiste. Damit lässt sich auf einen Blick
 # sehen, welche Fassung gerade läuft — bei „stimmt immer noch nicht"
 # ist das die erste Frage.
-APP_STAND       = "Fassung 77 · 01.10.2026"
+APP_STAND       = "Fassung 78 · 01.10.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -1624,6 +1624,34 @@ GELD_SPALTEN = (
 )
 
 
+def gezahlter_betrag(zeile) -> float:
+    """
+    Was diese Zahlungszeile wirklich für den Platz eingebracht hat.
+
+    Wer aus dem Club-Guthaben bezahlt, steht mit `Total` = 0 im Export:
+    Das Geld floss schon beim Aufladen, Playtomic verbucht es deshalb
+    nicht noch einmal als Umsatz. Der Anteil für diesen Platz steht dann
+    in `Non-applicable total`.
+
+    Ohne diese Spalte sah es aus, als hätte die Person gar nichts
+    gezahlt. Am 30.09. fehlten auf Padel 2 um 17:00 dadurch 1,50 €, und
+    die App fragte „wer hatte Wellpass?" — obwohl in Playtomic eindeutig
+    bei Stefanie Kunisch „Egym Wellpass" stand. In allen vorliegenden
+    Exporten (32.366 Zeilen) ist das eindeutig: Entweder `Total` oder
+    `Non-applicable total`, nie beides, und immer „Club wallet".
+    """
+    total = parse_betrag(zeile.get("Total"))
+    return total if total else parse_betrag(zeile.get("Non-applicable total"))
+
+
+def betraege_spalte(df: pd.DataFrame) -> pd.Series:
+    """Die gezahlten Beträge einer ganzen Tabelle — siehe gezahlter_betrag()."""
+    total = df["Total"].map(parse_betrag)
+    if "Non-applicable total" not in df.columns:
+        return total
+    return total.where(total != 0, df["Non-applicable total"].map(parse_betrag))
+
+
 def zahlen_normalisieren(df: pd.DataFrame) -> pd.DataFrame:
     """
     Beträge auf Punkt-Schreibweise bringen.
@@ -2587,7 +2615,7 @@ def _rohdaten_aufbereitet() -> pd.DataFrame:
     df["_datum"] = df["_dt"].map(lambda d: d.date())
     df["_stunde"] = df["_dt"].map(lambda d: d.hour)
     df["_wochentag"] = df["_dt"].map(lambda d: d.weekday())
-    df["_betrag"] = df["Total"].map(parse_betrag)
+    df["_betrag"] = betraege_spalte(df)
     df["_name_norm"] = (df["User name"].map(normalize_name)
                         if "User name" in df.columns else "")
     df["_team"] = df["_name_norm"].isin(TEAM_NORM)
@@ -6400,7 +6428,7 @@ def _zahlungs_index(pdf: pd.DataFrame) -> dict:
         return {}
     df["_dt"] = df["Service date"].map(parse_datetime_safe)
     df["_nn"] = df["User name"].map(normalize_name)
-    df["_bt"] = df["Total"].map(parse_betrag)
+    df["_bt"] = betraege_spalte(df)
     df = df[df["_dt"].notna()]
     if df.empty:
         return {}
@@ -6496,7 +6524,7 @@ def _event_zahlungs_index(pdf: pd.DataFrame) -> dict:
         return {}
     df["_dt"] = df["Service date"].map(parse_datetime_safe)
     df["_nn"] = df["User name"].map(normalize_name)
-    df["_bt"] = df["Total"].map(parse_betrag)
+    df["_bt"] = betraege_spalte(df)
     df = df[df["_dt"].notna()]
     df = df[df["_nn"].astype(str).str.len() > 0]
     if df.empty:
@@ -7727,7 +7755,7 @@ def zahlungs_slots(pdf: pd.DataFrame) -> list:
         if uid and uid not in ("-", "nan", "None") and not g["user_id"]:
             g["user_id"] = uid
 
-        betrag = parse_betrag(r.get("Total"))
+        betrag = gezahlter_betrag(r)
         status = str(r.get("Payment status", "")).strip().lower()
         g["zeilen"] += 1
 
@@ -8281,12 +8309,22 @@ def slot_bewerten(g: dict, volle, turniere: dict = None,
             # Der volle Anteil ist der grösste mögliche, den 12 € noch
             # ganz decken.
             deckbar = [a for a in anteile if a <= abzug]
-            # Am genauesten wird es, wenn einer der möglichen Anteile
-            # zur selben Zeit auch wirklich gezahlt wurde — dann steht
-            # fest, welcher Court gemeint ist.
+            # Am besten weiss es die Person selbst: Hat sie im selben
+            # Slot weitere Plätze bezahlt, stand sie mit denen auf
+            # DEMSELBEN Court — deren Anteil ist dann auch ihr eigener.
+            # Benjamin Kist zahlte am 06.09. um 09:00 drei Gastplätze zu
+            # je 9 €; sein eigener Platz war der vierte auf diesem Court
+            # und nicht der 11-€-Single-Court nebenan, auf dem zur
+            # selben Zeit jemand anderes spielte.
+            eigene_plaetze = [x for x in betraege
+                              if x > 0 and x in einzel and x <= abzug]
+            # Sonst: einer der möglichen Anteile, der zur selben Zeit
+            # auch wirklich gezahlt wurde — dann steht wenigstens fest,
+            # dass es diesen Court an dem Tag gab.
             gezahlt = set((beobachtet or {}).get((g["datum"], g["zeit"]), {}))
             passend = [a for a in deckbar if a in gezahlt]
-            voll = (max(passend) if passend
+            voll = (max(eigene_plaetze) if eigene_plaetze
+                    else max(passend) if passend
                     else max(deckbar) if deckbar else abzug)
             return ("wellpass", "0 € — eigener Anteil über Wellpass gedeckt",
                     round(voll, 2), 0.0)
@@ -8742,6 +8780,28 @@ def _zusatz_aus_antwort(datum, zeit: str, name: str, anteil: float,
             "grund": grund or "0 € — von dir zugeordnet"}
 
 
+def teilnehmer_anzeige(name: str) -> str:
+    """
+    Ein Teilnehmername, wie er vor Menschen bestehen kann.
+
+    Playtomic schreibt in die Teilnehmerliste die KONTO-NUMMER, wenn der
+    Mitspieler ein Gast ohne eigenes Profil ist — am 30.09. stand auf
+    Padel 2 um 17:00 schlicht „16942757" als dritter Mitspieler, und
+    genau so bot die App ihn zum Anklicken an. Steht das Konto in der
+    Kundenliste, wird daraus der Name; sonst wenigstens ein Wort, das
+    sagt, was die Zahl ist.
+    """
+    text = str(name or "").strip()
+    if not text.isdigit():
+        return text
+    try:
+        eintrag = kontakt_index()["konto"].get(text) or {}
+    except Exception:
+        eintrag = {}
+    klar = str(eintrag.get("name", "")).strip()
+    return klar if klar else f"Gast · Konto {text}"
+
+
 def luecken_fragen_zeigen(luecken: pd.DataFrame, prefix: str = "lk",
                           grenze: int = 20):
     """
@@ -8758,7 +8818,8 @@ def luecken_fragen_zeigen(luecken: pd.DataFrame, prefix: str = "lk",
             spalten = st.columns(max(2, len(kand) + 1))
             for j, name in enumerate(kand):
                 with spalten[j]:
-                    if st.button(name[:22], key=f"{prefix}_{i}_{j}",
+                    if st.button(teilnehmer_anzeige(name)[:22],
+                                 key=f"{prefix}_{i}_{j}",
                                  use_container_width=True):
                         if luecke_beantworten(str(l["key"]), name,
                                               str(l["datum"]), str(l["zeit"]),
