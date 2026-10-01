@@ -334,7 +334,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # Steht unten in der Seitenleiste. Damit lässt sich auf einen Blick
 # sehen, welche Fassung gerade läuft — bei „stimmt immer noch nicht"
 # ist das die erste Frage.
-APP_STAND       = "Fassung 76 · 30.09.2026"
+APP_STAND       = "Fassung 77 · 01.10.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -3236,7 +3236,7 @@ def hinfaellige_fall_keys() -> set:
     # Fall stand sofort wieder offen da, weil die alte Zeile weiter am
     # selben Fall hing. Gespeichert war alles, sichtbar passierte nichts.
     ungueltig = set(falsch["checkin_key"].astype(str))
-    zuo = loadsheet("checkin_zuordnung", SHEET_SPALTEN["checkin_zuordnung"])
+    zuo = zuordnungen_laden()
     gueltig = set()
     if not zuo.empty and {"checkin_key", "fall_key"} <= set(zuo.columns):
         gueltig = {fk for ck, fk in zip(zuo["checkin_key"].astype(str),
@@ -3668,7 +3668,7 @@ def falsche_zuordnungen() -> pd.DataFrame:
 
     → Name · Check-in-Datum · Fall-Datum · eigene Rabatte an dem Tag
     """
-    df = loadsheet("checkin_zuordnung", SHEET_SPALTEN["checkin_zuordnung"])
+    df = zuordnungen_laden()
     if df.empty or "checkin_key" not in df.columns:
         return pd.DataFrame()
 
@@ -3966,7 +3966,7 @@ def zuordnung_zu_fall_loesen(name_norm: str, datum: str) -> bool:
     galt ein fremder Check-in-Name noch als derselbe Mensch, nachdem der
     Fall längst korrigiert war.
     """
-    df = loadsheet("checkin_zuordnung", SHEET_SPALTEN["checkin_zuordnung"])
+    df = zuordnungen_laden()
     if df.empty or "fall_key" not in df.columns:
         return False
     fk = checkin_schluessel(datum, name_norm)
@@ -4106,7 +4106,8 @@ def offene_checkins(datum_str: str) -> pd.DataFrame:
     verbraucht = verbrauchte_checkins()
     if verbraucht:
         offen["_key"] = offen.apply(
-            lambda r: f"{r['analysis_date']}|{r['Name_norm']}", axis=1)
+            lambda r: checkin_schluessel(str(r["analysis_date"]),
+                                         str(r["Name_norm"])), axis=1)
         offen = offen[~offen["_key"].isin(verbraucht.keys())]
 
     # Durch eine bestätigte Verknüpfung bereits einer Buchung zugeordnet
@@ -4313,7 +4314,7 @@ def offene_eigene_ansprueche(checkin_norm: str, datum: str) -> list:
         gruende = dict(zip(zu["key"].astype(str),
                            zu.get("grund", pd.Series("", index=zu.index))
                            .fillna("").astype(str).str.strip()))
-    zuo = loadsheet("checkin_zuordnung", SHEET_SPALTEN["checkin_zuordnung"])
+    zuo = zuordnungen_laden()
     quelle = {}
     if not zuo.empty and {"fall_key", "checkin_key"} <= set(zuo.columns):
         quelle = dict(zip(zuo["fall_key"].astype(str),
@@ -13895,7 +13896,7 @@ def checkin_zuordnung_status(datum: str, name_norm: str) -> str:
     ihrem eigenen Check-in-Tag doch einen Rabatt bekommen hat.
     """
     ck = checkin_schluessel(str(datum), str(name_norm))
-    zuo = loadsheet("checkin_zuordnung", SHEET_SPALTEN["checkin_zuordnung"])
+    zuo = zuordnungen_laden()
     if zuo.empty or "checkin_key" not in zuo.columns:
         return "keine Zuordnung hinterlegt"
     treffer = zuo[zuo["checkin_key"].astype(str) == ck]
@@ -14047,8 +14048,7 @@ def redundante_korrekturen() -> pd.DataFrame:
     if not gedeckt:
         return pd.DataFrame()
 
-    zuordnung = loadsheet("checkin_zuordnung",
-                          SHEET_SPALTEN["checkin_zuordnung"])
+    zuordnung = zuordnungen_laden()
     # Fälle, die an einem Check-in von einem anderen Tag hängen
     fremde_nachholung = set()
     if not zuordnung.empty and "fall_key" in zuordnung.columns:
@@ -14424,7 +14424,7 @@ def _wa_seitenspalte(datum: str, offen_heute: pd.DataFrame):
                          key=f"uez_sp_{datum}_{i}", type="primary",
                          use_container_width=True):
                 if sperre_nachholung_zuordnen(ci_norm, ci_name, s_datum,
-                                              ci_datum, ci_name):
+                                              ci_datum, ci_norm):
                     st.toast("Sperre aufgelöst.")
                     st.rerun()
                 else:
@@ -15620,7 +15620,7 @@ def _wa_uebersicht():
                                          use_container_width=True):
                                 if sperre_nachholung_zuordnen(
                                         ci_norm, ci_name, s_datum,
-                                        ci_datum, ci_name):
+                                        ci_datum, ci_norm):
                                     st.toast("Sperre aufgelöst.")
                                     st.rerun()
                                 else:
@@ -16216,7 +16216,43 @@ def _wa_protokoll():
 
 
 def checkin_schluessel(datum: str, name_norm: str) -> str:
-    return f"{datum}|{name_norm}"
+    """
+    Der Schlüssel eines Check-ins oder eines Falls: Tag und Name.
+
+    Der Name wird hier vereinheitlicht, egal was der Aufrufer übergibt.
+    Zwei Knöpfe („Sperre vom … auflösen") reichten den ANZEIGE-Namen
+    herein, alle anderen die vereinheitlichte Form — und ein so
+    geschriebener Schlüssel fand sich nie wieder. Der Check-in galt als
+    unverbraucht und stand am nächsten Morgen erneut in der Liste,
+    obwohl er längst eine Sperre aufgelöst hatte (Felix Kollofrath,
+    Check-in 30.09., Sperre vom 20.09.).
+    """
+    return f"{datum}|{normalize_name(name_norm)}"
+
+
+def _schluessel_vereinheitlichen(key) -> str:
+    """Einen gespeicherten Schlüssel auf die heutige Schreibweise bringen."""
+    text = str(key or "")
+    datum, trenner, name = text.partition("|")
+    return f"{datum}|{normalize_name(name)}" if trenner else text
+
+
+def zuordnungen_laden() -> pd.DataFrame:
+    """
+    Das Blatt `checkin_zuordnung` — mit vereinheitlichten Schlüsseln.
+
+    Repariert beim Lesen, was ältere Fassungen falsch geschrieben haben.
+    Eine Wanderung durchs Blatt braucht es dafür nicht: Jede Zeile, die
+    ohnehin neu geschrieben wird, landet von selbst richtig.
+    """
+    df = loadsheet("checkin_zuordnung", SHEET_SPALTEN["checkin_zuordnung"])
+    if df.empty:
+        return df
+    df = df.copy()
+    for spalte in ("checkin_key", "fall_key"):
+        if spalte in df.columns:
+            df[spalte] = df[spalte].map(_schluessel_vereinheitlichen)
+    return df
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -16225,7 +16261,7 @@ def verbrauchte_checkins() -> dict:
     Check-ins, die bereits einem älteren Fall zugeordnet wurden.
     → {checkin_schluessel: fall_schluessel}
     """
-    df = loadsheet("checkin_zuordnung", SHEET_SPALTEN["checkin_zuordnung"])
+    df = zuordnungen_laden()
     if df.empty or "checkin_key" not in df.columns:
         return {}
     # Ungültige Zuordnungen geben ihren Check-in wieder frei — sonst
@@ -16367,7 +16403,8 @@ def nachholung_speichern(checkin_datum: str, checkin_name: str,
     # sah das aus wie „geklickt, gespeichert, Fall trotzdem offen"
     # (Mergim Rrahimi, Check-in 24.08. für den Fall vom 21.08.).
     if str(checkin_datum) != str(fall_datum):
-        eigene = eigener_anspruch(str(checkin_name), str(checkin_datum))
+        eigene = eigener_anspruch(normalize_name(checkin_name),
+                                  str(checkin_datum))
         if eigene > 0:
             st.error(
                 f"❌ Dieser Check-in vom {datum_kurz(checkin_datum)} wird an "
@@ -16408,7 +16445,7 @@ def nachholung_speichern(checkin_datum: str, checkin_name: str,
         # schliessen nichts mehr, stünden aber weiter unter „Zuordnungen,
         # die vermutlich nicht stimmen" — und deren „Zurücknehmen" löst
         # alle Zeilen eines Falls, also auch die neue.
-        zuo = loadsheet("checkin_zuordnung", SHEET_SPALTEN["checkin_zuordnung"])
+        zuo = zuordnungen_laden()
         falsch = falsche_zuordnungen()
         ungueltig = (set(falsch["checkin_key"].astype(str)) - {ck}
                      if not falsch.empty else set())
@@ -16442,7 +16479,7 @@ def nachholung_speichern(checkin_datum: str, checkin_name: str,
 @st.cache_data(ttl=600, show_spinner=False)
 def nachholung_quelle(fall_name: str, fall_datum: str) -> dict:
     """Welcher Check-in hat diesen Fall geschlossen?"""
-    df = loadsheet("checkin_zuordnung", SHEET_SPALTEN["checkin_zuordnung"])
+    df = zuordnungen_laden()
     if df.empty or "fall_key" not in df.columns:
         return {}
     fk = checkin_schluessel(fall_datum, fall_name)
