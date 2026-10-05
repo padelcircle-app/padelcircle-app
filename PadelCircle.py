@@ -334,7 +334,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # Steht unten in der Seitenleiste. Damit lässt sich auf einen Blick
 # sehen, welche Fassung gerade läuft — bei „stimmt immer noch nicht"
 # ist das die erste Frage.
-APP_STAND       = "Fassung 83 · 05.10.2026"
+APP_STAND       = "Fassung 84 · 05.10.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -11301,6 +11301,38 @@ def events_fuer_partner(df: pd.DataFrame, nur_oeffentliche: bool = False
     return raus[spalten].rename(columns=EVENT_SPALTEN)
 
 
+def partner_blatt_id() -> str:
+    """Die gespeicherte Tabellen-ID — aus den Einstellungen, nicht aus Secrets."""
+    return str(einstellung("partner_sheet_id", "") or "").strip()
+
+
+def partner_blatt_link() -> str:
+    """Die Adresse der Tabelle, zum Anklicken und Teilen."""
+    blatt = partner_blatt_id()
+    return f"https://docs.google.com/spreadsheets/d/{blatt}/edit" if blatt else ""
+
+
+def partner_blatt_merken(eingabe: str) -> tuple:
+    """
+    Aus einem eingefügten Link die Tabellen-ID herausziehen und merken.
+    → (geklappt, Meldung)
+
+    Angelegt werden muss die Tabelle von einem Menschen: Ein Google-
+    Dienstkonto hat keinen eigenen Speicherplatz und darf nichts Neues
+    anlegen — dieselbe Wand wie beim Austausch-Ordner.
+    """
+    text = str(eingabe or "").strip()
+    if not text:
+        return False, "Da war nichts drin."
+    treffer = re.search(r"/spreadsheets/d/([A-Za-z0-9_-]{20,})", text)
+    blatt = treffer.group(1) if treffer else text
+    if not re.fullmatch(r"[A-Za-z0-9_-]{20,}", blatt):
+        return False, ("Das sieht nicht nach einer Google-Tabelle aus. Öffne "
+                       "die Tabelle und kopier die Adresse aus der Adresszeile.")
+    einstellung_setzen("partner_sheet_id", blatt)
+    return True, "Tabelle gemerkt."
+
+
 def partner_blatt_schreiben(df: pd.DataFrame) -> tuple:
     """
     Die Event-Tabelle in das geteilte Google Sheet schreiben.
@@ -11311,12 +11343,13 @@ def partner_blatt_schreiben(df: pd.DataFrame) -> tuple:
     Menschen — ein Dienstkonto hat keinen eigenen Speicherplatz und darf
     nichts Neues anlegen, nur Vorhandenes beschreiben.
     """
-    blatt_id = str(st.secrets.get("partner_sheet", {}).get("sheet_id", "")).strip()
+    blatt_id = (partner_blatt_id()
+                or str(st.secrets.get("partner_sheet", {})
+                       .get("sheet_id", "")).strip())
     if not blatt_id:
-        return False, ("Es ist noch kein Partner-Sheet hinterlegt. Lege in "
-                       "Google Drive eine Tabelle an, gib sie für das "
-                       "Dienstkonto als Bearbeiter frei und trage ihre ID "
-                       "in den Secrets unter [partner_sheet] ein.")
+        return False, ("Es ist noch kein Partner-Sheet hinterlegt — leg eine "
+                       "leere Tabelle an, gib sie für das Dienstkonto frei "
+                       "und füg den Link oben ein.")
     if df.empty:
         return False, "Es gibt keine Events zum Übertragen."
     try:
@@ -11389,6 +11422,35 @@ def fehlende_tage_bis_gestern() -> list:
         return []
     return [str(letzter + timedelta(days=i))
             for i in range(1, (gestern - letzter).days + 1)]
+
+
+def _partner_blatt_einrichten(schluessel: str):
+    """
+    Die Einrichtung der geteilten Tabelle — in drei Sätzen.
+
+    Anlegen muss sie ein Mensch: Ein Google-Dienstkonto hat keinen
+    eigenen Speicherplatz und darf nichts Neues anlegen. Danach genügt
+    der eingefügte Link; in die Streamlit-Secrets muss dafür niemand.
+    """
+    konto = str(st.secrets.get("gcp_service_account", {})
+                .get("client_email", "das Dienstkonto"))
+    box("<b>So richtest du die Tabelle ein</b><br>"
+        "1. In Google Drive eine leere Tabelle anlegen, z. B. "
+        "„Padel Circle — Events“.<br>"
+        f"2. Oben rechts auf <b>Freigeben</b>, <code>{konto}</code> "
+        "eintragen, Rolle <b>Bearbeiter</b>.<br>"
+        "3. Die Adresse aus der Adresszeile hier einfügen.", "info")
+    eingabe = st.text_input("Link zur Tabelle",
+                            key=f"partner_link_{schluessel}",
+                            placeholder="https://docs.google.com/spreadsheets/d/…")
+    if st.button("Tabelle merken", key=f"partner_merk_{schluessel}",
+                 use_container_width=True):
+        ok, meldung = partner_blatt_merken(eingabe)
+        if ok:
+            st.toast(meldung)
+            st.rerun()
+        else:
+            box(meldung, "err")
 
 
 def modul_daten():
@@ -11529,8 +11591,24 @@ def modul_daten():
 
         # ── Geplante Events fürs Partner-Sheet ──────────────────────────
         # Der einzige Teil der Daten-Zentrale, der nach VORNE schaut.
-        if gefunden.get("events"):
-            ev_df = events_tabelle(gefunden["events"]["inhalt"])
+        # Erreichbar ohne frisches „Daten holen": Wer nur sehen will, was
+        # ansteht, soll nicht erst alle Zahlungen ziehen müssen.
+        ev_quelle = gefunden.get("events") or st.session_state.get("events_ordner")
+        if not ev_quelle:
+            if st.button("📅 Geplante Events aus dem Ordner holen",
+                         use_container_width=True, key="btn_ev_ordner"):
+                with st.spinner("Austausch-Ordner wird gelesen …"):
+                    ev_gefunden = austausch_holen()
+                if ev_gefunden.get("events"):
+                    st.session_state["events_ordner"] = ev_gefunden["events"]
+                    st.rerun()
+                elif ev_gefunden.get("_fehler"):
+                    box(f"Ordner nicht lesbar: {ev_gefunden['_fehler']}", "err")
+                else:
+                    box("Im Ordner liegt noch keine Event-Liste. Drück einmal "
+                        "„Daten holen“ — sie kommt dann mit.", "warn")
+        if ev_quelle:
+            ev_df = events_tabelle(ev_quelle["inhalt"])
             if not ev_df.empty:
                 with st.expander(f"📅 {len(ev_df)} geplante Events · "
                                  "fürs Partner-Sheet"):
@@ -11554,12 +11632,25 @@ def modul_daten():
                         st.dataframe(
                             zeig.drop(columns=["Beschreibung"], errors="ignore"),
                             use_container_width=True, hide_index=True)
-                        if st.button("📤 Ins Partner-Sheet schreiben",
-                                     use_container_width=True,
-                                     key="btn_partner"):
-                            with st.spinner("Wird übertragen …"):
-                                ok, meldung = partner_blatt_schreiben(zeig)
-                            box(meldung, "ok" if ok else "err")
+
+                        # ── Die geteilte Tabelle ────────────────────────
+                        st.markdown("")
+                        link = partner_blatt_link()
+                        if link:
+                            st.markdown(f"**Deine Tabelle:** [{link}]({link})")
+                            st.caption("Diese Adresse gibst du deinem Partner "
+                                       "— als Betrachter reicht.")
+                            if st.button("📤 Events in die Tabelle schreiben",
+                                         type="primary",
+                                         use_container_width=True,
+                                         key="btn_partner"):
+                                with st.spinner("Wird übertragen …"):
+                                    ok, meldung = partner_blatt_schreiben(zeig)
+                                box(meldung, "ok" if ok else "err")
+                            with st.expander("Andere Tabelle verwenden"):
+                                _partner_blatt_einrichten("wechsel")
+                        else:
+                            _partner_blatt_einrichten("neu")
 
         st.markdown("")
         box("Der Weg für alle neuen Tage. Playtomic liefert keinen "
