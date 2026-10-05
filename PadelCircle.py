@@ -334,7 +334,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # Steht unten in der Seitenleiste. Damit lässt sich auf einen Blick
 # sehen, welche Fassung gerade läuft — bei „stimmt immer noch nicht"
 # ist das die erste Frage.
-APP_STAND       = "Fassung 80 · 05.10.2026"
+APP_STAND       = "Fassung 81 · 05.10.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -11044,7 +11044,8 @@ AUSTAUSCH_ARTEN = {"zahlungen": "Zahlungen · bezahlt",
                    "offen":     "Zahlungen · offene Posten",
                    "checkins":  "Wellpass Check-ins",
                    "buchungen": "Buchungen",
-                   "kunden":    "Spielerliste"}
+                   "kunden":    "Spielerliste",
+                   "events":    "Geplante Events"}
 
 
 @st.cache_resource(show_spinner=False)
@@ -11133,6 +11134,9 @@ def austausch_art(name: str, kopf: bytes) -> str:
     erste = text.splitlines()[0].lower() if text.strip() else ""
     if erste.startswith("id,") and "phone_number" in erste:
         return "kunden"
+    # Die geplanten Events — der Blick nach vorne, nicht zurück.
+    if erste.startswith("datum,") and "preis_wellpass" in erste:
+        return "events"
     if "Mitglied;" in text or "Vor- & Nachname" in text:
         return "checkins"
     if "Corporate Name;" in text:
@@ -11208,6 +11212,94 @@ def austausch_holen() -> dict:
             gefunden[art] = {"name": d["name"], "inhalt": inhalt,
                              "geaendert": d["geaendert"]}
     return gefunden
+
+
+def events_tabelle(inhalt: bytes) -> pd.DataFrame:
+    """Die Event-Datei aus dem Austausch-Ordner als Tabelle."""
+    try:
+        df = pd.read_csv(io.BytesIO(inhalt), encoding="utf-8")
+    except Exception:                               # noqa: BLE001
+        return pd.DataFrame()
+    return df if "name" in df.columns else pd.DataFrame()
+
+
+EVENT_SPALTEN = {
+    "datum": "Datum", "beginn": "Beginn", "ende": "Ende", "name": "Event",
+    "art": "Format", "preis": "Preis", "plaetze": "Plätze",
+    "angemeldet": "Angemeldet", "mindestens": "Mindestens",
+    "level": "Spielstärke", "geschlecht": "Für",
+    "anmeldeschluss": "Anmeldeschluss", "status": "Status",
+    "sichtbarkeit": "Sichtbar", "beschreibung": "Beschreibung",
+}
+
+
+def events_fuer_partner(df: pd.DataFrame, nur_oeffentliche: bool = False
+                        ) -> pd.DataFrame:
+    """
+    Die Events so aufbereiten, wie der Partner sie zum Anlegen braucht.
+
+    Abgesagte fliegen raus — sie stehen in Playtomic nur noch als Leiche
+    herum, und am 31.10. gibt es zu einem Termin beides: eine abgesagte
+    Fassung und die gültige.
+    """
+    if df.empty:
+        return df
+    raus = df[df.get("abgesagt", "nein").astype(str).str.lower() != "ja"].copy()
+    if nur_oeffentliche and "sichtbarkeit" in raus.columns:
+        raus = raus[raus["sichtbarkeit"].astype(str).str.upper() == "PUBLIC"]
+    if raus.empty:
+        return raus
+    raus["sichtbarkeit"] = raus.get("sichtbarkeit", "").astype(str).map(
+        lambda v: "öffentlich" if v.upper() == "PUBLIC" else "noch privat")
+    raus["status"] = raus.get("status", "").astype(str).map(
+        lambda v: {"REGISTRATION_OPEN": "Anmeldung offen",
+                   "PENDING": "geplant", "PLAYED": "gespielt",
+                   "CANCELLED": "abgesagt"}.get(v, v))
+    raus["geschlecht"] = raus.get("geschlecht", "").astype(str).map(
+        lambda v: {"FEMALE": "Frauen", "MALE": "Männer",
+                   "ALL": "alle", "MIXED": "gemischt"}.get(v, v or "alle"))
+    spalten = [s for s in EVENT_SPALTEN if s in raus.columns]
+    return raus[spalten].rename(columns=EVENT_SPALTEN)
+
+
+def partner_blatt_schreiben(df: pd.DataFrame) -> tuple:
+    """
+    Die Event-Tabelle in das geteilte Google Sheet schreiben.
+    → (geklappt, Meldung)
+
+    Ein eigenes Sheet, nicht die Datenbank der App: Der Partner bekommt
+    Leserecht darauf und sonst nichts. Angelegt werden muss es von einem
+    Menschen — ein Dienstkonto hat keinen eigenen Speicherplatz und darf
+    nichts Neues anlegen, nur Vorhandenes beschreiben.
+    """
+    blatt_id = str(st.secrets.get("partner_sheet", {}).get("sheet_id", "")).strip()
+    if not blatt_id:
+        return False, ("Es ist noch kein Partner-Sheet hinterlegt. Lege in "
+                       "Google Drive eine Tabelle an, gib sie für das "
+                       "Dienstkonto als Bearbeiter frei und trage ihre ID "
+                       "in den Secrets unter [partner_sheet] ein.")
+    if df.empty:
+        return False, "Es gibt keine Events zum Übertragen."
+    try:
+        creds = Credentials.from_service_account_info(
+            dict(st.secrets["gcp_service_account"]),
+            scopes=["https://www.googleapis.com/auth/spreadsheets",
+                    "https://www.googleapis.com/auth/drive"])
+        mappe = gspread.authorize(creds).open_by_key(blatt_id)
+        try:
+            blatt = mappe.worksheet("Events")
+        except Exception:                           # noqa: BLE001
+            blatt = mappe.sheet1
+            blatt.update_title("Events")
+        blatt.clear()
+        werte = [list(df.columns)] + df.astype(str).values.tolist()
+        blatt.update(werte, "A1")
+        stand = datetime.now().strftime("%d.%m.%Y %H:%M")
+        blatt.update([[f"Stand {stand} · automatisch aus Playtomic"]],
+                     f"A{len(werte) + 2}")
+        return True, f"{len(df)} Events ins Partner-Sheet geschrieben."
+    except Exception as e:                          # noqa: BLE001
+        return False, f"{type(e).__name__}: {str(e)[:200]}"
 
 
 def austausch_status() -> dict:
@@ -11395,6 +11487,40 @@ def modul_daten():
                                  f"{len(d['inhalt']) // 1024} KB"
                                  if d else "fehlt im Ordner"))
             box("<br>".join(zeilen), "info")
+
+        # ── Geplante Events fürs Partner-Sheet ──────────────────────────
+        # Der einzige Teil der Daten-Zentrale, der nach VORNE schaut.
+        if gefunden.get("events"):
+            ev_df = events_tabelle(gefunden["events"]["inhalt"])
+            if not ev_df.empty:
+                with st.expander(f"📅 {len(ev_df)} geplante Events · "
+                                 "fürs Partner-Sheet"):
+                    oeff = int((ev_df.get("sichtbarkeit", "").astype(str)
+                                .str.upper() == "PUBLIC").sum())
+                    box(f"In Playtomic stehen <b>{len(ev_df)}</b> geplante "
+                        f"Events, davon <b>{oeff}</b> öffentlich. Was auf "
+                        "„privat“ steht, sieht ausser dir niemand — und ein "
+                        "Link dorthin führt ins Leere.",
+                        "ok" if oeff else "warn")
+                    nur_oeff = st.checkbox(
+                        "Nur öffentliche übertragen", value=False,
+                        key="ev_nur_oeff",
+                        help="Zum Anlegen am zweiten Standort braucht dein "
+                             "Partner alle. Für eine Webseite nur die "
+                             "öffentlichen.")
+                    zeig = events_fuer_partner(ev_df, nur_oeff)
+                    if zeig.empty:
+                        box("Dazu gibt es gerade nichts.", "info")
+                    else:
+                        st.dataframe(
+                            zeig.drop(columns=["Beschreibung"], errors="ignore"),
+                            use_container_width=True, hide_index=True)
+                        if st.button("📤 Ins Partner-Sheet schreiben",
+                                     use_container_width=True,
+                                     key="btn_partner"):
+                            with st.spinner("Wird übertragen …"):
+                                ok, meldung = partner_blatt_schreiben(zeig)
+                            box(meldung, "ok" if ok else "err")
 
         st.markdown("")
         box("Der Weg für alle neuen Tage. Playtomic liefert keinen "
