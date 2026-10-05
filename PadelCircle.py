@@ -334,7 +334,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # Steht unten in der Seitenleiste. Damit lässt sich auf einen Blick
 # sehen, welche Fassung gerade läuft — bei „stimmt immer noch nicht"
 # ist das die erste Frage.
-APP_STAND       = "Fassung 79 · 01.10.2026"
+APP_STAND       = "Fassung 80 · 05.10.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -11279,16 +11279,34 @@ def modul_daten():
                 "jederzeit holen.", "ok")
 
         gestern = str(date.today() - timedelta(days=1))
+        # Fehlen mehrere Tage, muss genau das die Voreinstellung sein.
+        # Vorher stand „Gestern" da: Wer am 05.10. den 03. und den 04.
+        # nachholen wollte, bekam nur den 04., und die Lücke davor blieb
+        # liegen — ohne dass die App es noch einmal gesagt hätte.
+        if fehlt:
+            spanne = (datum_kurz(fehlt[0]) if len(fehlt) == 1 else
+                      f"{datum_kurz(fehlt[0])}–{datum_kurz(fehlt[-1])}")
+            luecke = f"Fehlende Tage · {spanne}"
+        else:
+            luecke = ""
+        auswahl = ([luecke] if luecke else []) + ["Gestern", "Letzte 7 Tage",
+                                                  "Diesen Monat"]
+        # Die Lücke ändert sich mit jedem Abgleich. Steht in der Sitzung
+        # noch die von vorhin, kennt die Auswahl sie nicht mehr.
+        if st.session_state.get("drive_zeitraum") not in auswahl:
+            st.session_state.pop("drive_zeitraum", None)
         h1, h2 = st.columns([2, 1])
         with h2:
             zeitraum = st.selectbox(
-                "Zeitraum", ["Gestern", "Letzte 7 Tage", "Diesen Monat"],
+                "Zeitraum", auswahl,
                 key="drive_zeitraum", label_visibility="collapsed")
         von = {"Gestern": gestern,
                "Letzte 7 Tage": str(date.today() - timedelta(days=7)),
-               "Diesen Monat": str(date.today().replace(day=1))}[zeitraum]
+               "Diesen Monat": str(date.today().replace(day=1))}.get(
+                   zeitraum, fehlt[0] if fehlt else gestern)
+        knopf = "fehlende Tage" if zeitraum == luecke else zeitraum.lower()
         with h1:
-            if st.button(f"📥 Daten holen · {zeitraum.lower()}", type="primary",
+            if st.button(f"📥 Daten holen · {knopf}", type="primary",
                          use_container_width=True, key="btn_drive_holen"):
                 # Der Auftrag liegt im Austausch-Ordner. Das Hol-Programm auf
                 # dem Mac sieht ihn dort, lädt die vier Dateien und meldet
