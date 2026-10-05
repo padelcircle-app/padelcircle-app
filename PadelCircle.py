@@ -334,7 +334,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # Steht unten in der Seitenleiste. Damit lässt sich auf einen Blick
 # sehen, welche Fassung gerade läuft — bei „stimmt immer noch nicht"
 # ist das die erste Frage.
-APP_STAND       = "Fassung 81 · 05.10.2026"
+APP_STAND       = "Fassung 82 · 05.10.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -9187,8 +9187,23 @@ def buchungs_luecken(bdf, slots: list, arten: dict = None,
             [(n, normalize_name(n), mail) for n, mail in zip(namen, mails)],
             slots_je_zeit.get((tag, zeit), []))
         zugeordnet = [(n, g) for n, _nn, _mail, g in zu]
-        mail_von = {n: mail for n, _nn, mail in rest}
+        mail_von = dict(zip(namen, mails))
         ohne = [n for n, _nn, _mail in rest]
+
+        # Wer im Slot nur noch VERFALLENE Zahlungszeilen hat, aber in
+        # dieser gültigen Buchung steht, hat nicht abgesagt — sein Platz
+        # wurde von jemand anderem bezahlt. Rasko Mitrovic stand am
+        # 04.10. um 10:30 mit zwei verfallenen 6-€-Zeilen da; Arda Sarac
+        # hatte neu gebucht und seinen Platz mitbezahlt. Weil er eine
+        # (tote) Zahlungszeile hatte, galt er als „zugeordnet" und fiel
+        # aus der Kandidatenliste: Die App fragte „wer hatte Wellpass?"
+        # und bot niemanden zum Anklicken an.
+        verfallen = [(n, g) for n, g in zugeordnet
+                     if arten.get((tag, zeit, g["name_norm"])) == "storniert"]
+        if verfallen:
+            tote = {id(g) for _n, g in verfallen}
+            zugeordnet = [(n, g) for n, g in zugeordnet if id(g) not in tote]
+            ohne = ohne + [n for n, _g in verfallen]
 
         hat = sum(1 for _n, g in zugeordnet
                   if arten.get((tag, zeit, g["name_norm"])) == "wellpass")
