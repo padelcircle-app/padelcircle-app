@@ -334,7 +334,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # Steht unten in der Seitenleiste. Damit lässt sich auf einen Blick
 # sehen, welche Fassung gerade läuft — bei „stimmt immer noch nicht"
 # ist das die erste Frage.
-APP_STAND       = "Fassung 82 · 05.10.2026"
+APP_STAND       = "Fassung 83 · 05.10.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -8715,7 +8715,7 @@ def _rabatte_zerlegen(differenz: float, anteil: float, spieler: int,
     return None, None
 
 
-def luecken_merken(unklar: list):
+def luecken_merken(unklar: list, gerechnete_tage=None):
     """
     Buchungen, bei denen die Person nicht eindeutig ist, festhalten.
 
@@ -8724,8 +8724,16 @@ def luecken_merken(unklar: list):
     Export. Marcel sieht es in Playtomic. Damit er nicht bei jedem
     Import neu suchen muss, bleibt die Frage stehen, bis er sie
     beantwortet hat.
+
+    `gerechnete_tage` sagt, welche Tage gerade neu durchgerechnet wurden.
+    Fragen zu diesen Tagen, die dabei NICHT mehr entstanden sind, haben
+    sich erledigt und werden gelöscht. Ohne das blieb eine Frage stehen,
+    die die App inzwischen selbst beantworten kann — am 05.10. die vom
+    04.10., 10:30, Padel 3. Beantwortete Fragen bleiben unangetastet:
+    Darin steckt eine Entscheidung von Marcel.
     """
-    if not unklar:
+    tage = {str(t) for t in (gerechnete_tage or [])}
+    if not unklar and not tage:
         return
     alt = loadsheet("buchungs_luecken", SHEET_SPALTEN["buchungs_luecken"])
     schon = set(alt["key"].astype(str)) if not alt.empty else set()
@@ -8735,8 +8743,22 @@ def luecken_merken(unklar: list):
         "kandidaten": " | ".join(u["kandidaten"]), "erledigt": "",
         "antwort": "", "timestamp": datetime.now().isoformat(),
     } for u in unklar if u["key"] not in schon]
+
+    # Was sich beim Neurechnen aufgelöst hat, muss weg.
+    veraltet = pd.DataFrame()
+    if tage and not alt.empty and "datum" in alt.columns:
+        bleibt_offen = {str(u["key"]) for u in unklar}
+        offen = ~alt.get("erledigt", pd.Series([""] * len(alt))).map(is_true)
+        veraltet = alt[offen
+                       & alt["datum"].astype(str).isin(tage)
+                       & ~alt["key"].astype(str).isin(bleibt_offen)]
+    if not veraltet.empty:
+        savesheet(alt.drop(veraltet.index), "buchungs_luecken")
+        schon -= set(veraltet["key"].astype(str))
+
     if neu:
         savesheet_append(pd.DataFrame(neu), "buchungs_luecken")
+    if neu or not veraltet.empty:
         cache_leeren("buchungs_luecken", funktionen=("offene_luecken",))
 
 
@@ -9542,8 +9564,10 @@ def _analysieren_zahlungen(pdf, cdf, bdf=None, tage_ersetzen=None) -> bool:
         bewertet = neu_bewertet
         st.caption(f"{len(korrekturen)} Beträge über die Buchungsdatei "
                    "richtiggestellt.")
+    # Die Tage, die dieser Lauf abdeckt — daran hängt, welche alten
+    # Fragen sich erledigt haben.
+    luecken_merken(unklar, {str(g["datum"]) for g in slots})
     if unklar:
-        luecken_merken(unklar)
         box(f"👀 <b>{len(unklar)} Buchungen</b> brauchen deine Entscheidung — "
             "dort fehlt ein Rabatt, aber es kommen mehrere Teilnehmer dafür "
             "in Frage. Sie stehen unten unter „Deine Entscheidung“ und "
