@@ -334,7 +334,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # Steht unten in der Seitenleiste. Damit lässt sich auf einen Blick
 # sehen, welche Fassung gerade läuft — bei „stimmt immer noch nicht"
 # ist das die erste Frage.
-APP_STAND       = "Fassung 86 · 06.10.2026"
+APP_STAND       = "Fassung 87 · 06.10.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -11396,6 +11396,31 @@ def partner_blatt_schreiben(df: pd.DataFrame) -> tuple:
         return False, f"{type(e).__name__}: {str(e)[:200]}"
 
 
+def austausch_vollstaendig(erwartet) -> dict:
+    """
+    Den Ordner lesen und warten, bis WIRKLICH alles oben ist.
+
+    Der Mac meldet „fertig", sobald er die Dateien abgelegt hat — bis
+    Google Drive sie hochgeladen hat, vergehen aber noch Sekunden. Die
+    zuletzt geschriebene Datei fehlte deshalb regelmässig; am 06.10. war
+    das die Event-Liste, und die App sagte „fehlt im Ordner", obwohl sie
+    auf dem Mac lag.
+
+    Welche Dateien zu erwarten sind, sagt der Mac selbst in status.json.
+    """
+    namen = {str(n) for n in (erwartet or []) if str(n).endswith(".csv")}
+    gefunden = {}
+    for versuch in range(12):                   # bis zu einer Minute
+        gefunden = austausch_holen()
+        if gefunden.get("_fehler"):
+            return gefunden
+        da = {d["name"] for d in gefunden.values() if isinstance(d, dict)}
+        if not namen or namen <= da:
+            return gefunden
+        time.sleep(5)
+    return gefunden
+
+
 def austausch_status() -> dict:
     """
     Was meldet das Hol-Programm auf dem Mac? → {} wenn es nichts gemeldet hat.
@@ -11558,7 +11583,8 @@ def modul_daten():
                                 fertig = True
                                 break
                         if fertig:
-                            st.session_state["drive_dateien"] = austausch_holen()
+                            st.session_state["drive_dateien"] = (
+                                austausch_vollstaendig(stand.get("dateien")))
                         else:
                             # Kein Fehler, nur langsam: Der Auftrag liegt im
                             # Ordner und wird abgearbeitet, sobald Drive ihn
@@ -11569,7 +11595,8 @@ def modul_daten():
             if st.button("🔄 Nachsehen", use_container_width=True,
                          key="btn_drive_pruefen"):
                 with st.spinner("Austausch-Ordner wird gelesen …"):
-                    st.session_state["drive_dateien"] = austausch_holen()
+                    st.session_state["drive_dateien"] = austausch_vollstaendig(
+                        austausch_status().get("dateien"))
                 st.rerun()
 
         # Was meldet der Mac?
