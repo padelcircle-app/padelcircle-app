@@ -334,7 +334,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # Steht unten in der Seitenleiste. Damit lässt sich auf einen Blick
 # sehen, welche Fassung gerade läuft — bei „stimmt immer noch nicht"
 # ist das die erste Frage.
-APP_STAND       = "Fassung 84 · 05.10.2026"
+APP_STAND       = "Fassung 85 · 06.10.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -7596,7 +7596,12 @@ def _analysieren(bdf, cdf, pdf=None, zahlungen_index=None) -> bool:
                     "Name": name,
                     "Name_norm": nn,
                     "Email": mail,
-                    "Court": row["_court"],
+                    # Der Event-Name steht hier, wo sonst der Court steht.
+                    # Nicht nur fürs Auge: Platzmiete und Event-Anmeldung
+                    # derselben Person zur selben Uhrzeit wären sonst
+                    # dieselbe Zeile, und eine der beiden ginge verloren
+                    # (Maksim Lingor, 03.10., 12:00).
+                    "Court": row["_court"] or (ev_titel_txt or "Event" if ev_id else ""),
                     "Service_Zeit": row["_zeit"],
                     "Dauer": int(row["_min"]),
                     "Listenpreis": p_liste,
@@ -7786,7 +7791,16 @@ def zahlungs_slots(pdf: pd.DataFrame) -> list:
             continue
 
         nn = normalize_name(name)
-        g = gruppen.setdefault((nn, str(datum), zeit), {
+        # Event-Anmeldung und Platzmiete sind ZWEI Dinge, auch wenn sie
+        # zur selben Uhrzeit auf denselben Namen laufen. Maksim Lingor
+        # zahlte am 03.10. um 12:00 eine Event-Anmeldung (20 €) UND einen
+        # Platz (54 €). Zusammengezählt ergab das 74 € — und weil der
+        # volle Eventpreis der höchste gezahlte ist, galten danach alle
+        # 20-€-Zahler als rabattiert. Sieben Vollzahler standen als
+        # offene Wellpass-Fälle da.
+        ist_turnier = (hat_sku and str(r.get("Product SKU", "")).strip()
+                       == TURNIER_SKU)
+        g = gruppen.setdefault((nn, str(datum), zeit, ist_turnier), {
             "name": name, "name_norm": nn, "datum": datum, "zeit": zeit,
             "minute": minute, "netto": 0.0, "verfallen": 0.0, "zeilen": 0,
             "erstattet": False, "frei": False, "bezahlt_zeilen": 0,
@@ -7801,7 +7815,7 @@ def zahlungs_slots(pdf: pd.DataFrame) -> list:
             # beim Event braucht das: Playtomics Gesamtpreis eines Events
             # enthält offene Anmeldungen mal, mal nicht.
             "ausstehend": 0.0})
-        if hat_sku and str(r.get("Product SKU", "")).strip() == TURNIER_SKU:
+        if ist_turnier:
             g["turnier"] = True
         if str(r.get("Payment type", "")).strip().lower() == "single payer":
             g["einzelzahler"] = True
