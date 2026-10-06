@@ -334,7 +334,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # Steht unten in der Seitenleiste. Damit lässt sich auf einen Blick
 # sehen, welche Fassung gerade läuft — bei „stimmt immer noch nicht"
 # ist das die erste Frage.
-APP_STAND       = "Fassung 85 · 06.10.2026"
+APP_STAND       = "Fassung 86 · 06.10.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -7596,12 +7596,7 @@ def _analysieren(bdf, cdf, pdf=None, zahlungen_index=None) -> bool:
                     "Name": name,
                     "Name_norm": nn,
                     "Email": mail,
-                    # Der Event-Name steht hier, wo sonst der Court steht.
-                    # Nicht nur fürs Auge: Platzmiete und Event-Anmeldung
-                    # derselben Person zur selben Uhrzeit wären sonst
-                    # dieselbe Zeile, und eine der beiden ginge verloren
-                    # (Maksim Lingor, 03.10., 12:00).
-                    "Court": row["_court"] or (ev_titel_txt or "Event" if ev_id else ""),
+                    "Court": row["_court"],
                     "Service_Zeit": row["_zeit"],
                     "Dauer": int(row["_min"]),
                     "Listenpreis": p_liste,
@@ -9951,7 +9946,13 @@ def _analysieren_zahlungen(pdf, cdf, bdf=None, tage_ersetzen=None) -> bool:
             # Welcher Check-in deckt diesen Platz? Siehe checkins_konsolidieren()
             "Checkin_Name": c["name_norm"] if c else "",
             "Relevant": "Ja" if rabatt else "Nein",
-            "Event": "Ja" if g.get("event") else "Nein",
+            # „Event" heisst: Diese Zeile ist eine EVENT-ANMELDUNG. Das
+            # steht in der Zahlungszeile selbst (SKU) und hängt nicht am
+            # Buchungsexport — der kennt längst nicht jedes Event. Daran
+            # hängt auch, dass Platzmiete und Anmeldung derselben Person
+            # zur selben Uhrzeit zwei Zeilen bleiben; sonst geht eine
+            # verloren (Maksim Lingor, 03.10., 12:00).
+            "Event": "Ja" if (g.get("event") or g.get("turnier")) else "Nein",
             "Event_Name": g["event"]["name"] if g.get("event") else "",
             "Event_Id": g["event"]["id"] if g.get("event") else "",
             "Event_Courts": len(g["event"]["courts"]) if g.get("event") else 0,
@@ -9996,8 +9997,15 @@ def _analysieren_zahlungen(pdf, cdf, bdf=None, tage_ersetzen=None) -> bool:
         neu_c = tage_ersetzen_im_blatt(pd.DataFrame(checkins_out),
                                        "checkins", tage_ersetzen)
     else:
+        # „Event" gehört in den Schlüssel: Wer zur selben Uhrzeit eine
+        # Event-Anmeldung UND einen Platz bezahlt, hat zwei Zeilen, die
+        # sich sonst in nichts unterscheiden — Court bleibt bei diesem
+        # Weg absichtlich leer. Eine der beiden ging dadurch verloren
+        # (Maksim Lingor, 03.10., 12:00: 20 Teilnehmer in Playtomic,
+        # 19 in der App).
         neu_b = append_rows(pd.DataFrame(buchungen_out), "buchungen",
-                            ["analysis_date", "Name_norm", "Service_Zeit", "Court"],
+                            ["analysis_date", "Name_norm", "Service_Zeit",
+                             "Court", "Event"],
                             aktualisieren=True)
         neu_c = append_rows(pd.DataFrame(checkins_out), "checkins",
                             ["analysis_date", "Name_norm", "Checkin_Zeit"],
