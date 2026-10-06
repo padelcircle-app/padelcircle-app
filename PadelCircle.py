@@ -334,7 +334,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # Steht unten in der Seitenleiste. Damit lässt sich auf einen Blick
 # sehen, welche Fassung gerade läuft — bei „stimmt immer noch nicht"
 # ist das die erste Frage.
-APP_STAND       = "Fassung 87 · 06.10.2026"
+APP_STAND       = "Fassung 88 · 06.10.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -11306,6 +11306,13 @@ def events_fuer_partner(df: pd.DataFrame, nur_oeffentliche: bool = False
     if df.empty:
         return df
     raus = df[df.get("abgesagt", "nein").astype(str).str.lower() != "ja"].copy()
+    # Was vorbei ist, gehört nicht mehr in die geteilte Tabelle. Das
+    # Hol-Programm liefert ohnehin nur Kommendes, aber eine Datei kann
+    # liegen bleiben — und dein Partner soll nicht Events anlegen, die
+    # längst gespielt sind. Der heutige Tag zählt noch mit: Ein Event
+    # heute Abend ist nicht abgelaufen.
+    if "datum" in raus.columns:
+        raus = raus[raus["datum"].astype(str) >= str(date.today())]
     if nur_oeffentliche and "sichtbarkeit" in raus.columns:
         raus = raus[raus["sichtbarkeit"].astype(str).str.upper() == "PUBLIC"]
     if raus.empty:
