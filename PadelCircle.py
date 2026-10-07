@@ -334,7 +334,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # Steht unten in der Seitenleiste. Damit lässt sich auf einen Blick
 # sehen, welche Fassung gerade läuft — bei „stimmt immer noch nicht"
 # ist das die erste Frage.
-APP_STAND       = "Fassung 95 · 07.10.2026"
+APP_STAND       = "Fassung 96 · 07.10.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -765,10 +765,34 @@ def schreiben_merken(dauer: float, was: str):
         pass
 
 
+def lauf_abschliessen():
+    """
+    Den fertigen Durchlauf festhalten.
+
+    Die Fusszeile steht in der SEITENLEISTE und wird gebaut, bevor der
+    Modulinhalt dran ist — sie konnte den Inhalt also gar nicht messen.
+    Deshalb merkt sich die App den ganzen Durchlauf und zeigt beim
+    nächsten Klick, was der vorige gekostet hat.
+    """
+    try:
+        rahmen = LAUF.get("rahmen_bis") or 0.0
+        st.session_state["_voriger_lauf"] = {
+            "gesamt": round(time.time() - LAUF["start"], 2),
+            "rahmen": round(rahmen, 2),
+            "modul": round(LAUF.get("modul", 0.0), 2),
+            "modul_name": LAUF.get("modul_name", ""),
+            "blaetter": LAUF.get("blaetter", 0),
+            "oben": sorted(LAUF.get("je_blatt", {}).items(),
+                           key=lambda x: -x[1])[:3]}
+    except Exception:                               # noqa: BLE001
+        pass
+
+
 def lauf_bilanz() -> str:
     """Eine Zeile für die Fusszeile: Dauer und was davon zu Google ging."""
     dauer = time.time() - LAUF["start"]
-    teile = [f"Aufbau {dauer:.2f} s".replace(".", ",")]
+    LAUF["rahmen_bis"] = dauer
+    teile = [f"Rahmen bis hier {dauer:.2f} s".replace(".", ",")]
     if LAUF.get("blaetter"):
         oben = sorted(LAUF.get("je_blatt", {}).items(),
                       key=lambda x: -x[1])[:3]
@@ -817,9 +841,20 @@ def _werte_holen(sheet, namen: list) -> dict:
     raise RuntimeError(f"Google-Abruf fehlgeschlagen: {letzter_fehler}")
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
+@st.cache_resource(ttl=1800, show_spinner=False)
 def alle_blaetter() -> dict:
     """
+    ACHTUNG, bewusst `cache_resource` statt `cache_data`.
+
+    `cache_data` gibt bei JEDEM Aufruf eine tiefe Kopie des gesamten
+    Rückgabewerts zurück — hier also eine Kopie ALLER Blätter, auch wenn
+    nur eines gebraucht wird. Marcel mass am 07.10.2026 293 Tabellen-
+    Zugriffe für einen einzigen Seitenaufbau; das waren 293 vollständige
+    Kopien der ganzen Mappe, und sie kosteten fast drei Sekunden.
+    `cache_resource` reicht das Wörterbuch durch, ohne zu kopieren —
+    loadsheet() kopiert danach genau das eine Blatt, das gebraucht wird.
+    Deshalb darf niemand das zurückgegebene Wörterbuch verändern.
+
     Alle laufend gebrauchten Tabellenblätter in EINEM Google-Aufruf.
 
     Vorher holte jedes loadsheet() sein Blatt einzeln — und weil gspread
@@ -842,9 +877,15 @@ def alle_blaetter() -> dict:
     return _werte_holen(sheet, gesucht)
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
+@st.cache_resource(ttl=1800, show_spinner=False)
 def _blatt_einzeln(name: str) -> pd.DataFrame:
-    """Ein einzelnes grosses Blatt nachladen — siehe LAZY_BLAETTER."""
+    """
+    Ein einzelnes grosses Blatt nachladen — siehe LAZY_BLAETTER.
+
+    Auch hier `cache_resource`: `playtomic_raw` ist das grösste Blatt der
+    Mappe, und eine tiefe Kopie bei jedem Zugriff wäre das Teuerste, was
+    die App tut. loadsheet() kopiert danach selbst.
+    """
     sheet = get_sheet()
     if sheet is None:
         return pd.DataFrame()
@@ -18999,6 +19040,14 @@ def main():
         st.caption(f"Stand {APP_STAND}")
         # Woran hängt die Wartezeit? Diese Zeile sagt es je Klick.
         st.caption(lauf_bilanz())
+        vorig = st.session_state.get("_voriger_lauf")
+        if vorig:
+            oben = ", ".join(f"{n}×{b}" for b, n in vorig["oben"])
+            st.caption(
+                f"Voriger Klick · gesamt {vorig['gesamt']:.2f} s".replace(".", ",")
+                + f" · Rahmen {vorig['rahmen']:.2f} s".replace(".", ",")
+                + f" · {vorig['modul_name']} {vorig['modul']:.2f} s".replace(".", ",")
+                + f" · {vorig['blaetter']} Zugriffe ({oben})")
         letztes = st.session_state.get("letztes_schreiben")
         if letztes:
             st.caption(f"Zuletzt gespeichert · {letztes['was']} · "
@@ -19022,6 +19071,7 @@ def main():
             st.session_state.modul = None
             st.rerun()
 
+    lauf_abschliessen()
     claim_line()
 
 
