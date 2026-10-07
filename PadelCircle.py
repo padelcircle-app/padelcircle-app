@@ -334,7 +334,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # Steht unten in der Seitenleiste. Damit lässt sich auf einen Blick
 # sehen, welche Fassung gerade läuft — bei „stimmt immer noch nicht"
 # ist das die erste Frage.
-APP_STAND       = "Fassung 91 · 07.10.2026"
+APP_STAND       = "Fassung 92 · 07.10.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -14854,7 +14854,11 @@ def _wa_seitenspalte(datum: str, offen_heute: pd.DataFrame):
 
     st.markdown("")
 
-    for i, (_, r) in enumerate(ueber.head(30).iterrows()):
+    # Auch hier in Blöcken — siehe WA_BLOCK: Jeder überzählige Check-in
+    # bringt Karte, Hinweis und mehrere Knöpfe mit.
+    ue_block = int(st.session_state.get(f"uez_block_{datum}", WA_BLOCK))
+    ue_rest = max(0, len(ueber) - ue_block)
+    for i, (_, r) in enumerate(ueber.head(ue_block).iterrows()):
         ci_datum = str(r["analysis_date"])
         ci_name = str(r["Name"])
         ci_norm = str(r["Name_norm"])
@@ -15042,6 +15046,17 @@ def _wa_seitenspalte(datum: str, offen_heute: pd.DataFrame):
                         st.toast("Zugeordnet.")
                         st.rerun()
         st.markdown("")
+
+    if ue_rest > 0:
+        if st.button(f"⌄ {ue_rest} weitere Check-ins", use_container_width=True,
+                     key=f"uez_mehr_{datum}"):
+            st.session_state[f"uez_block_{datum}"] = ue_block + WA_BLOCK
+            st.rerun()
+
+
+# Wie viele offene Fälle auf einmal gezeigt werden. Jeder kostet rund
+# sechs Bedienelemente, und Streamlit baut die Seite bei jedem Klick neu.
+WA_BLOCK = 10
 
 
 def _wa_fall(r, i: int, datum: str, angeboten: set = None, rang: int = 0):
@@ -15428,11 +15443,36 @@ def _wa_tagesarbeit():
             schon_angeboten, schon_gesehen = set(), {}
             if "Service_Zeit" in offen.columns:
                 offen = offen.sort_values("Service_Zeit")
+
+            # In Blöcken statt alle auf einmal.
+            #
+            # Jeder Fall sind rund sechs Bedienelemente — Karte, zwei
+            # Kontaktzeilen, drei Knöpfe, ein Aufklapper. Bei 31 offenen
+            # Fällen baut Streamlit also fast zweihundert Stück, und zwar
+            # bei JEDEM Klick neu. Marcel mass am 07.10.2026 einen
+            # Seitenaufbau von 2,83 Sekunden, ohne dass dabei auch nur
+            # eine Google-Anfrage nötig war — das ist reines Bauen.
+            #
+            # Die Reihenfolge bleibt: Was gezeigt wird, sind immer die
+            # ersten, und „schon_angeboten" läuft über den ganzen Tag,
+            # nicht nur über den sichtbaren Block.
+            block = int(st.session_state.get(f"wa_block_{datum}", WA_BLOCK))
+            sichtbar = offen.head(block)
             for i, (_, r) in enumerate(offen.iterrows()):
                 nn_ = str(r["Name_norm"])
                 rang = schon_gesehen.get(nn_, 0)
                 schon_gesehen[nn_] = rang + 1
-                _wa_fall(r, i, datum, schon_angeboten, rang)
+                if i < len(sichtbar):
+                    _wa_fall(r, i, datum, schon_angeboten, rang)
+            rest = len(offen) - len(sichtbar)
+            if rest > 0:
+                if st.button(f"⌄ {rest} weitere anzeigen",
+                             use_container_width=True,
+                             key=f"wa_mehr_{datum}"):
+                    st.session_state[f"wa_block_{datum}"] = block + WA_BLOCK
+                    st.rerun()
+                st.caption(f"{len(sichtbar)} von {len(offen)} Fällen — "
+                           "weniger auf einmal heisst schnellere Seite.")
 
     with rechts:
         _wa_seitenspalte(datum, offen)
