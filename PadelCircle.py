@@ -334,7 +334,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # Steht unten in der Seitenleiste. Damit lässt sich auf einen Blick
 # sehen, welche Fassung gerade läuft — bei „stimmt immer noch nicht"
 # ist das die erste Frage.
-APP_STAND       = "Fassung 92 · 07.10.2026"
+APP_STAND       = "Fassung 93 · 07.10.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -741,12 +741,14 @@ def _blatt_namen() -> list:
 # das ganze Programm neu laufen — ohne Messung ist nicht zu unterscheiden,
 # ob die Wartezeit im Rechnen steckt, in Google oder im Netz.
 LAUF = {"start": time.time(), "google": 0, "zellen": 0,
-        "schreiben": 0.0, "schreib_anfragen": 0}
+        "schreiben": 0.0, "schreib_anfragen": 0,
+        "modul": 0.0, "modul_name": "", "blaetter": 0}
 
 
 def lauf_beginnen():
     LAUF.update(start=time.time(), google=0, zellen=0,
-                schreiben=0.0, schreib_anfragen=0)
+                schreiben=0.0, schreib_anfragen=0,
+                modul=0.0, modul_name="", blaetter=0)
 
 
 def schreiben_merken(dauer: float, was: str):
@@ -767,6 +769,12 @@ def lauf_bilanz() -> str:
     """Eine Zeile für die Fusszeile: Dauer und was davon zu Google ging."""
     dauer = time.time() - LAUF["start"]
     teile = [f"Aufbau {dauer:.2f} s".replace(".", ",")]
+    if LAUF.get("blaetter"):
+        teile.append(f"{LAUF['blaetter']} Tabellen-Zugriffe")
+    if LAUF["modul"]:
+        rahmen = max(0.0, dauer - LAUF["modul"])
+        teile.append(f"Inhalt {LAUF['modul']:.2f} s".replace(".", ",")
+                     + f" · Rahmen {rahmen:.2f} s".replace(".", ","))
     if LAUF["google"]:
         teile.append(f"{LAUF['google']} Google-Abruf"
                      + ("e" if LAUF["google"] != 1 else "")
@@ -861,6 +869,7 @@ def _zu_dataframe(zeilen: list) -> pd.DataFrame:
 
 def loadsheet(name: str, cols=None) -> pd.DataFrame:
     """Ein Tabellenblatt aus dem gemeinsamen Abruf holen."""
+    LAUF["blaetter"] = LAUF.get("blaetter", 0) + 1
     leer = pd.DataFrame(columns=cols) if cols else pd.DataFrame()
 
     # Zuletzt selbst geschriebener Stand geht vor — siehe blatt_merken.
@@ -18986,7 +18995,13 @@ def main():
     else:
         modul = next((m for m in sichtbare_module() if m["id"] == aktiv), None)
         if modul and modul["fn"]:
+            # Wie viel des Seitenaufbaus geht auf den Modulinhalt, wie
+            # viel auf Rahmen, Seitenleiste und CSS? Ohne diese Teilung
+            # lässt sich nicht sagen, wo die Sekunden stecken.
+            _t_modul = time.time()
             modul["fn"]()
+            LAUF["modul"] = time.time() - _t_modul
+            LAUF["modul_name"] = modul["ti"]
         else:
             st.session_state.modul = None
             st.rerun()
