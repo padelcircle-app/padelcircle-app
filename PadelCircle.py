@@ -334,7 +334,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # Steht unten in der Seitenleiste. Damit lässt sich auf einen Blick
 # sehen, welche Fassung gerade läuft — bei „stimmt immer noch nicht"
 # ist das die erste Frage.
-APP_STAND       = "Fassung 93 · 07.10.2026"
+APP_STAND       = "Fassung 94 · 07.10.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -1430,7 +1430,9 @@ STATUS_CACHES = ("offene_fehler", "offene_je_tag", "_auto_kandidaten_gerechnet",
                  "offene_freigaben", "falsche_zuordnungen",
                  "eigener_anspruch", "anspruch_verdacht",
                  "mapping_gedeckt_je_tag", "mapping_belegte_checkins",
-                 "checkin_erklaerung", "vorab_freigaben_laden")
+                 "checkin_erklaerung", "vorab_freigaben_laden",
+                 "schon_gesendet", "nachhol_warnung",
+                 "offene_eigene_ansprueche")
 
 ABGELEITETE_CACHES = ("tages_kennzahlen", "verfuegbare_tage", "monats_kennzahlen",
                       "spieler_statistik", "auslastung_matrix",
@@ -1444,6 +1446,8 @@ ABGELEITETE_CACHES = ("tages_kennzahlen", "verfuegbare_tage", "monats_kennzahlen
                       "verbrauchte_checkins", "anspruch_bilanz", "nachholung_quelle",
                       "mapping_gedeckt_je_tag", "mapping_belegte_checkins",
                       "checkin_erklaerung", "checkin_zuordnungen",
+                      "schon_gesendet", "nachhol_warnung",
+                      "offene_eigene_ansprueche",
                       "teilnehmer_am", "tage_ohne_buchungsexport",
                       "redundante_korrekturen",
                       "buchungsnamen_am_tag", "abzug_pruefen", "verguetung_wert",
@@ -4491,6 +4495,7 @@ def eigener_anspruch(name_norm: str, datum: str) -> int:
     return len(offene_eigene_ansprueche(name_norm, datum))
 
 
+@st.cache_data(ttl=300, show_spinner=False)
 def offene_eigene_ansprueche(checkin_norm: str, datum: str) -> list:
     """
     Welche eigenen Rabatt-Plätze dieser Person an ihrem Check-in-Tag
@@ -4664,6 +4669,7 @@ def anspruch_beleg(name_norm: str, datum: str) -> str:
     return " — in der App als " + " und ".join(teile)
 
 
+@st.cache_data(ttl=300, show_spinner=False)
 def nachhol_warnung(name_norm: str, checkin_datum: str) -> str:
     """
     Warntext, falls der Check-in an seinem eigenen Tag gebraucht wird.
@@ -14227,8 +14233,13 @@ def whatsapp_loggen(name: str, name_norm: str, datum: str, betrag,
         "betrag": betrag, "to_number": nummer, "art": art,
         "timestamp": datetime.now().isoformat()})
     loadsheet.clear()
+    # schon_gesendet() merkt sich seit Fassung 94, was es gelesen hat —
+    # sonst stünde der Fall nach dem Senden weiter als „nicht
+    # angeschrieben" da.
+    _cache_funktion_leeren("schon_gesendet")
 
 
+@st.cache_data(ttl=300, show_spinner=False)
 def schon_gesendet(name_norm: str, datum: str, betrag):
     log = loadsheet("whatsapp_log", SHEET_SPALTEN["whatsapp_log"])
     if log.empty or "key" not in log.columns:
