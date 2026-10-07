@@ -334,7 +334,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # Steht unten in der Seitenleiste. Damit lässt sich auf einen Blick
 # sehen, welche Fassung gerade läuft — bei „stimmt immer noch nicht"
 # ist das die erste Frage.
-APP_STAND       = "Fassung 90 · 07.10.2026"
+APP_STAND       = "Fassung 91 · 07.10.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -740,11 +740,27 @@ def _blatt_namen() -> list:
 # Was dieser Seitenaufbau gekostet hat. Streamlit lässt bei jedem Klick
 # das ganze Programm neu laufen — ohne Messung ist nicht zu unterscheiden,
 # ob die Wartezeit im Rechnen steckt, in Google oder im Netz.
-LAUF = {"start": time.time(), "google": 0, "zellen": 0}
+LAUF = {"start": time.time(), "google": 0, "zellen": 0,
+        "schreiben": 0.0, "schreib_anfragen": 0}
 
 
 def lauf_beginnen():
-    LAUF.update(start=time.time(), google=0, zellen=0)
+    LAUF.update(start=time.time(), google=0, zellen=0,
+                schreiben=0.0, schreib_anfragen=0)
+
+
+def schreiben_merken(dauer: float, was: str):
+    """
+    Wie lange der letzte Schreibvorgang gedauert hat, über den
+    Seitenneuaufbau hinweg festhalten — sonst ist die Zahl weg, bevor
+    man sie lesen kann.
+    """
+    try:
+        st.session_state["letztes_schreiben"] = {
+            "was": was, "dauer": round(float(dauer), 2),
+            "anfragen": LAUF["schreib_anfragen"]}
+    except Exception:                               # noqa: BLE001
+        pass
 
 
 def lauf_bilanz() -> str:
@@ -997,16 +1013,32 @@ def _ws(name: str):
         return None
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def _kopf_gemerkt(name: str):
+    """
+    Die Kopfzeile eines Blattes — einmal gelesen, dann gemerkt.
+
+    Sie zu lesen ist eine eigene Google-Anfrage, und sie ändert sich
+    praktisch nie: nur wenn ein Blatt neue Spalten bekommt, und dann
+    schreibt savesheet() es ohnehin vollständig neu und leert diesen
+    Zwischenspeicher.
+    """
+    ws = _ws(name)
+    if ws is None:
+        return None
+    try:
+        kopf = [str(c).strip() for c in ws.row_values(1)]
+    except Exception:                               # noqa: BLE001
+        return None
+    return kopf or None
+
+
 def _kopfzeile(name: str):
     """Die vorhandene Kopfzeile eines Blattes lesen. None = Blatt fehlt."""
     ws = _ws(name)
     if ws is None:
         return None, None
-    try:
-        kopf = [str(c).strip() for c in ws.row_values(1)]
-    except Exception:
-        return ws, None
-    return ws, (kopf or None)
+    return ws, _kopf_gemerkt(name)
 
 
 def savesheet_append(neu: pd.DataFrame, name: str, versuche: int = 3) -> bool:
@@ -1048,6 +1080,7 @@ def savesheet_append(neu: pd.DataFrame, name: str, versuche: int = 3) -> bool:
             # Stand VOR dem Anhängen holen, solange er noch gilt
             alt = loadsheet(name) if name in OVERLAY_BLAETTER else None
 
+            LAUF["schreib_anfragen"] += 1
             ws.append_rows(zeilen, value_input_option="RAW",
                            insert_data_option="INSERT_ROWS",
                            table_range="A1")
@@ -1135,6 +1168,7 @@ def _zeile_ersetzen(name: str, daten: dict, schluessel_spalte: str,
         if not nummer:
             return False
         zeile = [_zellwert(daten.get(sp, "")) for sp in kopf]
+        LAUF["schreib_anfragen"] += 2       # Spalte lesen + Zeile schreiben
         ws.update([zeile], f"A{nummer}", value_input_option="RAW")
         return True
     except Exception:                               # noqa: BLE001
@@ -1152,7 +1186,11 @@ def savesheet(df: pd.DataFrame, name: str, versuche: int = 3) -> bool:
             if ws is None:
                 ws = sheet.add_worksheet(title=name, rows=2000, cols=30)
                 _ws.clear()                 # das neue Blatt gehört gemerkt
+                _kopf_gemerkt.clear()
 
+            LAUF["schreib_anfragen"] += 2   # leeren + alles schreiben
+            # Ein vollständiges Schreiben kann die Spalten ändern.
+            _kopf_gemerkt.clear()
             ws.clear()
 
             if not df.empty:
@@ -4090,12 +4128,14 @@ def als_behoben_markieren(name_norm: str, datum: str,
     if str(grund) == "gesperrt":
         freigabe_verwerfen(name_norm)
 
+    _t = time.time()
     sheet_zeile_setzen("corrections", {
         "key": f"{name_norm}_{datum}", "date": datum, "behoben": True,
         "grund": str(grund or ""),
         "betrag": "" if betrag is None else f"{float(betrag):.2f}",
         "notiz": str(notiz or "").strip(),
         "timestamp": datetime.now().isoformat()})
+    schreiben_merken(time.time() - _t, "Fall schliessen")
 
     cache_leeren("corrections", funktionen=STATUS_CACHES)
 
@@ -16962,6 +17002,7 @@ def nachholung_speichern(checkin_datum: str, checkin_name: str,
     }
     # Zwei Schreibvorgänge bei Google dauern ein paar Sekunden. Ohne
     # Anzeige sieht das aus, als hätte der Klick nichts bewirkt.
+    _t_schreiben = time.time()
     with st.spinner("Wird gespeichert …"):
         # Alte, ungültige Zuordnungen desselben Falls gehen mit raus. Sie
         # schliessen nichts mehr, stünden aber weiter unter „Zuordnungen,
@@ -16984,6 +17025,7 @@ def nachholung_speichern(checkin_datum: str, checkin_name: str,
                                schluessel_spalte="checkin_key")
         # Ein zugeordneter Check-in ist immer eine Nachholung — EGYM vergütet.
         als_behoben_markieren(fall_name, fall_datum, grund="nachgeholt")
+    schreiben_merken(time.time() - _t_schreiben, "Zuordnen")
     cache_leeren("checkin_zuordnung", "corrections",
                  funktionen=("offene_fehler", "offene_je_tag", "_auto_kandidaten_gerechnet",
                              "_rabattierte_namen_am",
@@ -18892,6 +18934,11 @@ def main():
         st.caption(f"Stand {APP_STAND}")
         # Woran hängt die Wartezeit? Diese Zeile sagt es je Klick.
         st.caption(lauf_bilanz())
+        letztes = st.session_state.get("letztes_schreiben")
+        if letztes:
+            st.caption(f"Zuletzt gespeichert · {letztes['was']} · "
+                       + f"{letztes['dauer']:.2f} s".replace(".", ",")
+                       + f" · {letztes['anfragen']} Anfragen")
 
     # ── Inhalt ──────────────────────────────────────────────────────────
     if aktiv is None:
