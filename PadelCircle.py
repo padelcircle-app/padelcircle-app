@@ -334,7 +334,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # Steht unten in der Seitenleiste. Damit lässt sich auf einen Blick
 # sehen, welche Fassung gerade läuft — bei „stimmt immer noch nicht"
 # ist das die erste Frage.
-APP_STAND       = "Fassung 88 · 06.10.2026"
+APP_STAND       = "Fassung 89 · 07.10.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -737,6 +737,30 @@ def _blatt_namen() -> list:
     return [ws.title for ws in sheet.worksheets()] if sheet else []
 
 
+# Was dieser Seitenaufbau gekostet hat. Streamlit lässt bei jedem Klick
+# das ganze Programm neu laufen — ohne Messung ist nicht zu unterscheiden,
+# ob die Wartezeit im Rechnen steckt, in Google oder im Netz.
+LAUF = {"start": time.time(), "google": 0, "zellen": 0}
+
+
+def lauf_beginnen():
+    LAUF.update(start=time.time(), google=0, zellen=0)
+
+
+def lauf_bilanz() -> str:
+    """Eine Zeile für die Fusszeile: Dauer und was davon zu Google ging."""
+    dauer = time.time() - LAUF["start"]
+    teile = [f"Aufbau {dauer:.2f} s".replace(".", ",")]
+    if LAUF["google"]:
+        teile.append(f"{LAUF['google']} Google-Abruf"
+                     + ("e" if LAUF["google"] != 1 else "")
+                     + (f" · {LAUF['zellen']:,} Zellen".replace(",", ".")
+                        if LAUF["zellen"] else ""))
+    else:
+        teile.append("ohne Google — alles aus dem Zwischenspeicher")
+    return " · ".join(teile)
+
+
 def _werte_holen(sheet, namen: list) -> dict:
     """
     Werte mehrerer Blätter in einem Aufruf, mit Wiederholung beim
@@ -752,6 +776,9 @@ def _werte_holen(sheet, namen: list) -> dict:
         try:
             antwort = sheet.values_batch_get(namen)
             bereiche = antwort.get("valueRanges", [])
+            LAUF["google"] += 1
+            LAUF["zellen"] += sum(len(z) for b in bereiche
+                                  for z in b.get("values", []))
             return {name: _zu_dataframe(bereich.get("values", []))
                     for name, bereich in zip(namen, bereiche)}
         except Exception as e:
@@ -18709,6 +18736,7 @@ def command_center():
 # ══════════════════════════════════════════════════════════════════════════════
 
 def main():
+    lauf_beginnen()
     st.set_page_config(page_title=f"{CONFIG['name']} · Command Center",
                        page_icon="🔵", layout="wide",
                        initial_sidebar_state="expanded")
@@ -18800,6 +18828,8 @@ def main():
                    + (" · Team-Modus" if ist_team() else ""))
         st.caption(f"{COURTS_GESAMT} Courts · {CONFIG['stadt']}")
         st.caption(f"Stand {APP_STAND}")
+        # Woran hängt die Wartezeit? Diese Zeile sagt es je Klick.
+        st.caption(lauf_bilanz())
 
     # ── Inhalt ──────────────────────────────────────────────────────────
     if aktiv is None:
