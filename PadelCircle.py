@@ -334,7 +334,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # Steht unten in der Seitenleiste. Damit lässt sich auf einen Blick
 # sehen, welche Fassung gerade läuft — bei „stimmt immer noch nicht"
 # ist das die erste Frage.
-APP_STAND       = "Fassung 94 · 07.10.2026"
+APP_STAND       = "Fassung 95 · 07.10.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -742,13 +742,13 @@ def _blatt_namen() -> list:
 # ob die Wartezeit im Rechnen steckt, in Google oder im Netz.
 LAUF = {"start": time.time(), "google": 0, "zellen": 0,
         "schreiben": 0.0, "schreib_anfragen": 0,
-        "modul": 0.0, "modul_name": "", "blaetter": 0}
+        "modul": 0.0, "modul_name": "", "blaetter": 0, "je_blatt": {}}
 
 
 def lauf_beginnen():
     LAUF.update(start=time.time(), google=0, zellen=0,
                 schreiben=0.0, schreib_anfragen=0,
-                modul=0.0, modul_name="", blaetter=0)
+                modul=0.0, modul_name="", blaetter=0, je_blatt={})
 
 
 def schreiben_merken(dauer: float, was: str):
@@ -770,7 +770,10 @@ def lauf_bilanz() -> str:
     dauer = time.time() - LAUF["start"]
     teile = [f"Aufbau {dauer:.2f} s".replace(".", ",")]
     if LAUF.get("blaetter"):
-        teile.append(f"{LAUF['blaetter']} Tabellen-Zugriffe")
+        oben = sorted(LAUF.get("je_blatt", {}).items(),
+                      key=lambda x: -x[1])[:3]
+        teile.append(f"{LAUF['blaetter']} Tabellen-Zugriffe ("
+                     + ", ".join(f"{n}×{b}" for b, n in oben) + ")")
     if LAUF["modul"]:
         rahmen = max(0.0, dauer - LAUF["modul"])
         teile.append(f"Inhalt {LAUF['modul']:.2f} s".replace(".", ",")
@@ -870,6 +873,8 @@ def _zu_dataframe(zeilen: list) -> pd.DataFrame:
 def loadsheet(name: str, cols=None) -> pd.DataFrame:
     """Ein Tabellenblatt aus dem gemeinsamen Abruf holen."""
     LAUF["blaetter"] = LAUF.get("blaetter", 0) + 1
+    LAUF.setdefault("je_blatt", {})
+    LAUF["je_blatt"][name] = LAUF["je_blatt"].get(name, 0) + 1
     leer = pd.DataFrame(columns=cols) if cols else pd.DataFrame()
 
     # Zuletzt selbst geschriebener Stand geht vor — siehe blatt_merken.
