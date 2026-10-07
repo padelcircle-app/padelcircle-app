@@ -334,7 +334,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # Steht unten in der Seitenleiste. Damit lässt sich auf einen Blick
 # sehen, welche Fassung gerade läuft — bei „stimmt immer noch nicht"
 # ist das die erste Frage.
-APP_STAND       = "Fassung 98 · 07.10.2026"
+APP_STAND       = "Fassung 99 · 07.10.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -8457,9 +8457,18 @@ def _platz_zerlegen(betrag: float, anteile, einzel, kandidaten: list,
                     continue
                 if k + round(m) > spieler:
                     continue
-                # Auch hier nur mit Beleg: Beide Preise müssen im Slot
-                # tatsächlich vorkommen, sonst ist es geraten.
-                if r not in belege or voll not in belege:
+                # Beleg: Der VOLLE Anteil muss im Slot tatsächlich
+                # gezahlt worden sein — damit steht fest, um welchen
+                # Court es geht. Und der Abzug muss der des Spieltags
+                # sein, nicht irgendeiner aus der Vergangenheit.
+                #
+                # Zuerst hatte ich auch den Rabattpreis als Beleg
+                # verlangt. Am 03.10. ging das auf, weil Vincent G
+                # ebenfalls 1,50 € zahlte. Am 06.10. war Daniel der
+                # EINZIGE mit Wellpass auf dem Platz — da gibt es
+                # niemanden, der den Rabattpreis belegen könnte, und der
+                # Fall fiel wieder durch.
+                if not eigener_satz or voll not in belege:
                     continue
                 lesarten.append(((eigener_satz, False, True, 0), k, voll, r))
                 break
