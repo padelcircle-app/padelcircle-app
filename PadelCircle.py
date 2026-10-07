@@ -334,7 +334,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # Steht unten in der Seitenleiste. Damit lässt sich auf einen Blick
 # sehen, welche Fassung gerade läuft — bei „stimmt immer noch nicht"
 # ist das die erste Frage.
-APP_STAND       = "Fassung 89 · 07.10.2026"
+APP_STAND       = "Fassung 90 · 07.10.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -975,16 +975,32 @@ def _zellwert(x) -> str:
                                "null", "inf", "-inf") else t
 
 
-def _kopfzeile(name: str):
-    """Die vorhandene Kopfzeile eines Blattes lesen. None = Blatt fehlt."""
+@st.cache_resource(show_spinner=False)
+def _ws(name: str):
+    """
+    Das Blatt-Objekt — einmal geholt, dann gemerkt.
+
+    gspread fragt bei `sheet.worksheet(name)` jedes Mal die ganze
+    Mappenstruktur bei Google ab. Bei jedem Schreibvorgang passierte das
+    zweimal: einmal für die Kopfzeile, einmal fürs Schreiben selbst. Das
+    sind zwei Anfragen über den Atlantik, bevor überhaupt etwas
+    geschrieben wird.
+    """
     sheet = get_sheet()
     if sheet is None:
-        return None, None
+        return None
     try:
-        ws = sheet.worksheet(name)
+        return sheet.worksheet(name)
     except gspread.exceptions.WorksheetNotFound:
-        return None, None
-    except Exception:
+        return None
+    except Exception:                               # noqa: BLE001
+        return None
+
+
+def _kopfzeile(name: str):
+    """Die vorhandene Kopfzeile eines Blattes lesen. None = Blatt fehlt."""
+    ws = _ws(name)
+    if ws is None:
         return None, None
     try:
         kopf = [str(c).strip() for c in ws.row_values(1)]
@@ -1073,10 +1089,56 @@ def sheet_zeile_setzen(name: str, daten: dict,
                  and (df[schluessel_spalte].astype(str) == schluessel).any())
 
     if vorhanden:
+        # Nur DIESE eine Zeile überschreiben.
+        #
+        # Vorher wurde dafür das ganze Blatt geleert und neu geschrieben.
+        # Bei `corrections` wächst das mit jedem geschlossenen Fall — und
+        # genau das hat Marcel am 07.10.2026 gemessen: sieben Sekunden für
+        # einen Klick auf „Erledigt". Jetzt gehen zwei kleine Anfragen
+        # raus statt einer grossen über Tausende Zeilen.
+        if _zeile_ersetzen(name, daten, schluessel_spalte, schluessel):
+            rest = df[df[schluessel_spalte].astype(str) != schluessel]
+            blatt_merken(name, pd.concat([rest, pd.DataFrame([daten])],
+                                         ignore_index=True))
+            return True
+        # Klappt das nicht — fremde Spaltenreihenfolge, Blatt umgebaut —
+        # bleibt der sichere Weg: alles neu schreiben.
         rest = df[df[schluessel_spalte].astype(str) != schluessel]
         return savesheet(pd.concat([rest, pd.DataFrame([daten])],
                                    ignore_index=True), name)
     return savesheet_append(pd.DataFrame([daten]), name)
+
+
+def _zeile_ersetzen(name: str, daten: dict, schluessel_spalte: str,
+                    schluessel: str) -> bool:
+    """
+    Eine einzelne Zeile im Blatt an ihrem Platz überschreiben.
+    → True, wenn es geklappt hat
+
+    Gesucht wird die Zeilennummer im Blatt selbst, nicht in der Kopie im
+    Speicher: Nur so steht fest, dass wirklich die richtige Zeile
+    getroffen wird.
+    """
+    ws, kopf = _kopfzeile(name)
+    if ws is None or not kopf or schluessel_spalte not in kopf:
+        return False
+    # Alle Spalten der neuen Daten müssen im Blatt vorkommen, sonst
+    # verschiebt sich etwas.
+    if any(str(c) not in kopf for c in daten):
+        return False
+    try:
+        spalte_nr = kopf.index(schluessel_spalte) + 1
+        werte = ws.col_values(spalte_nr)
+        # Zeile 1 ist die Kopfzeile.
+        nummer = next((i + 1 for i, v in enumerate(werte)
+                       if i > 0 and str(v) == schluessel), 0)
+        if not nummer:
+            return False
+        zeile = [_zellwert(daten.get(sp, "")) for sp in kopf]
+        ws.update([zeile], f"A{nummer}", value_input_option="RAW")
+        return True
+    except Exception:                               # noqa: BLE001
+        return False
 
 
 def savesheet(df: pd.DataFrame, name: str, versuche: int = 3) -> bool:
@@ -1086,10 +1148,10 @@ def savesheet(df: pd.DataFrame, name: str, versuche: int = 3) -> bool:
         if sheet is None:
             return False
         try:
-            try:
-                ws = sheet.worksheet(name)
-            except gspread.exceptions.WorksheetNotFound:
+            ws = _ws(name)
+            if ws is None:
                 ws = sheet.add_worksheet(title=name, rows=2000, cols=30)
+                _ws.clear()                 # das neue Blatt gehört gemerkt
 
             ws.clear()
 
