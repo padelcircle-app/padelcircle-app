@@ -334,7 +334,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # Steht unten in der Seitenleiste. Damit lässt sich auf einen Blick
 # sehen, welche Fassung gerade läuft — bei „stimmt immer noch nicht"
 # ist das die erste Frage.
-APP_STAND       = "Fassung 97 · 07.10.2026"
+APP_STAND       = "Fassung 98 · 07.10.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -8411,7 +8411,7 @@ def _platz_zerlegen(betrag: float, anteile, einzel, kandidaten: list,
             voll = round(b + kand, 2)
             if voll in anteile:
                 beleg = (voll in belege) or (b in belege)
-                lesarten.append(((eigener_satz, True, beleg), 1, voll, b))
+                lesarten.append(((eigener_satz, True, beleg, 2), 1, voll, b))
 
         # Mehrere Plätze zum selben Rabattpreis
         for voll in einzel:
@@ -8431,8 +8431,38 @@ def _platz_zerlegen(betrag: float, anteile, einzel, kandidaten: list,
             beleg = (r in belege) or (eigener_satz and voll in belege)
             if not beleg:
                 continue
-            lesarten.append(((eigener_satz, False, True),
+            lesarten.append(((eigener_satz, False, True, 1),
                              int(round(n)), voll, r))
+
+        # Gemischt: volle UND rabattierte Plätze in EINER Zahlung.
+        #
+        # Daniel zahlte am 03.10. um 21:00 genau 15,00 €: seinen eigenen
+        # Platz mit Wellpass (13,50 − 12,00 = 1,50) und den von Gökdeniz
+        # Altas voll (13,50). In Playtomic steht bei Gökdeniz „Paid by
+        # Daniel" und kein durchgestrichener Betrag — er hatte keinen
+        # Rabatt. Die App kannte diese Lesart nicht: 15,00 € war weder
+        # ein einzelner Rabattpreis noch ein Vielfaches davon. Also galt
+        # Daniel als Vollzahler — sein Anspruch fehlte —, und Gökdeniz
+        # wurde als Wellpass-Platz ergänzt, den es nie gab.
+        for voll in einzel:
+            r = round(voll - kand, 2)
+            if r <= 0.005 or voll <= 0.005:
+                continue
+            for k in range(1, spieler):          # mindestens ein voller
+                rest = round(b - k * r, 2)
+                if rest <= 0.005:
+                    break
+                m = rest / voll
+                if abs(m - round(m)) > 0.01 or round(m) < 1:
+                    continue
+                if k + round(m) > spieler:
+                    continue
+                # Auch hier nur mit Beleg: Beide Preise müssen im Slot
+                # tatsächlich vorkommen, sonst ist es geraten.
+                if r not in belege or voll not in belege:
+                    continue
+                lesarten.append(((eigener_satz, False, True, 0), k, voll, r))
+                break
 
     if not lesarten:
         return None
