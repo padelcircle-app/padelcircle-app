@@ -334,7 +334,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # Steht unten in der Seitenleiste. Damit lässt sich auf einen Blick
 # sehen, welche Fassung gerade läuft — bei „stimmt immer noch nicht"
 # ist das die erste Frage.
-APP_STAND       = "Fassung 100 · 08.10.2026"
+APP_STAND       = "Fassung 101 · 08.10.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -3031,10 +3031,18 @@ def monatsvergleich(bis_tag: int = None) -> list:
     return out
 
 
-def vergleichs_urteil(jetzt: dict, frueher: list) -> dict:
+def vergleichs_urteil(jetzt: dict, frueher: list,
+                      feld: str = "gesamt_effektiv") -> dict:
     """
     Wie steht der laufende Monat da?
     → {schnitt, bestes, abstand, prozent, hochrechnung, verlaesslich}
+
+    Gerechnet wird mit `gesamt_effektiv` — Platzeinnahmen PLUS
+    EGYM-Vergütung. Marcel am 08.10.2026: „du hast bei der
+    Zusammenrechnung vom Monat aber Wellpass vergessen." Stimmt: Die
+    Vergütung ist bei einer Halle mit so vielen Wellpass-Spielern ein
+    erheblicher Teil, und ein Monat mit vielen Check-ins sah ohne sie
+    schlechter aus, als er war.
 
     Verglichen wird nur mit Monaten, in denen derselbe Zeitraum
     VOLLSTÄNDIG im Bestand ist. Ein Monat, von dem nur die Hälfte der
@@ -3043,23 +3051,23 @@ def vergleichs_urteil(jetzt: dict, frueher: list) -> dict:
     """
     brauchbar = [m for m in frueher
                  if m["tage_mit_daten"] >= m["tage_moeglich"] - 1
-                 and m["umsatz"] > 0]
+                 and m.get(feld, 0) > 0]
     if not brauchbar:
         return {"schnitt": 0.0, "bestes": 0.0, "abstand": 0.0,
                 "prozent": 0.0, "hochrechnung": 0.0, "verlaesslich": False}
-    schnitt = sum(m["umsatz"] for m in brauchbar) / len(brauchbar)
-    bestes = max(m["umsatz"] for m in brauchbar)
+    schnitt = sum(m[feld] for m in brauchbar) / len(brauchbar)
+    bestes = max(m[feld] for m in brauchbar)
     tage = max(1, jetzt["tage_mit_daten"])
     jahr, mon = int(jetzt["monat"][:4]), int(jetzt["monat"][5:7])
     return {
         "schnitt": round(schnitt, 2),
         "bestes": round(bestes, 2),
-        "abstand": round(jetzt["umsatz"] - schnitt, 2),
-        "prozent": round((jetzt["umsatz"] / schnitt - 1) * 100, 1) if schnitt else 0.0,
+        "abstand": round(jetzt[feld] - schnitt, 2),
+        "prozent": round((jetzt[feld] / schnitt - 1) * 100, 1) if schnitt else 0.0,
         # Auf den ganzen Monat hochgerechnet: Was bisher je Tag kam,
         # mal die Tage des Monats. Eine grobe Linie, kein Versprechen —
         # Wochenenden und Events verteilen sich nicht gleichmässig.
-        "hochrechnung": round(jetzt["umsatz"] / tage * monthrange(jahr, mon)[1], 2),
+        "hochrechnung": round(jetzt[feld] / tage * monthrange(jahr, mon)[1], 2),
         "verlaesslich": len(brauchbar) >= 2,
     }
 
@@ -13552,13 +13560,19 @@ def _dash_monatsstand():
     tag = jetzt["tage_moeglich"]
     box(f"Verglichen werden die ersten <b>{tag} Tage</b> jedes Monats — "
         f"Stand {datum_kurz(str(jetzt['bis']))}. Ein halber Monat gegen "
-        "einen ganzen wäre kein Vergleich.", "info")
+        "einen ganzen wäre kein Vergleich.<br>Gerechnet wird mit "
+        "<b>Platzeinnahmen plus EGYM-Vergütung</b> — die Wellpass-Check-ins "
+        "sind echtes Geld und gehören dazu.", "info")
 
     u = vergleichs_urteil(jetzt, frueher)
     c1, c2, c3 = st.columns(3)
     with c1:
+        # Gesamt heisst Platz PLUS Wellpass. Ohne die EGYM-Vergütung sähe
+        # ein Monat mit vielen Check-ins schlechter aus, als er war.
         kpi(f"{monat_lesbar(jetzt['monat'])} · Tag 1–{tag}",
-            geld(jetzt["umsatz"]), f"{jetzt['buchungen']} Buchungen")
+            geld(jetzt["gesamt_effektiv"]),
+            f"{geld(jetzt['umsatz'])} Platz + {geld(jetzt['wellpass_wert'])} "
+            f"Wellpass ({jetzt['wellpass_anzahl']} Check-ins)")
     with c2:
         if u["verlaesslich"]:
             zeichen = "+" if u["abstand"] >= 0 else ""
@@ -13586,10 +13600,12 @@ def _dash_monatsstand():
         luecke = m["tage_moeglich"] - m["tage_mit_daten"]
         zeilen.append({
             "Monat": monat_lesbar(m["monat"]),
-            f"Umsatz Tag 1–{tag}": geld(m["umsatz"]),
+            f"Gesamt Tag 1–{tag}": geld(m["gesamt_effektiv"]),
+            "davon Platz": geld(m["umsatz"]),
+            "davon Wellpass": geld(m["wellpass_wert"]),
             "Buchungen": m["buchungen"],
             "Spieler": m["spieler"],
-            "je Tag": geld(m["umsatz"] / max(1, m["tage_mit_daten"])),
+            "je Tag": geld(m["gesamt_effektiv"] / max(1, m["tage_mit_daten"])),
             # Ohne diese Spalte sähe ein Monat mit Datenlücken einfach
             # nur schwach aus, statt unvollständig.
             "Datenlage": "vollständig" if luecke <= 0
