@@ -334,7 +334,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # Steht unten in der Seitenleiste. Damit lässt sich auf einen Blick
 # sehen, welche Fassung gerade läuft — bei „stimmt immer noch nicht"
 # ist das die erste Frage.
-APP_STAND       = "Fassung 99 · 07.10.2026"
+APP_STAND       = "Fassung 100 · 08.10.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -2990,6 +2990,78 @@ def monats_kennzahlen(monat: str) -> dict:
     jahr, mon = int(monat[:4]), int(monat[5:7])
     von, bis = date(jahr, mon, 1), date(jahr, mon, monthrange(jahr, mon)[1])
     return _kennzahlen(_zeitraum_filter(_rohdaten_aufbereitet(), von=von, bis=bis))
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def monatsvergleich(bis_tag: int = None) -> list:
+    """
+    Jeden Monat bis zum SELBEN Tag im Monat — fair vergleichbar.
+
+    Am 8. Oktober nützt der Vergleich mit dem ganzen September nichts:
+    Acht Tage gegen dreissig sehen immer schlecht aus. Verglichen werden
+    deshalb die ersten acht Tage jedes Monats.
+
+    Stichtag ist der letzte Tag, für den überhaupt Daten da sind — nicht
+    „heute". Der heutige Tag ist noch nicht vorbei, und oft fehlt auch
+    gestern noch.
+
+    → [{monat, bis, tage_moeglich, tage_mit_daten, umsatz, buchungen, …}]
+      neueste zuerst
+    """
+    roh = _rohdaten_aufbereitet()
+    if roh.empty or "_datum" not in roh.columns:
+        return []
+    tage = {d for d in roh["_datum"] if d is not None}
+    if not tage:
+        return []
+    bis_tag = int(bis_tag or max(tage).day)
+    out = []
+    for jahr, mon in sorted({(d.year, d.month) for d in tage}, reverse=True):
+        ende = date(jahr, mon, min(bis_tag, monthrange(jahr, mon)[1]))
+        teil = _zeitraum_filter(roh, von=date(jahr, mon, 1), bis=ende)
+        k = _kennzahlen(teil)
+        out.append({
+            "monat": f"{jahr}-{mon:02d}", "bis": ende,
+            "tage_moeglich": ende.day,
+            # Wie viele dieser Tage wirklich im Bestand sind. Fehlen
+            # welche, hinkt der Vergleich — und das muss man sehen.
+            "tage_mit_daten": int(len({d for d in teil["_datum"]})
+                                  if not teil.empty else 0),
+            **k})
+    return out
+
+
+def vergleichs_urteil(jetzt: dict, frueher: list) -> dict:
+    """
+    Wie steht der laufende Monat da?
+    → {schnitt, bestes, abstand, prozent, hochrechnung, verlaesslich}
+
+    Verglichen wird nur mit Monaten, in denen derselbe Zeitraum
+    VOLLSTÄNDIG im Bestand ist. Ein Monat, von dem nur die Hälfte der
+    Tage da ist, würde den Schnitt nach unten ziehen und einen guten
+    Monat schlechtreden.
+    """
+    brauchbar = [m for m in frueher
+                 if m["tage_mit_daten"] >= m["tage_moeglich"] - 1
+                 and m["umsatz"] > 0]
+    if not brauchbar:
+        return {"schnitt": 0.0, "bestes": 0.0, "abstand": 0.0,
+                "prozent": 0.0, "hochrechnung": 0.0, "verlaesslich": False}
+    schnitt = sum(m["umsatz"] for m in brauchbar) / len(brauchbar)
+    bestes = max(m["umsatz"] for m in brauchbar)
+    tage = max(1, jetzt["tage_mit_daten"])
+    jahr, mon = int(jetzt["monat"][:4]), int(jetzt["monat"][5:7])
+    return {
+        "schnitt": round(schnitt, 2),
+        "bestes": round(bestes, 2),
+        "abstand": round(jetzt["umsatz"] - schnitt, 2),
+        "prozent": round((jetzt["umsatz"] / schnitt - 1) * 100, 1) if schnitt else 0.0,
+        # Auf den ganzen Monat hochgerechnet: Was bisher je Tag kam,
+        # mal die Tage des Monats. Eine grobe Linie, kein Versprechen —
+        # Wochenenden und Events verteilen sich nicht gleichmässig.
+        "hochrechnung": round(jetzt["umsatz"] / tage * monthrange(jahr, mon)[1], 2),
+        "verlaesslich": len(brauchbar) >= 2,
+    }
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -13447,6 +13519,7 @@ def modul_dashboard():
     # „Auslastung" braucht Court und Spieldauer — die liefert der abgelegte
     # Buchungsexport. Siehe belegte_slots().
     seiten = [("📅 Tag", _dash_tag), ("💰 Einnahmen", _dash_einnahmen),
+              ("🏁 Monatsstand", _dash_monatsstand),
               ("📈 Monat", _dash_monat)]
     if auslastung_daten_da():
         seiten.append(("📊 Auslastung", _dash_auslastung))
@@ -13455,6 +13528,77 @@ def modul_dashboard():
     for reiter, (_titel, zeigen) in zip(st.tabs([t for t, _ in seiten]), seiten):
         with reiter:
             zeigen()
+
+
+MONATSNAMEN = ("Januar", "Februar", "März", "April", "Mai", "Juni", "Juli",
+               "August", "September", "Oktober", "November", "Dezember")
+
+
+def monat_lesbar(monat: str) -> str:
+    """„2026-10" → „Oktober 2026"."""
+    try:
+        return f"{MONATSNAMEN[int(monat[5:7]) - 1]} {monat[:4]}"
+    except (ValueError, IndexError):
+        return str(monat)
+
+
+def _dash_monatsstand():
+    """Wie gut läuft der laufende Monat — gegen dieselben Tage davor?"""
+    reihen = monatsvergleich()
+    if not reihen:
+        box("Noch keine Daten für einen Vergleich.", "info")
+        return
+    jetzt, frueher = reihen[0], reihen[1:]
+    tag = jetzt["tage_moeglich"]
+    box(f"Verglichen werden die ersten <b>{tag} Tage</b> jedes Monats — "
+        f"Stand {datum_kurz(str(jetzt['bis']))}. Ein halber Monat gegen "
+        "einen ganzen wäre kein Vergleich.", "info")
+
+    u = vergleichs_urteil(jetzt, frueher)
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        kpi(f"{monat_lesbar(jetzt['monat'])} · Tag 1–{tag}",
+            geld(jetzt["umsatz"]), f"{jetzt['buchungen']} Buchungen")
+    with c2:
+        if u["verlaesslich"]:
+            zeichen = "+" if u["abstand"] >= 0 else ""
+            kpi("gegen den Schnitt", f"{zeichen}{u['prozent']:.0f} %".replace(".", ","),
+                f"{zeichen}{geld(u['abstand'])} gegenüber {geld(u['schnitt'])}")
+        else:
+            kpi("gegen den Schnitt", "—", "zu wenig Vergleichsmonate")
+    with c3:
+        kpi("Hochrechnung Monat", geld(u["hochrechnung"]),
+            "grobe Linie, kein Versprechen")
+
+    if u["verlaesslich"]:
+        if u["abstand"] >= 0:
+            box(f"Der {monat_lesbar(jetzt['monat']).split()[0]} liegt nach "
+                f"{tag} Tagen <b>{geld(abs(u['abstand']))}</b> über dem "
+                "Schnitt derselben Tage.", "ok")
+        else:
+            box(f"Der {monat_lesbar(jetzt['monat']).split()[0]} liegt nach "
+                f"{tag} Tagen <b>{geld(abs(u['abstand']))}</b> unter dem "
+                "Schnitt derselben Tage.", "warn")
+
+    st.markdown("")
+    zeilen = []
+    for m in reihen:
+        luecke = m["tage_moeglich"] - m["tage_mit_daten"]
+        zeilen.append({
+            "Monat": monat_lesbar(m["monat"]),
+            f"Umsatz Tag 1–{tag}": geld(m["umsatz"]),
+            "Buchungen": m["buchungen"],
+            "Spieler": m["spieler"],
+            "je Tag": geld(m["umsatz"] / max(1, m["tage_mit_daten"])),
+            # Ohne diese Spalte sähe ein Monat mit Datenlücken einfach
+            # nur schwach aus, statt unvollständig.
+            "Datenlage": "vollständig" if luecke <= 0
+                         else f"{luecke} Tage fehlen"})
+    st.dataframe(pd.DataFrame(zeilen), use_container_width=True,
+                 hide_index=True)
+    st.caption("„je Tag“ rechnet nur mit den Tagen, für die wirklich Daten "
+               "da sind — ein fehlender Tag drückt den Schnitt sonst, "
+               "obwohl gar nichts passiert ist.")
 
 
 def _dash_wetter():
