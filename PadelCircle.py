@@ -11737,6 +11737,11 @@ def austausch_vollstaendig(erwartet) -> dict:
     return gefunden
 
 
+# Das Warteprogramm meldet sich alle fünf Minuten. Wer länger schweigt,
+# ist nicht bereit, sondern weg.
+MAC_STILL_MIN = 8
+
+
 def austausch_status() -> dict:
     """
     Was meldet das Hol-Programm auf dem Mac? → {} wenn es nichts gemeldet hat.
@@ -11771,6 +11776,16 @@ def austausch_status() -> dict:
             stand["text"] = ("Der Mac hat angefangen, aber seit "
                              f"{stand['alter']} nichts mehr gemeldet. "
                              "Läuft das Hol-Programm noch?")
+        # „Der Mac ist bereit" von vor einer halben Stunde heisst nicht
+        # bereit, sondern eingeschlafen. Das Warteprogramm meldet sich
+        # alle fünf Minuten; bleibt es länger still, läuft es nicht — am
+        # 09.10.2026 lag ein Auftrag 27 Minuten im Ordner, während die
+        # App einen grünen Punkt zeigte.
+        elif stand.get("zustand") == "bereit" and minuten >= MAC_STILL_MIN:
+            stand["zustand"] = "schlaeft"
+            stand["text"] = (f"Der Mac hat sich seit {stand['alter']} nicht "
+                             "gemeldet — er schläft wahrscheinlich. Aufträge "
+                             "holt er erst, wenn er wieder wach ist.")
     return stand
 
 
@@ -11919,12 +11934,22 @@ def modul_daten():
         stand = austausch_status()
         if stand:
             zeichen = {"laeuft": "⏳", "fertig": "✅", "bereit": "🟢",
+                       "schlaeft": "😴",
                        "fehler": "⚠️", "anmeldung_noetig": "🔑"}.get(
                            stand.get("zustand", ""), "•")
-            art = {"fehler": "err", "anmeldung_noetig": "warn"}.get(
-                stand.get("zustand", ""), "info")
+            art = {"fehler": "err", "anmeldung_noetig": "warn",
+                   "schlaeft": "warn"}.get(stand.get("zustand", ""), "info")
             box(f"{zeichen} <b>Mac:</b> {stand.get('text', '')} "
                 f"<span style='opacity:.6'>({stand.get('alter', '')})</span>", art)
+            if stand.get("zustand") == "schlaeft":
+                st.caption("Damit das aufhört: den Mac ans Netzteil und "
+                           "einmal `sudo pmset -c sleep 0 standby 0` — dann "
+                           "bleibt er wach, solange er Strom hat.")
+            if int(stand.get("schlief") or 0) > 60:
+                st.caption("Der Mac hat während dieses Laufs "
+                           f"{int(stand['schlief']) // 60} Minuten "
+                           "geschlafen — daher die Wartezeit, nicht wegen "
+                           "der Portale.")
             if stand.get("zustand") == "anmeldung_noetig":
                 st.caption("Im Terminal einmal: "
                            "`python3 robot/hol_programm.py anmelden`")
@@ -11932,9 +11957,14 @@ def modul_daten():
             box("Der Auftrag kam nicht beim Mac an: "
                 f"{st.session_state['drive_fehler']}", "err")
         if st.session_state.get("drive_wartet"):
+            # Früher stand hier „Google Drive ist manchmal ein paar Minuten
+            # langsam". Gemessen am 09.10.2026: Drive brauchte Sekunden,
+            # der Mac 27 Minuten — er schlief. Die Auskunft nennt jetzt
+            # den wahrscheinlichen Grund statt des unwahrscheinlichen.
             box("Der Auftrag liegt im Ordner, der Mac hat ihn aber noch "
-                "nicht abgeholt. Google Drive ist manchmal ein paar Minuten "
-                "langsam. Drück gleich noch einmal auf „Nachsehen“.", "warn")
+                "nicht abgeholt. Meistens heisst das: Der Mac schläft und "
+                "merkt es erst beim nächsten Aufwachen. Das Holen selbst "
+                "dauert etwa eine Minute.", "warn")
 
         gefunden = st.session_state.get("drive_dateien") or {}
         if gefunden.get("_fehler"):
