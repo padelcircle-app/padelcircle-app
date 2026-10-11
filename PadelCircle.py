@@ -11962,9 +11962,11 @@ def modul_daten():
             # der Mac 27 Minuten — er schlief. Die Auskunft nennt jetzt
             # den wahrscheinlichen Grund statt des unwahrscheinlichen.
             box("Der Auftrag liegt im Ordner, der Mac hat ihn aber noch "
-                "nicht abgeholt. Meistens heisst das: Der Mac schläft und "
-                "merkt es erst beim nächsten Aufwachen. Das Holen selbst "
-                "dauert etwa eine Minute.", "warn")
+                "nicht abgeholt. Das Holen selbst dauert eine knappe "
+                "Minute — die Wartezeit entsteht davor, auf dem Weg über "
+                "Google Drive. <b>Du musst nicht dabeibleiben:</b> Der Mac "
+                "arbeitet den Auftrag ab, sobald er ihn sieht, und morgens "
+                "holt er den Vortag ohnehin von selbst.", "warn")
 
         gefunden = st.session_state.get("drive_dateien") or {}
         if gefunden.get("_fehler"):
