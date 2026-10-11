@@ -2869,10 +2869,15 @@ def _rohdaten_aufbereitet() -> pd.DataFrame:
         df["_buchung"] = sku.str.contains("User booking|Open match", case=False, na=False)
         df["_baelle"] = sku.str.contains("BALLS", case=False, na=False)
         df["_schlaeger"] = sku.str.contains("RACKET", case=False, na=False)
+        # Turnieranmeldungen liefen bisher unter „Sonstige" mit. Für die
+        # Frage „woher kommt der Monat?" sind sie eine eigene Quelle:
+        # Ein Event verschiebt an einem Abend mehrere hundert Euro.
+        df["_event"] = sku.str.contains("Tournament", case=False, na=False)
     else:
         df["_buchung"] = True
         df["_baelle"] = False
         df["_schlaeger"] = False
+        df["_event"] = False
 
     return df
 
@@ -3070,6 +3075,289 @@ def vergleichs_urteil(jetzt: dict, frueher: list,
         "hochrechnung": round(jetzt[feld] / tage * monthrange(jahr, mon)[1], 2),
         "verlaesslich": len(brauchbar) >= 2,
     }
+
+
+# ── Woran liegt der Monat? ───────────────────────────────────────────────────
+#
+# Marcel am 11.10.2026: „Wir haben 27 % mehr Umsatz als im Vormonat. Das
+# muss ja irgendeinen Grund haben." Hat es — und die Gründe stehen in den
+# Daten, man muss sie nur sauber auseinandernehmen.
+#
+# Gerechnet wird als BEITRAGSRECHNUNG: Die Teile müssen sich exakt zur
+# Gesamtdifferenz addieren. Damit kann die Erklärung nicht danebenliegen
+# — jeder Euro, der oben steht, taucht unten in genau einer Zeile wieder
+# auf. Was sich NICHT exakt zerlegen lässt (der Kalender zum Beispiel),
+# steht getrennt davon und ist als Schätzung gekennzeichnet.
+
+# Kleinere Posten verschweigen wir — sonst ersäuft der eine echte Grund
+# in sechs Zeilen Kleinkram.
+ERKLAERUNG_MIN_EURO = 50.0
+ERKLAERUNG_MIN_ANTEIL = 0.05
+
+
+def _quellen(teil: pd.DataFrame) -> dict:
+    """
+    Woraus besteht der Umsatz? → {platz, event, baelle, schlaeger, rest}
+
+    Die fünf Posten ergeben zusammen immer den vollen Umsatz; „rest" ist
+    bewusst die Differenz und nicht eine eigene Abfrage, damit nichts
+    unterwegs verlorengeht.
+    """
+    leer = {"platz": 0.0, "event": 0.0, "baelle": 0.0,
+            "schlaeger": 0.0, "rest": 0.0}
+    if teil.empty:
+        return leer
+    gesamt = float(teil["_betrag"].sum())
+    q = dict(leer)
+    q["platz"] = float(teil.loc[teil["_buchung"], "_betrag"].sum())
+    for name, spalte in (("event", "_event"), ("baelle", "_baelle"),
+                         ("schlaeger", "_schlaeger")):
+        if spalte in teil.columns:
+            q[name] = float(teil.loc[teil[spalte].fillna(False)
+                                     & ~teil["_buchung"], "_betrag"].sum())
+    q["rest"] = round(gesamt - q["platz"] - q["event"]
+                      - q["baelle"] - q["schlaeger"], 2)
+    return {k: round(v, 2) for k, v in q.items()}
+
+
+def _monatsbild(roh: pd.DataFrame, jahr: int, mon: int, bis_tag: int) -> dict:
+    """Alles, was man über die ersten `bis_tag` Tage eines Monats wissen muss."""
+    ende = date(jahr, mon, min(bis_tag, monthrange(jahr, mon)[1]))
+    teil = _zeitraum_filter(roh, von=date(jahr, mon, 1), bis=ende)
+    bild = {"monat": f"{jahr}-{mon:02d}", "bis": ende,
+            "tage_moeglich": ende.day,
+            "tage_mit_daten": int(len({d for d in teil["_datum"]})
+                                  if not teil.empty else 0),
+            **_quellen(teil)}
+    buchungen = teil[teil["_buchung"]] if not teil.empty else teil
+    bild["buchungen"] = int(len(buchungen))
+    bild["spieler"] = int(buchungen["_name_norm"].nunique()) if len(buchungen) else 0
+    bild["wellpass"] = round(verguetung_wert(date(jahr, mon, 1), ende), 2)
+    bild["gesamt"] = round(bild["platz"] + bild["event"] + bild["baelle"]
+                           + bild["schlaeger"] + bild["rest"]
+                           + bild["wellpass"], 2)
+    # Wie oft kommt jeder Wochentag in diesem Fenster vor? Der 1.–11.
+    # Oktober hat zwei Samstage, der 1.–11. September hatte einen.
+    bild["wochentage"] = {wt: 0 for wt in range(7)}
+    for i in range(ende.day):
+        bild["wochentage"][(date(jahr, mon, 1) + timedelta(days=i)).weekday()] += 1
+    bild["umsatz_je_wochentag"] = {
+        wt: round(float(buchungen.loc[buchungen["_wochentag"] == wt,
+                                      "_betrag"].sum()), 2)
+        for wt in range(7)} if len(buchungen) else {wt: 0.0 for wt in range(7)}
+    bild["spielernamen"] = (set(buchungen["_name_norm"].dropna())
+                            if len(buchungen) else set())
+    return bild
+
+
+POSTEN_NAMEN = {
+    "platz": "Platzmiete", "event": "Events", "wellpass": "EGYM-Vergütung",
+    "baelle": "Bälle", "schlaeger": "Schlägerverleih", "rest": "Sonstiges",
+}
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def umsatz_erklaerung(bis_tag: int = None) -> dict:
+    """
+    Woher kommt der Unterschied zum Schnitt der Vormonate?
+
+    → {gueltig, delta, prozent, posten[], menge_preis{}, kalender{},
+       spieler{}, saetze[]}
+
+    `posten` ist die Beitragsrechnung und addiert sich exakt auf `delta`.
+    Alles andere sind Deutungen daneben — ausdrücklich getrennt, damit
+    niemand eine Schätzung für eine Abrechnung hält.
+    """
+    leer = {"gueltig": False, "delta": 0.0, "prozent": 0.0, "posten": [],
+            "menge_preis": {}, "kalender": {}, "spieler": {},
+            "monate_verglichen": 0}
+    roh = _rohdaten_aufbereitet()
+    if roh.empty or "_datum" not in roh.columns:
+        return leer
+    tage = {d for d in roh["_datum"] if d is not None}
+    if not tage:
+        return leer
+    bis_tag = int(bis_tag or max(tage).day)
+    monate = sorted({(d.year, d.month) for d in tage}, reverse=True)
+    if len(monate) < 2:
+        return leer
+
+    jetzt = _monatsbild(roh, *monate[0], bis_tag)
+    # Nur Monate, deren Fenster wirklich vollständig im Bestand ist —
+    # ein halb erfasster Monat würde einen guten Monat schlechtreden.
+    frueher = [_monatsbild(roh, j, m, bis_tag) for j, m in monate[1:]]
+    frueher = [b for b in frueher
+               if b["tage_mit_daten"] >= b["tage_moeglich"] - 1
+               and b["gesamt"] > 0]
+    if not frueher:
+        return leer
+
+    def schnitt(feld):
+        return sum(b[feld] for b in frueher) / len(frueher)
+
+    delta = round(jetzt["gesamt"] - schnitt("gesamt"), 2)
+    posten = []
+    for schluessel, name in POSTEN_NAMEN.items():
+        unterschied = round(jetzt[schluessel] - schnitt(schluessel), 2)
+        if abs(unterschied) < 0.005:
+            continue
+        posten.append({
+            "name": name, "schluessel": schluessel,
+            "betrag": unterschied, "jetzt": jetzt[schluessel],
+            "vorher": round(schnitt(schluessel), 2),
+            # Anteil an der Gesamtdifferenz — bei gegenläufigen Posten
+            # kann der über 100 % liegen, und das ist richtig so.
+            "anteil": round(unterschied / delta, 3) if delta else 0.0,
+            "wesentlich": abs(unterschied) >= max(
+                ERKLAERUNG_MIN_EURO, abs(delta) * ERKLAERUNG_MIN_ANTEIL)})
+    posten.sort(key=lambda p: -abs(p["betrag"]))
+
+    # ── Platzmiete: mehr verkauft oder teurer verkauft? ──────────────────
+    menge_j, menge_v = jetzt["buchungen"], schnitt("buchungen")
+    preis_j = jetzt["platz"] / menge_j if menge_j else 0.0
+    preis_v = schnitt("platz") / menge_v if menge_v else 0.0
+    menge_preis = {
+        "menge_jetzt": menge_j, "menge_vorher": round(menge_v, 1),
+        "preis_jetzt": round(preis_j, 2), "preis_vorher": round(preis_v, 2),
+        # Die beiden Effekte addieren sich exakt auf die Differenz der
+        # Platzmiete — die übliche Zerlegung, Menge zum alten Preis plus
+        # Preisänderung auf die neue Menge.
+        "aus_menge": round((menge_j - menge_v) * preis_v, 2),
+        "aus_preis": round((preis_j - preis_v) * menge_j, 2),
+    }
+
+    # ── Kalender: liegen diesmal mehr Wochenendtage im Fenster? ──────────
+    #
+    # Das ist eine SCHÄTZUNG und steht deshalb neben der Rechnung, nicht
+    # darin: Was ein Samstag wert ist, wird aus den Vormonaten gemittelt.
+    wert_je_tag = {}
+    for wt in range(7):
+        vorkommen = sum(b["wochentage"][wt] for b in frueher)
+        umsatz = sum(b["umsatz_je_wochentag"][wt] for b in frueher)
+        wert_je_tag[wt] = round(umsatz / vorkommen, 2) if vorkommen else 0.0
+    kalender_effekt, verschoben = 0.0, []
+    for wt in range(7):
+        mehr = jetzt["wochentage"][wt] - schnitt_wochentag(frueher, wt)
+        if abs(mehr) < 0.01:
+            continue
+        kalender_effekt += mehr * wert_je_tag[wt]
+        if abs(mehr) >= 0.5:
+            verschoben.append({"wochentag": wt, "mehr": round(mehr, 2),
+                               "wert": wert_je_tag[wt]})
+    kalender = {"effekt": round(kalender_effekt, 2),
+                "verschoben": sorted(verschoben,
+                                     key=lambda v: -abs(v["mehr"] * v["wert"])),
+                "wert_je_tag": wert_je_tag}
+
+    # ── Spieler: mehr Leute oder dieselben öfter? ────────────────────────
+    frueher_namen = set()
+    for b in frueher:
+        frueher_namen |= b["spielernamen"]
+    neue = jetzt["spielernamen"] - frueher_namen
+    spieler = {
+        "jetzt": jetzt["spieler"], "vorher": round(schnitt("spieler"), 1),
+        "neue": len(neue),
+        "buchungen_je_spieler": round(menge_j / jetzt["spieler"], 2)
+                                if jetzt["spieler"] else 0.0,
+        "buchungen_je_spieler_vorher": round(menge_v / schnitt("spieler"), 2)
+                                       if schnitt("spieler") else 0.0,
+    }
+
+    # Hier stehen nur Zahlen, keine fertigen Texte.
+    #
+    # Die Sätze entstehen erst beim Anzeigen (`erklaerung_in_worten`).
+    # Stünden sie hier drin, lägen fertig formatierte Beträge im
+    # Zwischenspeicher — und der gilt in Streamlit sitzungsübergreifend.
+    # Im Ingo-Modus käme dann der Text aus Marcels Sitzung durch, trotz
+    # Maskierung.
+    return {"gueltig": True, "delta": delta,
+            "prozent": round((jetzt["gesamt"] / schnitt("gesamt") - 1) * 100, 1)
+                       if schnitt("gesamt") else 0.0,
+            "posten": posten, "menge_preis": menge_preis,
+            "kalender": kalender, "spieler": spieler,
+            "monate_verglichen": len(frueher)}
+
+
+def schnitt_wochentag(bilder: list, wt: int) -> float:
+    """Wie oft kommt dieser Wochentag im Schnitt der Vergleichsfenster vor?"""
+    return sum(b["wochentage"][wt] for b in bilder) / len(bilder) if bilder else 0.0
+
+
+WOCHENTAGE = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag",
+              "Samstag", "Sonntag"]
+
+
+def erklaerung_in_worten(e: dict) -> list:
+    """
+    Aus den Zahlen Sätze machen — nach Regeln, nicht nach Gefühl.
+
+    Kein Sprachmodell: Jeder Satz hängt an einer Zahl, die darüber steht.
+    Ein Textgenerator könnte hier plausibel klingenden Unsinn schreiben,
+    und bei Geld ist plausibler Unsinn das Schlimmste, was man kriegen
+    kann. Diese Sätze lassen sich zurückrechnen.
+
+    Wird beim Anzeigen gerufen, nicht im Zwischenspeicher — die Beträge
+    gehen durch `geld()` und sind im Ingo-Modus verdeckt.
+    """
+    if not e.get("gueltig"):
+        return []
+    delta = e["delta"]
+    posten, menge_preis = e["posten"], e["menge_preis"]
+    kalender, spieler = e["kalender"], e["spieler"]
+    saetze = []
+    gross = [p for p in posten if p["wesentlich"]]
+    if not gross:
+        saetze.append("Kein einzelner Posten sticht heraus — der "
+                      "Unterschied verteilt sich gleichmässig.")
+    for p in gross:
+        zeichen = "+" if p["betrag"] >= 0 else "−"
+        saetze.append(
+            f"**{p['name']}: {zeichen}{geld(abs(p['betrag']))}** "
+            f"({geld(p['jetzt'])} gegen {geld(p['vorher'])} im Schnitt)")
+
+    mp = menge_preis
+    if abs(mp["aus_menge"]) >= ERKLAERUNG_MIN_EURO or             abs(mp["aus_preis"]) >= ERKLAERUNG_MIN_EURO:
+        if abs(mp["aus_menge"]) > abs(mp["aus_preis"]) * 2:
+            saetze.append(
+                f"Bei der Platzmiete liegt es an der **Menge**: "
+                f"{mp['menge_jetzt']} Buchungen gegen {mp['menge_vorher']} "
+                f"im Schnitt. Der Preis je Buchung ist mit "
+                f"{geld(mp['preis_jetzt'])} fast unverändert.")
+        elif abs(mp["aus_preis"]) > abs(mp["aus_menge"]) * 2:
+            saetze.append(
+                f"Bei der Platzmiete liegt es am **Preis je Buchung**: "
+                f"{geld(mp['preis_jetzt'])} gegen "
+                f"{geld(mp['preis_vorher'])}. Die Zahl der Buchungen ist "
+                f"mit {mp['menge_jetzt']} kaum anders.")
+        else:
+            saetze.append(
+                f"Bei der Platzmiete kommt beides zusammen: "
+                f"{geld(mp['aus_menge'])} aus der Menge, "
+                f"{geld(mp['aus_preis'])} aus dem Preis je Buchung.")
+
+    if abs(kalender["effekt"]) >= ERKLAERUNG_MIN_EURO and kalender["verschoben"]:
+        v = kalender["verschoben"][0]
+        wie = "mehr" if v["mehr"] > 0 else "weniger"
+        saetze.append(
+            f"**Der Kalender hilft mit:** In diesem Fenster liegen "
+            f"{abs(v['mehr']):.1f} {wie} {WOCHENTAGE[v['wochentag']]}e als "
+            f"sonst. Geschätzter Anteil am Unterschied: "
+            f"{geld(kalender['effekt'])} — das ist Rechnerei am Kalender, "
+            f"keine Leistung.".replace(".0 ", " "))
+
+    s = spieler
+    if s["neue"] >= 10:
+        saetze.append(
+            f"**{s['neue']} Spieler** haben in diesem Monat zum ersten Mal "
+            f"gebucht (in den Vergleichsmonaten tauchten sie nicht auf).")
+    if s["buchungen_je_spieler"] and s["buchungen_je_spieler_vorher"]:
+        aend = s["buchungen_je_spieler"] / s["buchungen_je_spieler_vorher"] - 1
+        if abs(aend) >= 0.1:
+            saetze.append(
+                f"Die Leute kommen **{'öfter' if aend > 0 else 'seltener'}**: "
+                f"{s['buchungen_je_spieler']} Buchungen je Spieler gegen "
+                f"{s['buchungen_je_spieler_vorher']}.")
+    return saetze
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -13626,6 +13914,8 @@ def _dash_monatsstand():
                 f"{tag} Tagen <b>{geld(abs(u['abstand']))}</b> unter dem "
                 "Schnitt derselben Tage.", "warn")
 
+    _dash_warum(tag)
+
     st.markdown("")
     zeilen = []
     for m in reihen:
@@ -13647,6 +13937,64 @@ def _dash_monatsstand():
     st.caption("„je Tag“ rechnet nur mit den Tagen, für die wirklich Daten "
                "da sind — ein fehlender Tag drückt den Schnitt sonst, "
                "obwohl gar nichts passiert ist.")
+
+
+def _dash_warum(tag: int):
+    """
+    Woran liegt der Unterschied? — die Beitragsrechnung zum Monatsstand.
+
+    Oben steht, DASS der Monat besser läuft. Hier steht, WORAN es liegt:
+    Jeder Posten nennt seinen Beitrag in Euro, und die Posten addieren
+    sich exakt auf die Gesamtdifferenz.
+    """
+    e = umsatz_erklaerung(tag)
+    if not e.get("gueltig"):
+        return
+    with st.expander("🔍 Woran liegt das?", expanded=True):
+        zeichen = "+" if e["delta"] >= 0 else "−"
+        box(f"Der Unterschied von <b>{zeichen}{geld(abs(e['delta']))}</b> "
+            f"gegenüber dem Schnitt aus {e['monate_verglichen']} "
+            f"Vergleichsmonaten, aufgeteilt nach Quellen. Die Posten "
+            "addieren sich exakt auf diese Summe — was hier steht, ist "
+            "gerechnet, nicht geschätzt.", "info")
+
+        for satz in erklaerung_in_worten(e):
+            st.markdown("· " + satz)
+
+        st.markdown("")
+        zeilen = []
+        for po in e["posten"]:
+            zeilen.append({
+                "Posten": po["name"],
+                "Beitrag": ("+" if po["betrag"] >= 0 else "−")
+                           + geld(abs(po["betrag"])),
+                "dieser Monat": geld(po["jetzt"]),
+                "Schnitt davor": geld(po["vorher"]),
+                "Anteil": f"{po['anteil'] * 100:.0f} %".replace(".", ",")
+                          if e["delta"] else "—",
+                "": "◀ wesentlich" if po["wesentlich"] else ""})
+        if zeilen:
+            st.dataframe(pd.DataFrame(zeilen), use_container_width=True,
+                         hide_index=True)
+
+        mp = e["menge_preis"]
+        st.caption(
+            f"Platzmiete aufgeteilt: {geld(mp['aus_menge'])} kommen aus der "
+            f"Menge ({mp['menge_jetzt']} Buchungen gegen "
+            f"{mp['menge_vorher']}), {geld(mp['aus_preis'])} aus dem Preis "
+            f"je Buchung ({geld(mp['preis_jetzt'])} gegen "
+            f"{geld(mp['preis_vorher'])}).")
+
+        if e["kalender"]["verschoben"]:
+            k = e["kalender"]
+            teile = ", ".join(
+                f"{v['mehr']:+.1f} {WOCHENTAGE[v['wochentag']]}e".replace(".0", "")
+                for v in k["verschoben"][:3])
+            st.caption(
+                f"⚠️ Kalender (**Schätzung**, nicht in der Tabelle oben): "
+                f"In diesem Fenster liegen {teile} als im Schnitt davor. "
+                f"Überschlagen macht das {geld(k['effekt'])} aus — Geld, "
+                "das am Datum hängt und nicht an der Arbeit.")
 
 
 def _dash_wetter():
