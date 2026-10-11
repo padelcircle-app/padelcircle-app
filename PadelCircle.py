@@ -3120,6 +3120,55 @@ def _quellen(teil: pd.DataFrame) -> dict:
     return {k: round(v, 2) for k, v in q.items()}
 
 
+def _hallenzeit(von: date, bis: date) -> dict:
+    """
+    Wie viel Hallenzeit wurde in diesem Zeitraum verkauft?
+    → {stunden, buchungen, tage, voll}
+
+    Das ist die Kapazitätsseite. Ohne sie lässt sich „die Platzmiete
+    steigt" nicht beantworten: Es macht einen Unterschied, ob mehr
+    Stunden verkauft wurden oder ob dieselben Stunden mehr einbringen.
+    Marcel am 11.10.2026: „Wodurch steigt die Platzmiete? Durch welche
+    Effekte? Es kann ja nicht einfach sein, dass sie hochgeht."
+
+    Abgesagte Buchungen zählen nicht — sie haben keine Halle belegt.
+    """
+    leer = {"stunden": 0.0, "buchungen": 0, "tage": 0, "voll": 0}
+    df = loadsheet("buchungsexport")
+    if df.empty or "booking_start_date" not in df.columns:
+        return leer
+    d = df.copy()
+    d["_dt"] = d["booking_start_date"].map(parse_datetime_safe)
+    d = d[d["_dt"].notna()]
+    if d.empty:
+        return leer
+    d["_datum"] = d["_dt"].map(lambda x: x.date())
+    d = d[(d["_datum"] >= von) & (d["_datum"] <= bis)]
+    if "status" in d.columns:
+        d = d[~d["status"].astype(str).str.upper().eq("CANCELED")]
+    if d.empty:
+        return leer
+    minuten = pd.to_numeric(d.get("duration (Minuten)"), errors="coerce").fillna(0)
+    # Voll besetzt heisst: auf einem Doppelplatz sind vier Namen
+    # eingetragen. Ein Mass dafür, wie gut die verkaufte Zeit genutzt wird.
+    namen = [f"participant_name_{i}" for i in range(1, 21)
+             if f"participant_name_{i}" in d.columns]
+    # `notna()` genügt nicht: Aus dem Blatt kommen leere Felder als
+    # Leerstring zurück, nicht als NaN. Am 11.10.2026 galt deshalb JEDE
+    # Buchung als voll besetzt — 430 von 430.
+    besetzung = (sum((d[s].astype(str).str.strip() != "")
+                     & d[s].astype(str).str.lower().ne("nan")
+                     for s in namen)
+                 if namen else pd.Series(0, index=d.index))
+    einzel = (d["resource_name"].astype(str).str.contains("Single", case=False, na=False)
+              if "resource_name" in d.columns else pd.Series(False, index=d.index))
+    return {"stunden": round(float(minuten.sum()) / 60, 1),
+            "buchungen": int(len(d)),
+            "tage": int(d["_datum"].nunique()),
+            "voll": int(((besetzung >= 4) & ~einzel).sum()
+                        + ((besetzung >= 2) & einzel).sum())}
+
+
 def _monatsbild(roh: pd.DataFrame, jahr: int, mon: int, bis_tag: int) -> dict:
     """Alles, was man über die ersten `bis_tag` Tage eines Monats wissen muss."""
     ende = date(jahr, mon, min(bis_tag, monthrange(jahr, mon)[1]))
@@ -3133,6 +3182,7 @@ def _monatsbild(roh: pd.DataFrame, jahr: int, mon: int, bis_tag: int) -> dict:
     bild["buchungen"] = int(len(buchungen))
     bild["spieler"] = int(buchungen["_name_norm"].nunique()) if len(buchungen) else 0
     bild["wellpass"] = round(verguetung_wert(date(jahr, mon, 1), ende), 2)
+    bild["wellpass_anzahl"] = int(verguetete_checkins(date(jahr, mon, 1), ende))
     bild["gesamt"] = round(bild["platz"] + bild["event"] + bild["baelle"]
                            + bild["schlaeger"] + bild["rest"]
                            + bild["wellpass"], 2)
@@ -3147,6 +3197,8 @@ def _monatsbild(roh: pd.DataFrame, jahr: int, mon: int, bis_tag: int) -> dict:
         for wt in range(7)} if len(buchungen) else {wt: 0.0 for wt in range(7)}
     bild["spielernamen"] = (set(buchungen["_name_norm"].dropna())
                             if len(buchungen) else set())
+    bild.update({f"halle_{k}": v
+                 for k, v in _hallenzeit(date(jahr, mon, 1), ende).items()})
     return bild
 
 
@@ -3169,8 +3221,8 @@ def umsatz_erklaerung(bis_tag: int = None) -> dict:
     niemand eine Schätzung für eine Abrechnung hält.
     """
     leer = {"gueltig": False, "delta": 0.0, "prozent": 0.0, "posten": [],
-            "menge_preis": {}, "kalender": {}, "spieler": {},
-            "monate_verglichen": 0}
+            "menge_preis": {}, "kapazitaet": {}, "kalender": {},
+            "spieler": {}, "wellpass_mix": {}, "monate_verglichen": 0}
     roh = _rohdaten_aufbereitet()
     if roh.empty or "_datum" not in roh.columns:
         return leer
@@ -3226,6 +3278,40 @@ def umsatz_erklaerung(bis_tag: int = None) -> dict:
         "aus_preis": round((preis_j - preis_v) * menge_j, 2),
     }
 
+    # ── Die eigentliche Frage: mehr Zeit verkauft oder besser gefüllt? ──
+    #
+    # Das ist wieder eine exakte Zerlegung: Die beiden Teile ergeben
+    # zusammen den ganzen Unterschied. „Mehr Hallenzeit" ist Wachstum
+    # über die Menge, „bessere Füllung" ist mehr Ertrag auf derselben
+    # Stunde — zwei völlig verschiedene Geschichten, und nur die zweite
+    # ist eine Leistung, die man wiederholen kann.
+    stunden_j, stunden_v = jetzt["halle_stunden"], schnitt("halle_stunden")
+    deckung = (jetzt["halle_tage"] >= jetzt["tage_mit_daten"] - 1
+               and all(b["halle_tage"] >= b["tage_mit_daten"] - 1
+                       for b in frueher)
+               and stunden_j > 0 and stunden_v > 0)
+    ertrag_j = jetzt["gesamt"] / stunden_j if stunden_j else 0.0
+    ertrag_v = schnitt("gesamt") / stunden_v if stunden_v else 0.0
+    kapazitaet = {
+        "brauchbar": bool(deckung),
+        "stunden_jetzt": round(stunden_j, 1),
+        "stunden_vorher": round(stunden_v, 1),
+        "ertrag_jetzt": round(ertrag_j, 2),
+        "ertrag_vorher": round(ertrag_v, 2),
+        "aus_zeit": round((stunden_j - stunden_v) * ertrag_v, 2),
+        "aus_fuellung": round((ertrag_j - ertrag_v) * stunden_j, 2),
+        "platzbuchungen_jetzt": jetzt["halle_buchungen"],
+        "platzbuchungen_vorher": round(schnitt("halle_buchungen"), 1),
+        # Zahlende Köpfe je Platzbuchung — steigt die Zahl, sitzen mehr
+        # Leute auf derselben Stunde.
+        "koepfe_jetzt": round(menge_j / jetzt["halle_buchungen"], 2)
+                        if jetzt["halle_buchungen"] else 0.0,
+        "koepfe_vorher": round(menge_v / schnitt("halle_buchungen"), 2)
+                         if schnitt("halle_buchungen") else 0.0,
+        "voll_jetzt": jetzt["halle_voll"],
+        "voll_vorher": round(schnitt("halle_voll"), 1),
+    }
+
     # ── Kalender: liegen diesmal mehr Wochenendtage im Fenster? ──────────
     #
     # Das ist eine SCHÄTZUNG und steht deshalb neben der Rechnung, nicht
@@ -3250,10 +3336,17 @@ def umsatz_erklaerung(bis_tag: int = None) -> dict:
                 "wert_je_tag": wert_je_tag}
 
     # ── Spieler: mehr Leute oder dieselben öfter? ────────────────────────
-    frueher_namen = set()
-    for b in frueher:
-        frueher_namen |= b["spielernamen"]
-    neue = jetzt["spielernamen"] - frueher_namen
+    #
+    # „Neu" heisst: hat VORHER ÜBERHAUPT NOCH NIE gebucht — nicht bloss
+    # „kam in den Vergleichsfenstern nicht vor". Die Fenster sind nur
+    # zehn Tage lang; gegen sie gerechnet galt am 11.10.2026 jeder
+    # Zweite als neu, auch wer am 20. September dagewesen war. 440
+    # angebliche Neuzugänge, von denen die meisten Stammgäste sind.
+    monatsbeginn = date(*[int(x) for x in jetzt["monat"].split("-")], 1)
+    frueher_namen = set(roh.loc[roh["_buchung"]
+                                & (roh["_datum"] < monatsbeginn),
+                                "_name_norm"].dropna())
+    neue = {n for n in jetzt["spielernamen"] - frueher_namen if n}
     spieler = {
         "jetzt": jetzt["spieler"], "vorher": round(schnitt("spieler"), 1),
         "neue": len(neue),
@@ -3261,6 +3354,19 @@ def umsatz_erklaerung(bis_tag: int = None) -> dict:
                                 if jetzt["spieler"] else 0.0,
         "buchungen_je_spieler_vorher": round(menge_v / schnitt("spieler"), 2)
                                        if schnitt("spieler") else 0.0,
+    }
+
+    # ── Wellpass-Anteil: erklärt den Betrag je Zahlung mit ──────────────
+    #
+    # Ein Wellpass-Spieler zahlt bei Playtomic fast nichts; das Geld
+    # kommt von EGYM. Steigt sein Anteil, sinkt der Betrag je Zahlung,
+    # ohne dass irgendetwas billiger geworden wäre.
+    quote_j = jetzt["wellpass_anzahl"] / menge_j if menge_j else 0.0
+    quote_v = schnitt("wellpass_anzahl") / menge_v if menge_v else 0.0
+    wellpass_mix = {
+        "quote_jetzt": round(quote_j, 3), "quote_vorher": round(quote_v, 3),
+        "anzahl_jetzt": jetzt["wellpass_anzahl"],
+        "anzahl_vorher": round(schnitt("wellpass_anzahl"), 1),
     }
 
     # Hier stehen nur Zahlen, keine fertigen Texte.
@@ -3274,7 +3380,9 @@ def umsatz_erklaerung(bis_tag: int = None) -> dict:
             "prozent": round((jetzt["gesamt"] / schnitt("gesamt") - 1) * 100, 1)
                        if schnitt("gesamt") else 0.0,
             "posten": posten, "menge_preis": menge_preis,
+            "kapazitaet": kapazitaet,
             "kalender": kalender, "spieler": spieler,
+            "wellpass_mix": wellpass_mix,
             "monate_verglichen": len(frueher)}
 
 
@@ -3285,6 +3393,24 @@ def schnitt_wochentag(bilder: list, wt: int) -> float:
 
 WOCHENTAGE = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag",
               "Samstag", "Sonntag"]
+WOCHENTAGE_MEHRZAHL = ["Montage", "Dienstage", "Mittwoche", "Donnerstage",
+                       "Freitage", "Samstage", "Sonntage"]
+
+
+def _tage_in_worten(mehr: float, wochentag: int) -> str:
+    """
+    „ein Freitag mehr", „ein halber Samstag weniger" — statt „1.0 mehr
+    Freitage". Die halben Tage kommen daher, dass über mehrere
+    Vergleichsmonate gemittelt wird.
+    """
+    wie = "mehr" if mehr > 0 else "weniger"
+    zahl = abs(mehr)
+    if abs(zahl - 1) < 0.01:
+        return f"ein {WOCHENTAGE[wochentag]} {wie}"
+    if abs(zahl - 0.5) < 0.01:
+        return f"ein halber {WOCHENTAGE[wochentag]} {wie}"
+    text = f"{zahl:.1f}".replace(".0", "").replace(".", ",")
+    return f"{text} {WOCHENTAGE_MEHRZAHL[wochentag]} {wie}"
 
 
 def erklaerung_in_worten(e: dict) -> list:
@@ -3315,41 +3441,103 @@ def erklaerung_in_worten(e: dict) -> list:
             f"**{p['name']}: {zeichen}{geld(abs(p['betrag']))}** "
             f"({geld(p['jetzt'])} gegen {geld(p['vorher'])} im Schnitt)")
 
+    # ── Wodurch? Mehr Hallenzeit oder dieselbe Zeit besser gefüllt ──────
+    kap = e.get("kapazitaet") or {}
+    if kap.get("brauchbar"):
+        zeit_klein = abs(kap["aus_zeit"]) < ERKLAERUNG_MIN_EURO
+        fuell_klein = abs(kap["aus_fuellung"]) < ERKLAERUNG_MIN_EURO
+        if zeit_klein and not fuell_klein:
+            saetze.append(
+                f"**Nicht mehr Hallenzeit, sondern besser gefüllte Zeit.** "
+                f"Verkauft wurden {kap['stunden_jetzt']} Platzstunden gegen "
+                f"{kap['stunden_vorher']} — praktisch gleich viel. Was eine "
+                f"Stunde einbringt, ist von {geld(kap['ertrag_vorher'])} auf "
+                f"{geld(kap['ertrag_jetzt'])} gestiegen; das macht "
+                f"{geld(kap['aus_fuellung'])} aus.")
+        elif fuell_klein and not zeit_klein:
+            saetze.append(
+                f"**Mehr verkaufte Hallenzeit:** {kap['stunden_jetzt']} "
+                f"Platzstunden gegen {kap['stunden_vorher']}. Was eine "
+                f"Stunde einbringt, ist mit {geld(kap['ertrag_jetzt'])} fast "
+                f"unverändert — dieselbe Halle, nur länger belegt.")
+        elif not (zeit_klein and fuell_klein):
+            saetze.append(
+                f"**Beides zusammen:** {geld(kap['aus_zeit'])} aus mehr "
+                f"Hallenzeit ({kap['stunden_jetzt']} statt "
+                f"{kap['stunden_vorher']} Platzstunden), "
+                f"{geld(kap['aus_fuellung'])} daraus, dass eine Stunde mehr "
+                f"einbringt ({geld(kap['ertrag_jetzt'])} statt "
+                f"{geld(kap['ertrag_vorher'])}).")
+        if kap["koepfe_vorher"] and abs(
+                kap["koepfe_jetzt"] / kap["koepfe_vorher"] - 1) >= 0.08:
+            mehr = kap["koepfe_jetzt"] > kap["koepfe_vorher"]
+            saetze.append(
+                f"Auf jeder Platzbuchung sitzen "
+                f"**{'mehr' if mehr else 'weniger'} zahlende Leute**: "
+                f"{kap['koepfe_jetzt']} gegen {kap['koepfe_vorher']}. "
+                f"Voll besetzte Plätze: {kap['voll_jetzt']} gegen "
+                f"{kap['voll_vorher']}.")
+
+    # Die Zahl der Zahlungen ist NICHT die Zahl der Buchungen: Zahlen vier
+    # Leute einzeln für einen Platz, sind das vier Zeilen. Steigt der
+    # Wellpass-Anteil, sinkt der Betrag je Zahlung, ohne dass irgendetwas
+    # billiger geworden wäre — genau das stand am 11.10.2026 in Marcels
+    # echten Zahlen, und der Satz hier behauptete trotzdem, der Preis sei
+    # „fast unverändert". Bei −2.831 € Preiseffekt. „Unverändert" wird
+    # jetzt nur noch gesagt, wenn der andere Teil WIRKLICH klein ist.
     mp = menge_preis
-    if abs(mp["aus_menge"]) >= ERKLAERUNG_MIN_EURO or             abs(mp["aus_preis"]) >= ERKLAERUNG_MIN_EURO:
-        if abs(mp["aus_menge"]) > abs(mp["aus_preis"]) * 2:
+    klein = ERKLAERUNG_MIN_EURO
+    if abs(mp["aus_menge"]) >= klein or abs(mp["aus_preis"]) >= klein:
+        if abs(mp["aus_preis"]) < klein:
             saetze.append(
-                f"Bei der Platzmiete liegt es an der **Menge**: "
-                f"{mp['menge_jetzt']} Buchungen gegen {mp['menge_vorher']} "
-                f"im Schnitt. Der Preis je Buchung ist mit "
-                f"{geld(mp['preis_jetzt'])} fast unverändert.")
-        elif abs(mp["aus_preis"]) > abs(mp["aus_menge"]) * 2:
+                f"Die **Zahl der Zahlungen** erklärt es: {mp['menge_jetzt']} "
+                f"gegen {mp['menge_vorher']} im Schnitt, bei nahezu gleichem "
+                f"Betrag je Zahlung ({geld(mp['preis_jetzt'])}).")
+        elif abs(mp["aus_menge"]) < klein:
             saetze.append(
-                f"Bei der Platzmiete liegt es am **Preis je Buchung**: "
-                f"{geld(mp['preis_jetzt'])} gegen "
-                f"{geld(mp['preis_vorher'])}. Die Zahl der Buchungen ist "
-                f"mit {mp['menge_jetzt']} kaum anders.")
+                f"Der **Betrag je Zahlung** erklärt es: "
+                f"{geld(mp['preis_jetzt'])} gegen {geld(mp['preis_vorher'])}, "
+                f"bei nahezu gleicher Zahl von Zahlungen "
+                f"({mp['menge_jetzt']}).")
         else:
+            gegen = mp["aus_menge"] * mp["aus_preis"] < 0
             saetze.append(
-                f"Bei der Platzmiete kommt beides zusammen: "
-                f"{geld(mp['aus_menge'])} aus der Menge, "
-                f"{geld(mp['aus_preis'])} aus dem Preis je Buchung.")
+                f"Zahlungen und Betrag je Zahlung ziehen "
+                f"{'gegeneinander' if gegen else 'in dieselbe Richtung'}: "
+                f"{mp['menge_jetzt']} Zahlungen gegen {mp['menge_vorher']} "
+                f"({geld(mp['aus_menge'])}), je Zahlung "
+                f"{geld(mp['preis_jetzt'])} gegen {geld(mp['preis_vorher'])} "
+                f"({geld(mp['aus_preis'])}).")
+
+    # ── Wellpass erklärt den kleineren Betrag je Zahlung mit ────────────
+    wm = e.get("wellpass_mix") or {}
+    if wm.get("quote_vorher") and abs(
+            wm["quote_jetzt"] - wm["quote_vorher"]) >= 0.03:
+        mehr = wm["quote_jetzt"] > wm["quote_vorher"]
+        saetze.append(
+            f"**Der Wellpass-Anteil {'steigt' if mehr else 'sinkt'}:** auf "
+            f"100 Zahlungen kommen {wm['quote_jetzt'] * 100:.0f} Check-ins, "
+            f"vorher {wm['quote_vorher'] * 100:.0f} ({wm['anzahl_jetzt']} "
+            f"gegen {wm['anzahl_vorher']})."
+            + (" Diese Spieler zahlen bei Playtomic wenig — ihr Geld kommt "
+               "von EGYM. Das drückt den Betrag je Zahlung, ohne dass etwas "
+               "billiger geworden wäre." if mehr else ""))
 
     if abs(kalender["effekt"]) >= ERKLAERUNG_MIN_EURO and kalender["verschoben"]:
         v = kalender["verschoben"][0]
-        wie = "mehr" if v["mehr"] > 0 else "weniger"
+        hilft = "hilft mit" if kalender["effekt"] >= 0 else "arbeitet dagegen"
         saetze.append(
-            f"**Der Kalender hilft mit:** In diesem Fenster liegen "
-            f"{abs(v['mehr']):.1f} {wie} {WOCHENTAGE[v['wochentag']]}e als "
-            f"sonst. Geschätzter Anteil am Unterschied: "
-            f"{geld(kalender['effekt'])} — das ist Rechnerei am Kalender, "
-            f"keine Leistung.".replace(".0 ", " "))
+            f"**Der Kalender {hilft}:** In diesem Fenster liegt "
+            f"{_tage_in_worten(v['mehr'], v['wochentag'])} als sonst. "
+            f"Überschlagen macht das {geld(kalender['effekt'])} aus — Geld, "
+            f"das am Datum hängt und nicht an der Arbeit.")
 
     s = spieler
     if s["neue"] >= 10:
         saetze.append(
             f"**{s['neue']} Spieler** haben in diesem Monat zum ersten Mal "
-            f"gebucht (in den Vergleichsmonaten tauchten sie nicht auf).")
+            f"überhaupt gebucht — vorher stehen sie in keinem Tag des "
+            f"Bestands.")
     if s["buchungen_je_spieler"] and s["buchungen_je_spieler_vorher"]:
         aend = s["buchungen_je_spieler"] / s["buchungen_je_spieler_vorher"] - 1
         if abs(aend) >= 0.1:
@@ -13977,13 +14165,44 @@ def _dash_warum(tag: int):
             st.dataframe(pd.DataFrame(zeilen), use_container_width=True,
                          hide_index=True)
 
+        kap = e.get("kapazitaet") or {}
+        if kap.get("brauchbar"):
+            st.markdown("")
+            st.markdown("**Wodurch? Mehr Hallenzeit oder besser gefüllte "
+                        "Zeit**")
+            k1, k2, k3 = st.columns(3)
+            with k1:
+                kpi("verkaufte Platzstunden", f"{kap['stunden_jetzt']:.0f}"
+                    .replace(".", ","),
+                    f"vorher {kap['stunden_vorher']:.0f}".replace(".", ","))
+            with k2:
+                kpi("Ertrag je Platzstunde", geld(kap["ertrag_jetzt"]),
+                    f"vorher {geld(kap['ertrag_vorher'])}")
+            with k3:
+                kpi("zahlende Köpfe je Buchung",
+                    f"{kap['koepfe_jetzt']:.2f}".replace(".", ","),
+                    f"vorher {kap['koepfe_vorher']:.2f}".replace(".", ","))
+            st.dataframe(pd.DataFrame([
+                {"Woher": "aus mehr Hallenzeit",
+                 "Beitrag": geld(kap["aus_zeit"]),
+                 "Erklärung": "mehr Stunden verkauft, zum alten Ertrag"},
+                {"Woher": "aus besser gefüllter Zeit",
+                 "Beitrag": geld(kap["aus_fuellung"]),
+                 "Erklärung": "dieselbe Stunde bringt mehr ein"},
+            ]), use_container_width=True, hide_index=True)
+            st.caption("Auch diese beiden ergeben zusammen genau den "
+                       "Unterschied von oben. Die zweite Zeile ist die "
+                       "interessante: Mehr Stunden kann man kaufen, besser "
+                       "gefüllte Stunden muss man sich verdienen.")
+
         mp = e["menge_preis"]
         st.caption(
-            f"Platzmiete aufgeteilt: {geld(mp['aus_menge'])} kommen aus der "
-            f"Menge ({mp['menge_jetzt']} Buchungen gegen "
-            f"{mp['menge_vorher']}), {geld(mp['aus_preis'])} aus dem Preis "
-            f"je Buchung ({geld(mp['preis_jetzt'])} gegen "
-            f"{geld(mp['preis_vorher'])}).")
+            f"Zahlungen statt Buchungen: {mp['menge_jetzt']} Zahlungen gegen "
+            f"{mp['menge_vorher']} im Schnitt, {geld(mp['preis_jetzt'])} je "
+            f"Zahlung gegen {geld(mp['preis_vorher'])}. Achtung — eine "
+            f"Zahlung ist nicht ein Platz: Zahlen vier Leute einzeln, sind "
+            f"das vier Zeilen. Ein steigender Wellpass-Anteil drückt den "
+            f"Betrag je Zahlung, ohne dass etwas billiger wurde.")
 
         if e["kalender"]["verschoben"]:
             k = e["kalender"]
