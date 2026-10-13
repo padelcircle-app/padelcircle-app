@@ -1591,6 +1591,30 @@ def einstellung(key: str, standard=None):
     return einstellungen_laden().get(key, standard)
 
 
+def einstellung_an(key: str, standard: bool = True) -> bool:
+    """
+    Ein Ja/Nein-Schalter aus den Einstellungen — robust gelesen.
+
+    Über die App gespeichert steht dort JSON (`false`), und das kommt
+    als echtes False zurück. Wer den Wert aber im Google Sheet von Hand
+    auf „False" oder „Nein" setzt, speichert eine Zeichenkette — und die
+    ist nicht leer, gilt also als wahr. Der Schalter stünde auf aus und
+    die Automatik liefe weiter. Marcel macht seine Blätter auf; damit
+    ist das kein theoretischer Fall.
+    """
+    wert = einstellungen_laden().get(key)
+    if wert is None:
+        return bool(standard)
+    if isinstance(wert, bool):
+        return wert
+    text = str(wert).strip().lower()
+    if text in ("false", "nein", "no", "0", "aus", "off", ""):
+        return False
+    if text in ("true", "ja", "yes", "1", "an", "on"):
+        return True
+    return bool(wert)
+
+
 def fenster_nachhol() -> int:
     """
     Wie viele Tage nach dem Spiel darf ein Check-in noch nachgeholt
@@ -8432,7 +8456,7 @@ def _analysieren(bdf, cdf, pdf=None, zahlungen_index=None) -> bool:
     # Eindeutige Namenszuordnungen gleich mit erledigen — das sind reine
     # Schreibweisen-Unterschiede und müssen dir nicht vorgelegt werden.
     auto = []
-    if einstellung("auto_zuordnung_an", True):
+    if einstellung_an("auto_zuordnung_an"):
         try:
             auto = auto_zuordnungen_uebernehmen()
         except Exception:
@@ -10841,7 +10865,7 @@ def _analysieren_zahlungen(pdf, cdf, bdf=None, tage_ersetzen=None) -> bool:
     # sie gar nicht erst als offene Fälle in der Tagesarbeit. Alles darunter
     # bleibt bei dir.
     uebernommen = []
-    if einstellung("auto_zuordnung_an", True):
+    if einstellung_an("auto_zuordnung_an"):
         uebernommen = auto_zuordnungen_uebernehmen(
             sorted({b["analysis_date"] for b in buchungen_out}))
         if uebernommen:
@@ -10857,7 +10881,7 @@ def _analysieren_zahlungen(pdf, cdf, bdf=None, tage_ersetzen=None) -> bool:
     # natürlich erst machen, nachdem du erstmal den Check-in-Vergleich für
     # gestern gemacht hast."
     nachgeholt = []
-    if einstellung("auto_nachholung_an", True):
+    if einstellung_an("auto_nachholung_an"):
         nachgeholt = auto_nachholungen_uebernehmen()
         if nachgeholt:
             st.caption(f"{len(nachgeholt)} nachgeholte "
@@ -12039,6 +12063,40 @@ def austausch_art(name: str, kopf: bytes) -> str:
     return ""
 
 
+def austausch_tage(inhalt: bytes) -> set:
+    """
+    Welche Spieltage stecken in der Datei? → {"2026-09-16", …}
+
+    Dieselbe Erkennung wie `austausch_zeitraum`, nur ohne die
+    Beschriftung drumherum: Der automatische Abgleich muss wissen, OB
+    ein fehlender Tag in der Datei steht, nicht wie man ihn schreibt.
+    """
+    text = inhalt.decode("utf-8-sig", "replace")
+    zeilen = text.splitlines()
+    spalten_je_art = {";": ("Service date", "Datum"), ",": ("booking_start_date",)}
+    for i, zeile in enumerate(zeilen[:40]):
+        for trenner, namen in spalten_je_art.items():
+            kopf = [s.strip() for s in zeile.split(trenner)]
+            sp = next((kopf.index(n) for n in namen if n in kopf), None)
+            if sp is None:
+                continue
+            tage = set()
+            for z in zeilen[i + 1:]:
+                felder = z.split(trenner)
+                if len(felder) <= sp:
+                    continue
+                wert = felder[sp].strip()
+                m = re.match(r"(\d{2})/(\d{2})/(\d{4})", wert)
+                if m:
+                    tage.add(f"{m.group(3)}-{m.group(2)}-{m.group(1)}")
+                    continue
+                m = re.match(r"(\d{4})-(\d{2})-(\d{2})", wert)
+                if m:
+                    tage.add(m.group(0))
+            return tage
+    return set()
+
+
 def austausch_zeitraum(inhalt: bytes) -> str:
     """
     Welche Spieltage stecken in der Datei? → „16.09.–17.09." oder ""
@@ -12308,6 +12366,75 @@ def austausch_status() -> dict:
                              "gemeldet — er schläft wahrscheinlich. Aufträge "
                              "holt er erst, wenn er wieder wach ist.")
     return stand
+
+
+def abgleich_automatisch() -> dict:
+    """
+    Fehlt ein Tag im Bestand und liegt er im Austausch-Ordner, wird er
+    beim Öffnen der App von selbst abgeglichen.
+
+    → {"tage": [...], "grund": "…"}  — `tage` leer heisst: nichts getan
+
+    Der Mac holt die Daten seit Fassung 104 morgens von selbst. Getragen
+    wurden sie damit aber nur bis in den Ordner; ins Sheet kamen sie erst
+    beim Klick auf „Abgleichen". Marcel am 13.10.2026: „Da steht, dass um
+    5:50 meine Dateien bearbeitet wurden. Aber der Abgleich wurde nicht
+    gemacht — du hast den Wellpass-Abgleich vergessen, oder?" Stimmt.
+
+    Zwei Sicherungen gegen unnötige Arbeit und gegen Schleifen:
+
+      • Gefragt wird ZUERST der Bestand, nicht Google Drive. Fehlt kein
+        Tag, wird der Ordner gar nicht erst gelesen — der Normalfall
+        kostet damit nichts.
+      • Ein Versuch pro Sitzung. Geht etwas schief, bleibt es beim
+        Hinweis; die App versucht es nicht im nächsten Bildaufbau wieder.
+    """
+    leer = {"tage": [], "grund": ""}
+    if not einstellung_an("auto_abgleich_an"):
+        return leer
+    if st.session_state.get("_auto_abgleich_versucht"):
+        return leer
+
+    fehlend = set(fehlende_tage_bis_gestern())
+    if not fehlend:
+        return leer
+
+    st.session_state["_auto_abgleich_versucht"] = True
+    gefunden = austausch_holen()
+    if gefunden.get("_fehler") or not gefunden:
+        return {"tage": [], "grund": gefunden.get("_fehler", "")}
+
+    z, c = gefunden.get("zahlungen"), gefunden.get("checkins")
+    if not (z and c):
+        return {"tage": [], "grund": "Zahlungen oder Check-ins fehlen im Ordner."}
+
+    # Deckt der Ordner überhaupt einen der fehlenden Tage? Sonst lägen
+    # dort noch die Dateien von vorgestern, und der Abgleich schriebe
+    # dieselben Tage ein zweites Mal.
+    im_ordner = austausch_tage(z["inhalt"]) | austausch_tage(c["inhalt"])
+    treffer = sorted(fehlend & im_ordner)
+    if not treffer:
+        return {"tage": [], "grund": "Im Ordner liegt keiner der fehlenden Tage."}
+
+    # Die Spielerliste zuerst — wie beim Knopf. Ohne sie fehlt an einem
+    # frischen Fall die Telefonnummer, also genau dort, wo gleich eine
+    # WhatsApp hingehen soll.
+    k = gefunden.get("kunden")
+    if k:
+        try:
+            kundenliste_uebernehmen(io.BytesIO(k["inhalt"]))
+        except Exception:                           # noqa: BLE001
+            pass                                    # nicht der Rede wert
+    b = gefunden.get("buchungen")
+    o = gefunden.get("offen")
+    erfolg = _verarbeiten_zahlungen(
+        io.BytesIO(z["inhalt"]), io.BytesIO(c["inhalt"]),
+        io.BytesIO(o["inhalt"]) if o else None,
+        io.BytesIO(b["inhalt"]) if b else None)
+    if not erfolg:
+        return {"tage": [], "grund": "Der Abgleich ist nicht durchgelaufen."}
+    st.session_state.pop("drive_dateien", None)
+    return {"tage": treffer, "grund": ""}
 
 
 def fehlende_tage_bis_gestern() -> list:
@@ -15438,7 +15565,7 @@ def _wa_auto_block(tage: list):
     Sitzung vermerkt. Selbst wenn eine Zuordnung wider Erwarten nicht
     greift, wird sie kein zweites Mal geschrieben.
     """
-    if not einstellung("auto_zuordnung_an", True):
+    if not einstellung_an("auto_zuordnung_an"):
         return
 
     schon = st.session_state.setdefault("_auto_erledigt", set())
@@ -18886,7 +19013,7 @@ def modul_einstellungen():
                    "Nachholungen an Folgetagen bleiben immer bei dir.")
 
         an = st.toggle("Automatisch vorschlagen",
-                       value=bool(einstellung("auto_zuordnung_an", True)),
+                       value=einstellung_an("auto_zuordnung_an"),
                        key="auto_an")
 
         wert = st.slider(
@@ -18897,10 +19024,21 @@ def modul_einstellungen():
                  f"{AUTO_ABSTAND:.0f} Punkte Vorsprung zum zweitbesten haben.")
 
         st.markdown("")
+        abg_an = st.checkbox(
+            "Neue Tage beim Öffnen der App selbst abgleichen",
+            value=einstellung_an("auto_abgleich_an"),
+            key="auto_abgleich_an_box")
+        st.caption(
+            "Der Mac holt die Daten morgens von selbst. Fehlt beim Öffnen "
+            "ein Tag im Bestand und liegt er im Austausch-Ordner, wird er "
+            "gleich eingearbeitet — ohne Klick auf „Abgleichen“. Fehlt "
+            "nichts, wird Google Drive gar nicht erst gefragt.")
+
+        st.markdown("")
         # Die zweite, strengere Automatik: Sie schliesst Fälle.
         nach_an = st.checkbox(
             "Nachgeholte Check-ins beim Abgleich selbst zuordnen",
-            value=bool(einstellung("auto_nachholung_an", True)),
+            value=einstellung_an("auto_nachholung_an"),
             key="auto_nachhol_an")
         st.caption(
             "Checkt jemand nach dem Spieltag nach, wird der offene Fall "
@@ -18921,6 +19059,7 @@ def modul_einstellungen():
         if st.button("Speichern", type="primary", key="auto_speichern"):
             einstellung_setzen("auto_zuordnung_an", bool(an))
             einstellung_setzen("auto_schwelle", float(wert))
+            einstellung_setzen("auto_abgleich_an", bool(abg_an))
             einstellung_setzen("auto_nachholung_an", bool(nach_an))
             einstellung_setzen("auto_nachhol_schwelle", float(nach_wert))
             # Sitzungssperre lösen, damit die neue Schwelle sofort greift
@@ -20039,6 +20178,37 @@ def main():
             st.caption(f"Zuletzt gespeichert · {letztes['was']} · "
                        + f"{letztes['dauer']:.2f} s".replace(".", ",")
                        + f" · {letztes['anfragen']} Anfragen")
+
+    # ── Was der Mac morgens geholt hat, gleich einarbeiten ──────────────
+    #
+    # Der zweite Halbschritt zur Automatik: Holen tut der Mac seit
+    # Fassung 104 von selbst, ins Sheet kam es bisher erst auf Klick.
+    # Fehlt kein Tag, kostet das hier nichts — dann wird Google Drive
+    # gar nicht erst gefragt.
+    if not st.session_state.get("_auto_abgleich_versucht"):
+        try:
+            with st.spinner("Neue Tage werden eingearbeitet …"):
+                _auto = abgleich_automatisch()
+        except Exception as e:                      # noqa: BLE001
+            _auto = {"tage": [], "grund": f"{type(e).__name__}: {str(e)[:200]}"}
+        if _auto["tage"]:
+            st.session_state["_auto_abgleich_ergebnis"] = _auto["tage"]
+            st.rerun()
+        elif _auto["grund"]:
+            st.session_state["_auto_abgleich_grund"] = _auto["grund"]
+
+    fertig = st.session_state.pop("_auto_abgleich_ergebnis", None)
+    if fertig:
+        box("✅ <b>" + ("Ein neuer Tag" if len(fertig) == 1
+                       else f"{len(fertig)} neue Tage")
+            + "</b> wurden beim Öffnen von selbst abgeglichen: "
+            + ", ".join(datum_kurz(t) for t in fertig)
+            + ". Der Mac hatte sie heute früh geholt.", "ok")
+    grund = st.session_state.pop("_auto_abgleich_grund", None)
+    if grund:
+        box(f"⚠️ Es fehlen Tage im Bestand, der automatische Abgleich kam "
+            f"aber nicht durch: {grund} Unter „Daten“ kannst du ihn von "
+            "Hand anstossen.", "warn")
 
     # ── Inhalt ──────────────────────────────────────────────────────────
     if aktiv is None:
