@@ -27,6 +27,7 @@ import random
 import re
 import unicodedata
 import itertools
+import contextlib
 import secrets
 import json
 import hashlib
@@ -4732,6 +4733,17 @@ def als_behoben_markieren(name_norm: str, datum: str,
     mal nur der normale Spieleranteil. Bleibt er leer, gilt der
     Standardwert des Grundes.
     """
+    # Der Schlüssel entsteht aus diesem Namen — also wird hier
+    # vereinheitlicht, statt sich auf jeden Aufrufer zu verlassen.
+    #
+    # `normalize_name` ist idempotent: Ein bereits normalisierter Name
+    # kommt unverändert heraus, gespeicherte Schlüssel ändern sich also
+    # nicht. Ein Aufrufer, der versehentlich den Anzeigenamen übergibt,
+    # schreibt dagegen einen Schlüssel, den später niemand wiederfindet
+    # — der Fall gilt als geschlossen und steht trotzdem offen da
+    # (am 13.10.2026 in der neuen Nachhol-Automatik passiert).
+    name_norm = normalize_name(str(name_norm))
+
     # Wird ein Fall mit einem anderen Grund geschlossen, war eine zuvor
     # gesetzte Nachholung falsch — der Check-in gehört dann wieder frei.
     geloest = False
@@ -10836,6 +10848,24 @@ def _analysieren_zahlungen(pdf, cdf, bdf=None, tage_ersetzen=None) -> bool:
             st.caption(f"{len(uebernommen)} eindeutige Schreibweisen ab "
                        f"{auto_schwelle():.0f} % übernommen.")
 
+    # Und JETZT, nachdem der Abgleich gelaufen ist und feststeht, welche
+    # Fälle offen sind: die eindeutigen Nachholungen schliessen.
+    #
+    # Die Reihenfolge ist keine Kleinigkeit. Vorher wüsste niemand, welche
+    # Fälle überfällig sind, und welche Check-ins von heute noch an ihrem
+    # eigenen Tag gebraucht werden. Marcel am 13.10.2026: „Das kannst du
+    # natürlich erst machen, nachdem du erstmal den Check-in-Vergleich für
+    # gestern gemacht hast."
+    nachgeholt = []
+    if einstellung("auto_nachholung_an", True):
+        nachgeholt = auto_nachholungen_uebernehmen()
+        if nachgeholt:
+            st.caption(f"{len(nachgeholt)} nachgeholte "
+                       + ("Check-in" if len(nachgeholt) == 1 else "Check-ins")
+                       + f" ab {auto_nachhol_schwelle():.0f} % eindeutig "
+                       "zugeordnet — die Fälle sind geschlossen.")
+    st.session_state["_auto_nachholungen"] = nachgeholt
+
     # Voll bezahlte Check-ins bleiben in der Liste stehen, mit der
     # Erklärung daneben — Marcel prüft sie dort selbst. Was Fassung 39
     # kurzzeitig von selbst als Geschenk abgelegt hat, kommt zurück.
@@ -10861,6 +10891,21 @@ def _analysieren_zahlungen(pdf, cdf, bdf=None, tage_ersetzen=None) -> bool:
         f"{mit} mit Check-in · **{offen} ohne** · "
         f"{ohne_anspruch} Check-ins ohne Anspruch "
         f"({neu_b} neue Buchungszeilen, {neu_c} neue Check-in-Zeilen)")
+
+    if nachgeholt:
+        zeilen = "<br>".join(
+            f"• <b>{k['fall_name']}</b> · Fall vom "
+            f"{datum_kurz(k['fall_datum'])} — Check-in vom "
+            f"{datum_kurz(k['checkin_datum'])}, "
+            f"{k['tage_danach']} " + ("Tag" if k["tage_danach"] == 1 else "Tage")
+            + f" später · {k['score']:.0f} %"
+            for k in nachgeholt)
+        box(f"🔄 <b>{len(nachgeholt)} nachgeholte Check-ins automatisch "
+            "zugeordnet.</b> Die Fälle sind geschlossen, die Check-ins "
+            f"verbraucht.<br><br>{zeilen}", "ok")
+        st.caption("Zurücknehmen: beim Fall unter „Erledigt“ → die "
+                   "Nachholung auflösen. Abschalten unter Einstellungen → "
+                   "Automatische Zuordnung.")
     return True
 
 
@@ -15272,6 +15317,119 @@ def auto_zuordnungen_uebernehmen(tage: list = None,
     return kandidaten
 
 
+# ── Nachholungen von selbst schliessen ──────────────────────────────────────
+#
+# Marcel am 13.10.2026: „Wenn du wirklich 100 % zuordnen kannst, hey, das
+# war der Check-in von gestern, dann mach das direkt beim Abgleich. Aber
+# wichtig: nicht vergessen, den überfälligen Check-in wegzumachen und den
+# Fall zu schliessen. Und wirklich nur für die offenen Fälle — nicht,
+# dass du dann siehst, ah, der hat ja heute auch gespielt."
+#
+# Das ist ein anderer Vorgang als die Schreibweisen-Automatik darüber:
+# Dort liegt der Check-in am Spieltag selbst vor, es ändert sich kein
+# Geld. Hier wird ein Anspruch GESCHLOSSEN. Deshalb strenger:
+#
+#   1. Nur offene Fälle. Was Marcel als „Bezahlt" oder „Gesperrt"
+#      abgehakt hat, wird nicht angefasst.
+#   2. Ab 95 % Namensübereinstimmung.
+#   3. Der Check-in darf an SEINEM eigenen Tag nicht gebraucht werden —
+#      genau Marcels Einwand. Das prüfen `nachhol_kandidaten` und
+#      `nachholung_speichern` unabhängig voneinander.
+#   4. Eindeutig in BEIDE Richtungen: ein Fall darf nicht zwei Check-ins
+#      zur Auswahl haben, und ein Check-in nicht von zwei Fällen
+#      beansprucht werden. Sonst wäre die Entscheidung Zufall.
+#   5. Geschrieben wird über `nachholung_speichern()` — dieselbe Stelle
+#      wie Marcels Knopf. Damit kann nichts vergessen werden: Der
+#      Check-in gilt als verbraucht, der Fall wird als „nachgeholt"
+#      abgehakt, die Zwischenspeicher werden geleert.
+
+AUTO_NACHHOL_SCHWELLE = 95.0
+AUTO_NACHHOL_ABSTAND = 5.0     # Vorsprung zum zweitbesten Check-in
+
+
+def auto_nachhol_schwelle() -> float:
+    return max(AUTO_NACHHOL_SCHWELLE,
+               float(einstellung("auto_nachhol_schwelle",
+                                 AUTO_NACHHOL_SCHWELLE)))
+
+
+def auto_nachhol_kandidaten(schwelle: float = None) -> list:
+    """
+    Offene Fälle, für die genau EIN nachgeholter Check-in in Frage kommt.
+
+    → [{fall_datum, fall_name, fall_norm, checkin_datum, checkin_name,
+        checkin_norm, score, tage_danach}, …]
+    """
+    schwelle = auto_nachhol_schwelle() if schwelle is None else float(schwelle)
+    tage = verfuegbare_tage()
+    if not tage:
+        return []
+    offen = alle_offenen_fehler(tage)
+    if offen.empty or "Name" not in offen.columns:
+        return []
+
+    roh = []
+    for _, r in offen.iterrows():
+        name, nn = str(r["Name"]), str(r["Name_norm"])
+        fall_datum = str(r["Datum"])
+        # Nur echte Nachholungen: der Check-in liegt NACH dem Spieltag.
+        # Alles am Tag selbst ist eine Schreibweise und gehört in die
+        # andere Automatik.
+        kand = [k for k in nachhol_kandidaten(name, fall_datum)
+                if k[4] > 0 and k[3] >= schwelle]
+        if not kand:
+            continue
+        # Zwei Check-ins fast gleich gut → das ist keine Eindeutigkeit.
+        if len(kand) > 1 and kand[0][3] - kand[1][3] < AUTO_NACHHOL_ABSTAND:
+            continue
+        anzeige, ci_norm, ci_datum, score, tage_danach = kand[0]
+        roh.append({"fall_datum": fall_datum, "fall_name": name,
+                    "fall_norm": nn, "checkin_datum": ci_datum,
+                    "checkin_name": anzeige, "checkin_norm": ci_norm,
+                    "score": score, "tage_danach": tage_danach})
+
+    # Rückrichtung: Beansprucht ein Check-in mehrere Fälle, bleibt er
+    # liegen. Felix Pischel spielte am 12.07. zweimal mit Rabatt und
+    # checkte am 21.07. einmal nach — EGYM zahlt einmal, also kann nur
+    # einer der beiden Fälle gemeint sein. Welcher, entscheidet Marcel.
+    zaehler = {}
+    for k in roh:
+        ck = checkin_schluessel(k["checkin_datum"], k["checkin_norm"])
+        zaehler[ck] = zaehler.get(ck, 0) + 1
+    return [k for k in roh
+            if zaehler[checkin_schluessel(k["checkin_datum"],
+                                          k["checkin_norm"])] == 1]
+
+
+def auto_nachholungen_uebernehmen(schwelle: float = None) -> list:
+    """
+    Die eindeutigen Nachholungen tatsächlich schliessen.
+
+    → die Fälle, die wirklich geschlossen wurden
+    """
+    kandidaten = auto_nachhol_kandidaten(schwelle)
+    if not kandidaten:
+        return []
+    geschafft = []
+    for k in kandidaten:
+        # Geschrieben wird über denselben Weg wie Marcels Knopf. Lehnt
+        # der ab — Check-in inzwischen vergeben, am eigenen Tag
+        # gebraucht —, bleibt der Fall offen. Das ist der gewollte
+        # Ausgang, kein Fehler.
+        # Der Fall-Name muss NORMALISIERT übergeben werden, so wie bei
+        # jedem anderen Aufrufer. Mit dem Anzeigenamen entstand der
+        # Schlüssel „Mustafa Durdu_2026-10-08", gesucht wird aber mit
+        # „mustafa durdu_2026-10-08": Die Zuordnung stand im Blatt, die
+        # Vergütung war verbucht — und der Fall stand weiter als offen
+        # da. Genau der Fehler, den Marcel am 13.10.2026 befürchtet hat.
+        if nachholung_speichern(k["checkin_datum"], k["checkin_name"],
+                                k["fall_datum"], k["fall_norm"], leise=True):
+            geschafft.append(k)
+    if geschafft:
+        cache_leeren()
+    return geschafft
+
+
 def _wa_auto_block(tage: list):
     """
     Eindeutige Zuordnungen selbst erledigen — ohne Rückfrage.
@@ -17833,7 +17991,8 @@ def ist_geschenk(name_norm: str, datum: str, geschenke: dict = None) -> bool:
 
 
 def nachholung_speichern(checkin_datum: str, checkin_name: str,
-                         fall_datum: str, fall_name: str) -> bool:
+                         fall_datum: str, fall_name: str,
+                         leise: bool = False) -> bool:
     """
     Einen Check-in als Nachholung für einen älteren Fall festhalten.
 
@@ -17856,9 +18015,10 @@ def nachholung_speichern(checkin_datum: str, checkin_name: str,
     # eincheckt, hat damit nicht den 27. abgedeckt.
     ci_d, fa_d = parse_date_safe(checkin_datum), parse_date_safe(fall_datum)
     if ci_d and fa_d and ci_d < fa_d:
-        st.error(f"❌ Der Check-in vom {datum_kurz(checkin_datum)} liegt vor "
-                 f"dem Spieltag {datum_kurz(fall_datum)} — nachgeholt wird "
-                 "nach dem Spiel, nicht davor.")
+        if not leise:
+            st.error(f"❌ Der Check-in vom {datum_kurz(checkin_datum)} liegt "
+                     f"vor dem Spieltag {datum_kurz(fall_datum)} — nachgeholt "
+                     "wird nach dem Spiel, nicht davor.")
         return False
 
     # Der Check-in wird an seinem eigenen Tag gebraucht: Die Person hat
@@ -17872,6 +18032,8 @@ def nachholung_speichern(checkin_datum: str, checkin_name: str,
         eigene = eigener_anspruch(normalize_name(checkin_name),
                                   str(checkin_datum))
         if eigene > 0:
+            if leise:
+                return False
             st.error(
                 f"❌ Dieser Check-in vom {datum_kurz(checkin_datum)} wird an "
                 "seinem eigenen Tag gebraucht: Die Person hat dort selbst eine "
@@ -17888,11 +18050,12 @@ def nachholung_speichern(checkin_datum: str, checkin_name: str,
 
     schon_vergeben = verbrauchte_checkins().get(ck)
     if schon_vergeben and schon_vergeben != fk:
-        alt_datum = schon_vergeben.split("|")[0]
-        st.error(f"❌ Dieser Check-in vom {datum_kurz(checkin_datum)} ist "
-                 f"bereits dem Fall vom {datum_kurz(alt_datum)} zugeordnet. "
-                 "Ein Check-in kann nur einen Fall schliessen — EGYM zahlt "
-                 "pro Person und Tag nur einmal.")
+        if not leise:
+            alt_datum = schon_vergeben.split("|")[0]
+            st.error(f"❌ Dieser Check-in vom {datum_kurz(checkin_datum)} ist "
+                     f"bereits dem Fall vom {datum_kurz(alt_datum)} "
+                     "zugeordnet. Ein Check-in kann nur einen Fall "
+                     "schliessen — EGYM zahlt pro Person und Tag nur einmal.")
         return False
 
     neu = {
@@ -17907,7 +18070,8 @@ def nachholung_speichern(checkin_datum: str, checkin_name: str,
     # Zwei Schreibvorgänge bei Google dauern ein paar Sekunden. Ohne
     # Anzeige sieht das aus, als hätte der Klick nichts bewirkt.
     _t_schreiben = time.time()
-    with st.spinner("Wird gespeichert …"):
+    with (contextlib.nullcontext() if leise
+          else st.spinner("Wird gespeichert …")):
         # Alte, ungültige Zuordnungen desselben Falls gehen mit raus. Sie
         # schliessen nichts mehr, stünden aber weiter unter „Zuordnungen,
         # die vermutlich nicht stimmen" — und deren „Zurücknehmen" löst
@@ -18732,9 +18896,33 @@ def modul_einstellungen():
             help="Zusätzlich muss der beste Vorschlag mindestens "
                  f"{AUTO_ABSTAND:.0f} Punkte Vorsprung zum zweitbesten haben.")
 
+        st.markdown("")
+        # Die zweite, strengere Automatik: Sie schliesst Fälle.
+        nach_an = st.checkbox(
+            "Nachgeholte Check-ins beim Abgleich selbst zuordnen",
+            value=bool(einstellung("auto_nachholung_an", True)),
+            key="auto_nachhol_an")
+        st.caption(
+            "Checkt jemand nach dem Spieltag nach, wird der offene Fall "
+            f"beim Abgleich geschlossen — aber nur ab {AUTO_NACHHOL_SCHWELLE:.0f} % "
+            "Namensübereinstimmung, nur wenn der Check-in an seinem eigenen "
+            "Tag nicht gebraucht wird, und nur wenn er zu genau einem "
+            "offenen Fall passt. Alles andere bleibt bei dir.")
+        nach_wert = st.slider(
+            "Ab welcher Sicherheit? (Nachholungen)",
+            min_value=int(AUTO_NACHHOL_SCHWELLE), max_value=100,
+            value=int(auto_nachhol_schwelle()), step=1,
+            key="auto_nachhol_regler",
+            help=f"Zusätzlich braucht der beste Check-in "
+                 f"{AUTO_NACHHOL_ABSTAND:.0f} Punkte Vorsprung zum "
+                 "zweitbesten, und er darf von keinem zweiten offenen Fall "
+                 "beansprucht werden.")
+
         if st.button("Speichern", type="primary", key="auto_speichern"):
             einstellung_setzen("auto_zuordnung_an", bool(an))
             einstellung_setzen("auto_schwelle", float(wert))
+            einstellung_setzen("auto_nachholung_an", bool(nach_an))
+            einstellung_setzen("auto_nachhol_schwelle", float(nach_wert))
             # Sitzungssperre lösen, damit die neue Schwelle sofort greift
             st.session_state["_auto_erledigt"] = set()
             st.session_state["_auto_protokoll"] = []
