@@ -188,14 +188,33 @@ CONFIG = {
     # Familie und Team checken ein, EGYM vergütet — es gibt nur nichts
     # zuzuordnen. In der Zuordnungsansicht stehen sie deshalb als
     # eigene kleine Tabelle statt zwischen den echten offenen Fällen.
+    # Hier stehen auch die VIPs: Wer hier steht, erzeugt NIE einen
+    # offenen Fall und bekommt keine Reminder — egal, was die
+    # Preisrechnung sagt. Anders als bei „immer_gruen" bleibt er aber
+    # ein Kunde: Umsatz, Rhythmus und Circle Points zählen weiter.
+    #
+    # Getroffen wird exakt der Name, nichts Ähnliches. Zu Hans-Peter
+    # Brugger gibt es bei Playtomic noch Noah, Paul, Jonas und Birgit
+    # Brugger — die sind gewöhnliche Kunden und bleiben es.
     "geschenk_checkins": [
         "Marcel Sidorov",
         "Ludmila Sidorov",
         "Angelika Sidorov",
         "Mattia Niklas Mauta",
         "Mattia Mauta",
+        # VIP, Playtomic-Konto 8189305. Bucht anteilig oder den ganzen
+        # Platz auf seinen Status; seit Juli 22 Zahlungen, meist ganze
+        # Plätze zu 54 €, am 09. und 10.10. zu 0 €. „Hans-Peter" und
+        # „Hans Peter" sind nach dem Vereinheitlichen dasselbe,
+        # „Hanspeter" nicht — deshalb steht es daneben.
+        "Hans-Peter Brugger",
+        "Hanspeter Brugger",
     ],
 
+    # Team und eigene Dauergäste: zählen NICHT als Kunde. Wer hier steht,
+    # fällt aus Rhythmus, Circle Points, Buchungsgruppen und
+    # Wellpass-Vergleich heraus — richtig für Mitarbeiter, falsch für
+    # einen zahlenden Stammgast.
     "immer_gruen": [
         "Marcel Sidorov",
         "Mattia Mauta",
