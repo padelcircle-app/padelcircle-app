@@ -354,7 +354,12 @@ def wellpass_wert_summe(datumsliste) -> float:
 # Steht unten in der Seitenleiste. Damit lässt sich auf einen Blick
 # sehen, welche Fassung gerade läuft — bei „stimmt immer noch nicht"
 # ist das die erste Frage.
-APP_STAND       = "Fassung 101 · 08.10.2026"
+# Was unten in der Seitenleiste steht. MUSS bei jeder Fassung mit
+# hochgezogen werden — sonst sieht Marcel nicht, welcher Stand bei ihm
+# läuft, und genau das war am 14.10.2026 die offene Frage: Die Anzeige
+# stand acht Fassungen lang auf „101". `tests/test_23_stand.py` lässt
+# die Gegenprobe scheitern, wenn sie hinterherhinkt.
+APP_STAND       = "Fassung 110 · 14.10.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -12453,6 +12458,16 @@ def abgleich_automatisch() -> dict:
     if not erfolg:
         return {"tage": [], "grund": "Der Abgleich ist nicht durchgelaufen."}
     st.session_state.pop("drive_dateien", None)
+    # Eine Spur, die den Seitenaufbau überlebt. Ohne sie liess sich
+    # hinterher nicht mehr sagen, ob der automatische Abgleich gelaufen
+    # ist — der Erfolgskasten steht nur einmal da, und wer ihn
+    # wegklickt, sieht nie wieder etwas davon.
+    try:
+        einstellung_setzen("auto_abgleich_zuletzt", {
+            "zeit": datetime.now().isoformat(timespec="seconds"),
+            "tage": treffer})
+    except Exception:                               # noqa: BLE001
+        pass
     return {"tage": treffer, "grund": ""}
 
 
@@ -12620,6 +12635,20 @@ def modul_daten():
             if stand.get("zustand") == "anmeldung_noetig":
                 st.caption("Im Terminal einmal: "
                            "`python3 robot/hol_programm.py anmelden`")
+
+        # Lief der automatische Abgleich — und wann zuletzt?
+        letzt = einstellung("auto_abgleich_zuletzt")
+        if isinstance(letzt, dict) and letzt.get("zeit"):
+            wann = parse_datetime_safe(letzt["zeit"])
+            tage = ", ".join(datum_kurz(t) for t in (letzt.get("tage") or []))
+            st.caption(
+                "🤖 Automatischer Abgleich zuletzt "
+                + (f"{wann:%d.%m. um %H:%M}" if wann else str(letzt["zeit"]))
+                + (f" · {tage}" if tage else "")
+                + f" · diese Fassung: {APP_STAND}")
+        else:
+            st.caption("🤖 Der automatische Abgleich hat auf diesem Stand "
+                       f"noch nie gelaufen · diese Fassung: {APP_STAND}")
         if st.session_state.get("drive_fehler"):
             box("Der Auftrag kam nicht beim Mac an: "
                 f"{st.session_state['drive_fehler']}", "err")
