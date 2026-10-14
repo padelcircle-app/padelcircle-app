@@ -359,7 +359,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # läuft, und genau das war am 14.10.2026 die offene Frage: Die Anzeige
 # stand acht Fassungen lang auf „101". `tests/test_23_stand.py` lässt
 # die Gegenprobe scheitern, wenn sie hinterherhinkt.
-APP_STAND       = "Fassung 110 · 14.10.2026"
+APP_STAND       = "Fassung 111 · 14.10.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -4473,7 +4473,8 @@ def gesperrte_ziele(ci_norm: str, ci_datum: str) -> pd.DataFrame:
 
 
 def sperre_nachholung_zuordnen(name_norm: str, name: str, fall_datum: str,
-                               checkin_datum: str, checkin_name: str) -> bool:
+                               checkin_datum: str, checkin_name: str,
+                               leise: bool = False) -> bool:
     """
     Einen nachgeholten Check-in einer bestehenden Sperre zuordnen.
 
@@ -4486,7 +4487,7 @@ def sperre_nachholung_zuordnen(name_norm: str, name: str, fall_datum: str,
     """
     vorher = len(gesperrt_faelle(name_norm))
     if not nachholung_speichern(checkin_datum, checkin_name,
-                                fall_datum, name_norm):
+                                fall_datum, name_norm, leise=leise):
         return False
 
     # nachholung_speichern hat "corrections" bereits geleert — die Zahl
@@ -10914,6 +10915,14 @@ def _analysieren_zahlungen(pdf, cdf, bdf=None, tage_ersetzen=None) -> bool:
                        "zugeordnet — die Fälle sind geschlossen.")
     st.session_state["_auto_nachholungen"] = nachgeholt
 
+    # Und erst danach die Gesperrten — der Reihe nach, damit ein offener
+    # Fall immer Vorrang vor einer Sperre hat. Jede Auflösung erzeugt
+    # eine Freigabe-Aufgabe; entsperrt bei EGYM wird von Hand.
+    entsperrt = []
+    if einstellung_an("auto_sperren_an"):
+        entsperrt = auto_sperren_uebernehmen()
+    st.session_state["_auto_entsperrt"] = entsperrt
+
     # Voll bezahlte Check-ins bleiben in der Liste stehen, mit der
     # Erklärung daneben — Marcel prüft sie dort selbst. Was Fassung 39
     # kurzzeitig von selbst als Geschenk abgelegt hat, kommt zurück.
@@ -10954,6 +10963,20 @@ def _analysieren_zahlungen(pdf, cdf, bdf=None, tage_ersetzen=None) -> bool:
         st.caption("Zurücknehmen: beim Fall unter „Erledigt“ → die "
                    "Nachholung auflösen. Abschalten unter Einstellungen → "
                    "Automatische Zuordnung.")
+
+    if entsperrt:
+        zeilen = "<br>".join(
+            f"• <b>{k['name']}</b> · Sperre vom {datum_kurz(k['fall_datum'])} "
+            f"— Check-in vom {datum_kurz(k['checkin_datum'])}, an dem Tag "
+            "keine Buchung"
+            for k in entsperrt)
+        box(f"🔓 <b>{len(entsperrt)} "
+            + ("Sperre" if len(entsperrt) == 1 else "Sperren")
+            + " durch nachgeholte Check-ins aufgelöst.</b><br><br>"
+            + zeilen
+            + "<br><br><b>In Playtomic ist noch nichts passiert.</b> Die "
+            "Freigabe steht oben im WhatsApp-Modul — dort abhaken, "
+            "sobald der Wellpass-Zugang wieder offen ist.", "warn")
     return True
 
 
@@ -15605,6 +15628,129 @@ def auto_nachholungen_uebernehmen(schwelle: float = None) -> list:
     return geschafft
 
 
+# ── Gesperrte: auflösen ja, aber nur mit Beleg auf dem Tisch ────────────────
+#
+# Marcel am 14.10.2026: „Bei den Gesperrten auf jeden Fall nicht einfach
+# zuordnen, weil ich sonst nicht sehe, wen du entsperrt hast. Du kannst
+# es machen, aber dann musst du mir, bevor ich die Leute anschreibe, ein
+# Dashboard geben: Guck mal, die habe ich entsperrt, weil die sich
+# gestern eingecheckt haben und keine Buchung hatten. Dann kann ich die
+# in Playtomic manuell entsperren."
+#
+# Der Punkt ist nicht die Zuordnung, sondern die Folge: Den Wellpass-
+# Zugang öffnet die App nicht, das macht Marcel bei EGYM von Hand. Eine
+# stillschweigend aufgelöste Sperre wäre ein Mensch, der in der App frei
+# ist und draussen weiter vor verschlossener Tür steht.
+#
+# Deshalb strenger als bei offenen Fällen:
+#
+#   1. Nur bei EXAKT gleichem Namen. Keine Ähnlichkeit, kein Fuzzy —
+#      eine Sperre trifft einen Menschen.
+#   2. Genau EINE offene Sperre. Hat jemand zwei, entscheidet Marcel,
+#      welcher Tag gemeint ist.
+#   3. Hat die Person ausserdem einen OFFENEN Fall, der durch denselben
+#      Check-in erklärt werden könnte, bleibt alles liegen. Dann ist
+#      nicht entschieden, wofür der Check-in zählt.
+#   4. Der Check-in darf an seinem eigenen Tag nicht gebraucht werden —
+#      prüft `gesperrte_ziele` selbst.
+#   5. Jede Auflösung erzeugt über `sperre_nachholung_zuordnen` eine
+#      Freigabe-Aufgabe. Die steht oben im WhatsApp-Modul, bevor
+#      irgendwer angeschrieben wird.
+
+
+def auto_sperren_kandidaten() -> list:
+    """
+    Gesperrte Fälle, die ein nachgeholter Check-in eindeutig auflöst.
+
+    → [{name, name_norm, fall_datum, checkin_datum, checkin_name}, …]
+    """
+    fenster = max(fenster_nachhol(),
+                  int(einstellung("sperre_nachhol_fenster_tage",
+                                  CONFIG["sperre_nachhol_fenster_tage"])))
+    heute = date.today()
+    offen_ci = offene_checkins_zeitraum(heute - timedelta(days=fenster), heute)
+    if offen_ci.empty:
+        return []
+
+    gefunden = []
+    for _, r in offen_ci.iterrows():
+        ci_norm = str(r["Name_norm"])
+        ci_name = str(r["Name"])
+        ci_datum = str(r["analysis_date"])
+        if ist_mitspieler_platzhalter(ci_name) or ist_platzhalter(ci_name):
+            continue
+
+        ziele = gesperrte_ziele(ci_norm, ci_datum)
+        if len(ziele) != 1:
+            continue                        # keine oder mehrere Sperren
+
+        # Könnte derselbe Check-in auch einen OFFENEN Fall erklären?
+        # Dann ist nicht entschieden, wofür er zählt — Finger weg.
+        #
+        # Hier stand zuerst zusätzlich `nachhol_kandidaten(ci_name,
+        # ci_datum, fenster=0)`. Das war falsch benutzt: Die Funktion
+        # erwartet ein FALL-Datum, bekam aber das Check-in-Datum — und
+        # fand damit den Check-in selbst. Es kam nie ein Kandidat
+        # heraus, und die ganzen „Finger weg"-Tests waren grün, weil
+        # nichts passierte.
+        if _hat_offenen_fall_davor(ci_norm, ci_datum):
+            continue
+
+        ziel = ziele.iloc[0]
+        gefunden.append({"name": ci_name, "name_norm": ci_norm,
+                         "fall_datum": str(ziel["datum"]),
+                         "checkin_datum": ci_datum,
+                         "checkin_name": ci_name})
+    return gefunden
+
+
+def _hat_offenen_fall_davor(name_norm: str, ci_datum: str) -> bool:
+    """Gibt es zu dieser Person einen offenen Fall vor dem Check-in?"""
+    ci_d = parse_date_safe(ci_datum)
+    if ci_d is None:
+        return False
+    offen = alle_offenen_fehler(verfuegbare_tage())
+    if offen.empty or "Name_norm" not in offen.columns:
+        return False
+    eigene = offen[offen["Name_norm"].astype(str) == str(name_norm)]
+    if eigene.empty:
+        return False
+    for wert in eigene["Datum"].astype(str):
+        d = parse_date_safe(wert)
+        if d is not None and d < ci_d:
+            return True
+    return False
+
+
+def auto_sperren_uebernehmen() -> list:
+    """
+    Die eindeutigen Sperren auflösen. → was wirklich aufgelöst wurde
+
+    Jede Auflösung legt über `sperre_nachholung_zuordnen` eine
+    Freigabe-Aufgabe an. Ohne sie wäre jemand in der App frei und bei
+    EGYM weiter gesperrt.
+    """
+    kandidaten = auto_sperren_kandidaten()
+    if not kandidaten:
+        return []
+    geschafft = []
+    for k in kandidaten:
+        if sperre_nachholung_zuordnen(k["name_norm"], k["name"],
+                                      k["fall_datum"], k["checkin_datum"],
+                                      k["checkin_name"], leise=True):
+            geschafft.append(k)
+    if geschafft:
+        cache_leeren()
+        try:
+            einstellung_setzen("auto_sperren_zuletzt", {
+                "zeit": datetime.now().isoformat(timespec="seconds"),
+                "faelle": [{"name": k["name"], "fall": k["fall_datum"],
+                            "checkin": k["checkin_datum"]} for k in geschafft]})
+        except Exception:                           # noqa: BLE001
+            pass
+    return geschafft
+
+
 def _wa_auto_block(tage: list):
     """
     Eindeutige Zuordnungen selbst erledigen — ohne Rückfrage.
@@ -16837,12 +16983,27 @@ def _wa_pruefen():
                "zusammengeführt.")
 
 
-def _freigabe_dialog(name: str, name_norm: str):
-    """Der Hinweis, dass jemand wieder freigegeben werden muss."""
-    box(f"🔓 <b>{name} hat keine offene Sperre mehr.</b><br>"
-        "Der Wellpass-Zugang ist damit nicht automatisch wieder offen — "
-        "das musst du bei EGYM selbst freischalten. Erst danach hier "
-        "bestätigen.", "warn")
+def _freigabe_dialog(name: str, name_norm: str, letzte_sperre: str = ""):
+    """
+    Der Hinweis, dass jemand wieder freigegeben werden muss — mit Beleg.
+
+    Marcel am 14.10.2026: „Dann musst du mir kurz zeigen: Guck mal, die
+    habe ich entsperrt, weil die sich gestern eingecheckt haben und die
+    hatten keine Buchung." Genau das steht jetzt dabei, statt nur
+    „hat keine offene Sperre mehr".
+    """
+    beleg = ""
+    if letzte_sperre:
+        quelle = nachholung_quelle(name_norm, letzte_sperre)
+        if quelle.get("checkin_datum"):
+            beleg = (f"<br><br><b>Warum:</b> Check-in am "
+                     f"{datum_kurz(quelle['checkin_datum'])} — an dem Tag "
+                     "gehört er zu keiner Buchung, war also die Nachholung "
+                     f"für den {datum_kurz(letzte_sperre)}.")
+    box(f"🔓 <b>{name} hat keine offene Sperre mehr.</b>" + beleg
+        + "<br><br>Der Wellpass-Zugang ist damit nicht automatisch wieder "
+        "offen — das musst du bei EGYM selbst freischalten. Erst danach "
+        "hier bestätigen.", "warn")
     f1, f2 = st.columns([1.4, 1])
     with f1:
         if st.button("✅ Zugang wieder freigegeben", key=f"fg_ok_{name_norm}",
@@ -16869,6 +17030,17 @@ def _freigaben_anzeigen():
         return
 
     st.markdown("##### 🔓 Freigabe nötig")
+    letzt = einstellung("auto_sperren_zuletzt")
+    if isinstance(letzt, dict) and letzt.get("faelle"):
+        wann = parse_datetime_safe(letzt.get("zeit", ""))
+        st.caption(
+            "🤖 Beim letzten Abgleich"
+            + (f" ({wann:%d.%m. um %H:%M})" if wann else "")
+            + " hat die App diese Sperren selbst aufgelöst: "
+            + ", ".join(f"{f['name']} (Sperre {datum_kurz(f['fall'])}, "
+                        f"Check-in {datum_kurz(f['checkin'])})"
+                        for f in letzt["faelle"])
+            + ". In Playtomic ist noch nichts passiert.")
     for _, f in freigaben.iterrows():
         nn = str(f["name_norm"])
         name = str(f.get("name") or nn)
@@ -16879,11 +17051,11 @@ def _freigaben_anzeigen():
             st.session_state[f"_fg_gesehen_{nn}"] = True
 
             @dialog(f"{name} wieder freigeben?")
-            def _zeigen(name=name, nn=nn):
-                _freigabe_dialog(name, nn)
+            def _zeigen(name=name, nn=nn, ls=str(f.get("letzte_sperre", ""))):
+                _freigabe_dialog(name, nn, ls)
             _zeigen()
         else:
-            _freigabe_dialog(name, nn)
+            _freigabe_dialog(name, nn, str(f.get("letzte_sperre", "")))
     st.markdown("---")
 
 
@@ -19083,6 +19255,19 @@ def modul_einstellungen():
             "nichts, wird Google Drive gar nicht erst gefragt.")
 
         st.markdown("")
+        sp_an = st.checkbox(
+            "Sperren auflösen, wenn ein Check-in sie eindeutig nachholt",
+            value=einstellung_an("auto_sperren_an"),
+            key="auto_sperren_an_box")
+        st.caption(
+            "Nur bei exakt gleichem Namen, nur bei genau einer offenen "
+            "Sperre, und nur wenn kein offener Fall denselben Check-in "
+            "erklären könnte. Jede Auflösung erzeugt eine Freigabe-Aufgabe "
+            "mit Beleg — entsperrt wird bei EGYM weiterhin von Hand."
+
+        )
+
+        st.markdown("")
         # Die zweite, strengere Automatik: Sie schliesst Fälle.
         nach_an = st.checkbox(
             "Nachgeholte Check-ins beim Abgleich selbst zuordnen",
@@ -19108,6 +19293,7 @@ def modul_einstellungen():
             einstellung_setzen("auto_zuordnung_an", bool(an))
             einstellung_setzen("auto_schwelle", float(wert))
             einstellung_setzen("auto_abgleich_an", bool(abg_an))
+            einstellung_setzen("auto_sperren_an", bool(sp_an))
             einstellung_setzen("auto_nachholung_an", bool(nach_an))
             einstellung_setzen("auto_nachhol_schwelle", float(nach_wert))
             # Sitzungssperre lösen, damit die neue Schwelle sofort greift
