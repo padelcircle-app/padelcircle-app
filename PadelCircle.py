@@ -359,7 +359,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # läuft, und genau das war am 14.10.2026 die offene Frage: Die Anzeige
 # stand acht Fassungen lang auf „101". `tests/test_23_stand.py` lässt
 # die Gegenprobe scheitern, wenn sie hinterherhinkt.
-APP_STAND       = "Fassung 114 · 15.10.2026"
+APP_STAND       = "Fassung 115 · 15.10.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -16653,8 +16653,11 @@ def _wa_tagesarbeit():
     # vor allem, bevor irgendwer angeschrieben wird. Dazu die Freigaben:
     # Die standen bisher im Reiter „Übersicht", also genau nicht dort,
     # wo gearbeitet wird.
+    # Erst die Schranke (einmal je Sitzung), dann das Protokoll der
+    # Automatik, dann die Freigabe-Liste als bleibender Kasten.
+    schranke = _freigabe_schranke()
     _auto_dashboard()
-    _freigaben_anzeigen()
+    _freigaben_anzeigen(als_dialog=not schranke)
 
     zaehler = offene_je_tag()
 
@@ -17102,7 +17105,59 @@ def _auto_dashboard():
     st.markdown("---")
 
 
-def _freigaben_anzeigen():
+def _freigabe_schranke() -> bool:
+    """
+    Offene Freigaben als Fenster, bevor es an die Tagesarbeit geht.
+    → wurde die Schranke gezeigt?
+
+    Marcel am 15.10.2026: „Die, wo du entsperrst, musst du mir vorher
+    zeigen — hey, guck mal, diese Spieler habe ich entsperrt. Dann kann
+    ich die kurz freigeben, bevor ich weitergehe zur normalen Ansicht."
+
+    Ein Kasten weiter oben auf der Seite reicht dafür nicht: Wer
+    scrollt, liest ihn nicht. Dies hier liegt davor. Einmal je Sitzung —
+    danach steht es als Kasten da, damit es nicht zum Klickzwang wird.
+
+    Die Freigabe selbst passiert NICHT hier. Der Wellpass-Zugang geht
+    bei EGYM auf, von Hand; dieser Knopf hakt nur ab, dass es getan ist.
+    """
+    freigaben = offene_freigaben()
+    if freigaben.empty:
+        return False
+    dialog = getattr(st, "dialog", None) or getattr(st, "experimental_dialog", None)
+    if dialog is None or st.session_state.get("_freigabe_schranke_gezeigt"):
+        return False
+    st.session_state["_freigabe_schranke_gezeigt"] = True
+
+    @dialog("Diese Spieler musst du bei EGYM freigeben")
+    def _zeigen():
+        box("Ihre Sperre ist aufgelöst — in der App. Der Wellpass-Zugang "
+            "ist bei EGYM noch zu und geht nur dort wieder auf.", "warn")
+        for _, f in freigaben.iterrows():
+            nn = str(f["name_norm"])
+            name = str(f.get("name") or nn)
+            letzte = str(f.get("letzte_sperre", "") or "")
+            quelle = nachholung_quelle(nn, letzte) if letzte else {}
+            grund = (f" — Check-in am {datum_kurz(quelle['checkin_datum'])}, "
+                     f"an dem Tag keine Buchung"
+                     if quelle.get("checkin_datum") else "")
+            st.markdown(f"**{name}** · Sperre vom {datum_kurz(letzte)}{grund}")
+            if st.button(f"✅ {name} bei EGYM freigegeben",
+                         key=f"schranke_{nn}", use_container_width=True):
+                freigabe_bestaetigen(nn)
+                st.toast(f"{name} ist freigegeben.")
+                st.rerun()
+        st.caption("„Später“ schliesst das Fenster — die Aufgabe bleibt "
+                   "unten in der Liste stehen.")
+        if st.button("Später", key="schranke_spaeter",
+                     use_container_width=True):
+            st.rerun()
+
+    _zeigen()
+    return True
+
+
+def _freigaben_anzeigen(als_dialog: bool = True):
     """
     Wer wieder freigegeben werden muss — bewusst ganz oben.
 
@@ -17131,7 +17186,9 @@ def _freigaben_anzeigen():
         name = str(f.get("name") or nn)
         # Als echtes Fenster, wo Streamlit es kann — sonst als
         # hervorgehobener Kasten an derselben Stelle.
-        dialog = getattr(st, "dialog", None) or getattr(st, "experimental_dialog", None)
+        dialog = ((getattr(st, "dialog", None)
+                   or getattr(st, "experimental_dialog", None))
+                  if als_dialog else None)
         if dialog and not st.session_state.get(f"_fg_gesehen_{nn}"):
             st.session_state[f"_fg_gesehen_{nn}"] = True
 
