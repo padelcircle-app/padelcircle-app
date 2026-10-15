@@ -359,7 +359,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # läuft, und genau das war am 14.10.2026 die offene Frage: Die Anzeige
 # stand acht Fassungen lang auf „101". `tests/test_23_stand.py` lässt
 # die Gegenprobe scheitern, wenn sie hinterherhinkt.
-APP_STAND       = "Fassung 112 · 15.10.2026"
+APP_STAND       = "Fassung 113 · 15.10.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -5147,8 +5147,18 @@ def eigener_anspruch(name_norm: str, datum: str) -> int:
     schliessen?", gehen hier durch und antworten deshalb gleich.
 
     → Anzahl der eigenen Rabatt-Plätze an diesem Tag, die ihn brauchen
+
+    Der Name wird hier vereinheitlicht, statt sich auf jeden Aufrufer zu
+    verlassen. `falsche_zuordnungen()` übergab den ANZEIGE-Namen aus
+    der Spalte `checkin_name` („Nacht Mensch"), gesucht wurde mit der
+    normalisierten Form („nacht mensch") — die Antwort war immer 0.
+    Damit war die Prüfung „wird dieser Check-in an seinem eigenen Tag
+    gebraucht?" für alle neueren Zuordnungszeilen tot, und zwei Fälle
+    konnten mit einer einzigen EGYM-Vergütung geschlossen werden.
+    `normalize_name` ist idempotent — für Aufrufer, die es richtig
+    machen, ändert sich nichts.
     """
-    return len(offene_eigene_ansprueche(name_norm, datum))
+    return len(offene_eigene_ansprueche(normalize_name(str(name_norm)), datum))
 
 
 @st.cache_data(ttl=300, show_spinner=False)
