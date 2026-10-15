@@ -359,7 +359,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # läuft, und genau das war am 14.10.2026 die offene Frage: Die Anzeige
 # stand acht Fassungen lang auf „101". `tests/test_23_stand.py` lässt
 # die Gegenprobe scheitern, wenn sie hinterherhinkt.
-APP_STAND       = "Fassung 115 · 15.10.2026"
+APP_STAND       = "Fassung 116 · 15.10.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -16889,6 +16889,10 @@ def checkin_zuordnungen(datum: str) -> pd.DataFrame:
             "Court": "",
             "Spielzeit": "",
             "Weg": "",
+            # Für das Auflösen einer Verknüpfung gebraucht, nicht für
+            # die Anzeige — wird vor dem Zeichnen entfernt.
+            "_ci_norm": ci_norm,
+            "_ziel_norm": "",
         }
 
         # 1. Nachholung für einen anderen Tag
@@ -16951,9 +16955,50 @@ def checkin_zuordnungen(datum: str) -> pd.DataFrame:
             eintrag["Court"] = str(z.get("Court", "") or "")
             eintrag["Spielzeit"] = str(z.get("Service_Zeit", "") or "")
             eintrag["Weg"] = weg
+            eintrag["_ziel_norm"] = str(z["Name_norm"])
         zeilen.append(eintrag)
 
     return pd.DataFrame(zeilen)
+
+
+def verknuepfung_aufloesen(buchung_norm: str, checkin_norm: str,
+                           datum: str, merken: bool = True) -> bool:
+    """
+    Eine Namensverknüpfung lösen und den Tag neu rechnen.
+
+    Marcel am 15.10.2026: „Ich möchte diesen Check-in Julian Lerbscher
+    von diesem Julian trennen. Der Julian hat normal bezahlt, und Julian
+    Lerbscher hat mir geschrieben, dass er den Check-in nachgeholt hat."
+
+    Drei Schritte, und alle drei sind nötig:
+
+      1. Die Verknüpfung weg — am Namen UND am Playtomic-Konto.
+      2. `merken`: festhalten, dass das NICHT dieselbe Person ist.
+         Ohne das verknüpft der Namensabgleich die beiden im nächsten
+         Durchlauf sofort wieder — „Julian" und „Julian Lerbscher"
+         liegen für jeden Ähnlichkeitsvergleich dicht beieinander.
+      3. Den Tag neu rechnen. Die Spalten `Check-in` und `Checkin_Name`
+         stehen fest in den Buchungszeilen; ohne neue Rechnung bliebe
+         dort stehen, dass der Check-in verbraucht ist — er käme nie
+         wieder als überzählig zum Vorschein.
+
+    Was danach herauskommt, ist nicht vorherbestimmt: Hatte der Platz
+    einen Wellpass-Rabatt, sucht die Rechnung neu, wer ihn hatte. Wer
+    voll bezahlt hat, wird dabei zu keinem Fall.
+
+    Scheitert die Neuberechnung — etwa weil für den Tag keine
+    Zahlungszeilen mehr im Bestand stehen —, ist die Verknüpfung
+    trotzdem schon gelöst. Das muss dastehen, sonst sieht es aus, als
+    wäre gar nichts passiert: In den Buchungszeilen stünde weiter
+    „Check-in: Ja".
+
+    → True, wenn der Tag neu gerechnet wurde
+    """
+    mapping_entfernen(str(buchung_norm), nur_ziel=str(checkin_norm))
+    if merken:
+        rejected_speichern(str(buchung_norm), str(checkin_norm))
+    cache_leeren()
+    return neu_berechnen([str(datum)])
 
 
 def _wa_pruefen():
@@ -16964,8 +17009,8 @@ def _wa_pruefen():
         return
 
     box("Hier steht für jeden EGYM-Check-in, welcher Buchung die App ihn "
-        "zugerechnet hat — und auf welchem Weg. Reine Kontrollansicht: "
-        "Nichts davon lässt sich hier ändern.", "info")
+        "zugerechnet hat — und auf welchem Weg. Stimmt eine Verknüpfung "
+        "nicht, lässt sie sich unten lösen.", "info")
 
     # Denselben Tag vorwählen wie in der Tagesarbeit. Sonst wechselt man
     # den Reiter und schaut unbemerkt einen anderen Tag an — und wundert
@@ -16994,19 +17039,96 @@ def _wa_pruefen():
             euro(len(df) * wellpass_wert_am(datum)) + " vergütet")
 
     st.markdown("")
-    st.dataframe(df, use_container_width=True, hide_index=True,
-                 height=min(600, 60 + 35 * len(df)))
+    zeig = df.drop(columns=[c for c in ("_ci_norm", "_ziel_norm")
+                            if c in df.columns])
+    st.dataframe(zeig, use_container_width=True, hide_index=True,
+                 height=min(600, 60 + 35 * len(zeig)))
 
     st.download_button(
         "⬇️ Als CSV",
-        data=df.to_csv(index=False, sep=";").encode("utf-8-sig"),
+        data=zeig.to_csv(index=False, sep=";").encode("utf-8-sig"),
         file_name=f"zuordnungen_{datum}.csv", mime="text/csv",
         use_container_width=True)
+
+    _verknuepfung_loesen_block(df, datum)
 
     st.caption("Spalte Weg — 'Name identisch' heisst, Playtomic und EGYM "
                "schreiben denselben Namen. 'Bestätigte Verknüpfung' heisst, "
                "du oder die Automatik habt die beiden Namen einmal "
                "zusammengeführt.")
+
+
+# Nur diese Wege beruhen auf einer Verknüpfung, die sich lösen lässt.
+# „Name identisch" hat nichts zu lösen — da heissen beide gleich.
+LOESBARE_WEGE = ("von dir verknüpft", "automatisch verknüpft (App)",
+                 "Schreibweise beim Abgleich erkannt")
+
+
+def _verknuepfung_loesen_block(df: pd.DataFrame, datum: str):
+    """Eine falsche Verknüpfung direkt aus der Prüfansicht lösen."""
+    if "_ziel_norm" not in df.columns:
+        return
+    loesbar = df[df["Weg"].isin(LOESBARE_WEGE)
+                 & df["_ziel_norm"].astype(str).ne("")
+                 & (df["_ci_norm"].astype(str) != df["_ziel_norm"].astype(str))]
+    if loesbar.empty:
+        return
+
+    st.markdown("")
+    st.markdown("##### 🔗 Verknüpfung lösen")
+    st.caption("Für den Fall, dass zwei Namen zusammengeführt wurden, die "
+               "nicht derselbe Mensch sind. Danach ist der Check-in wieder "
+               "frei und taucht als überzählig auf — von dort kannst du ihn "
+               "einem älteren Fall zuordnen.")
+
+    # Ohne abgelegte Buchungsdatei lässt sich der Tag nicht neu rechnen
+    # (siehe _neu_berechnen_zahlungen). Die Verknüpfung liesse sich zwar
+    # löschen, in den Buchungszeilen stünde aber weiter „Check-in: Ja" —
+    # ein halber Zustand, der nach „hat nichts getan" aussieht. Deshalb
+    # gar nicht erst anbieten.
+    if str(datum) in {str(t) for t in tage_ohne_buchungsexport()}:
+        box(f"Für den {datum_kurz(datum)} ist keine Buchungsdatei "
+            "gespeichert. Ohne sie lässt sich der Tag nicht neu rechnen, "
+            "und das Lösen bliebe wirkungslos.<br>Erst unter <i>Zahlungen "
+            "+ Check-ins</i> mit „Nur Buchungsdatei ablegen“ nachreichen.",
+            "warn")
+        return
+
+    wahl = st.selectbox(
+        "Welche Verknüpfung?", list(loesbar.index),
+        format_func=lambda i: (f"{loesbar.at[i, 'Check-in']} "
+                               f"({loesbar.at[i, 'Zeit']})  ↔  "
+                               f"{loesbar.at[i, 'Zugeordnet zu']} "
+                               f"({loesbar.at[i, 'Spielzeit']}) · "
+                               f"{loesbar.at[i, 'Weg']}"),
+        key=f"loes_wahl_{datum}")
+
+    merken = st.checkbox(
+        "Merken, dass das nicht dieselbe Person ist", value=True,
+        key=f"loes_merken_{datum}",
+        help="Ohne das führt der Namensabgleich die beiden beim nächsten "
+             "Durchlauf sofort wieder zusammen. Zurücknehmen kannst du es "
+             "unter Name-Abgleich → Abgelehnte Vorschläge.")
+
+    if st.button("🔗 Verknüpfung lösen und Tag neu rechnen",
+                 type="primary", use_container_width=True,
+                 key=f"loes_knopf_{datum}"):
+        ci = str(loesbar.at[wahl, "Check-in"])
+        ziel = str(loesbar.at[wahl, "Zugeordnet zu"])
+        with st.spinner(f"{datum} wird neu gerechnet …"):
+            erfolg = verknuepfung_aufloesen(
+                str(loesbar.at[wahl, "_ziel_norm"]),
+                str(loesbar.at[wahl, "_ci_norm"]), datum, merken=merken)
+        if erfolg:
+            st.toast(f"{ci} ist von {ziel} getrennt.")
+            st.rerun()
+        else:
+            box(f"Die Verknüpfung zwischen <b>{ci}</b> und <b>{ziel}</b> "
+                "ist gelöst — der Tag liess sich aber nicht neu rechnen "
+                "(die Meldung steht darüber). Bis dahin steht in den "
+                "Buchungszeilen weiter „Check-in: Ja“. Unter "
+                "<b>Bestand → Neu berechnen</b> lässt sich das nachholen.",
+                "warn")
 
 
 def _freigabe_dialog(name: str, name_norm: str, letzte_sperre: str = ""):
