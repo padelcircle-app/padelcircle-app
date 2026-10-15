@@ -359,7 +359,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # läuft, und genau das war am 14.10.2026 die offene Frage: Die Anzeige
 # stand acht Fassungen lang auf „101". `tests/test_23_stand.py` lässt
 # die Gegenprobe scheitern, wenn sie hinterherhinkt.
-APP_STAND       = "Fassung 113 · 15.10.2026"
+APP_STAND       = "Fassung 114 · 15.10.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -15628,6 +15628,20 @@ def auto_nachholungen_uebernehmen(schwelle: float = None) -> list:
             geschafft.append(k)
     if geschafft:
         cache_leeren()
+        # Eine Spur, die den Seitenaufbau überlebt.
+        #
+        # Der Kasten „diese Fälle habe ich zugeordnet" wurde bisher
+        # mitten im Abgleich gezeichnet — und das `st.rerun()` danach
+        # warf die ganze Seite weg. Marcel bekam ihn nie zu sehen und
+        # hielt die Automatik für ausgefallen.
+        try:
+            einstellung_setzen("auto_nachholungen_zuletzt", {
+                "zeit": datetime.now().isoformat(timespec="seconds"),
+                "faelle": [{"name": k["fall_name"], "fall": k["fall_datum"],
+                            "checkin": k["checkin_datum"],
+                            "tage": k["tage_danach"]} for k in geschafft]})
+        except Exception:                           # noqa: BLE001
+            pass
     return geschafft
 
 
@@ -16635,7 +16649,13 @@ def _wa_tagesarbeit():
     # auf ALLEN Tagen, unabhängig vom Filter unten.
     _wa_auto_block(tage_alle)
 
-    # Alle Tageszähler in EINEM Durchlauf statt einer pro Dropdown-Eintrag
+    # Was die App von selbst getan hat, steht VOR der Tagesliste — und
+    # vor allem, bevor irgendwer angeschrieben wird. Dazu die Freigaben:
+    # Die standen bisher im Reiter „Übersicht", also genau nicht dort,
+    # wo gearbeitet wird.
+    _auto_dashboard()
+    _freigaben_anzeigen()
+
     zaehler = offene_je_tag()
 
     # Standardmäßig an: beim Öffnen zählt nur, was noch Arbeit macht.
@@ -17018,6 +17038,68 @@ def _freigabe_dialog(name: str, name_norm: str, letzte_sperre: str = ""):
         if st.button("Später", key=f"fg_spaeter_{name_norm}",
                      use_container_width=True):
             st.rerun()
+
+
+def _auto_dashboard():
+    """
+    Was die App zuletzt von selbst erledigt hat — ganz oben, bevor
+    irgendwer angeschrieben wird.
+
+    Marcel am 15.10.2026: „Du machst das ja in Zukunft automatisch. Dann
+    hätte ich gern, dass du mir immer als Dashboard zeigst: Guck mal,
+    die und die Fälle habe ich zugeordnet. Und der wäre wieder
+    entsperrt, den muss ich wieder entsperren."
+
+    Vorher stand das nur als Kasten mitten im Abgleich — und das
+    `st.rerun()` danach warf die Seite weg, bevor er ihn lesen konnte.
+    Jetzt liegt es in den Einstellungen und bleibt stehen, bis er auf
+    „Gesehen" drückt.
+    """
+    nach = einstellung("auto_nachholungen_zuletzt")
+    sperr = einstellung("auto_sperren_zuletzt")
+    nach_f = (nach or {}).get("faelle") if isinstance(nach, dict) else None
+    sperr_f = (sperr or {}).get("faelle") if isinstance(sperr, dict) else None
+    if not nach_f and not sperr_f:
+        return
+
+    st.markdown("##### 🤖 Das habe ich selbst erledigt")
+
+    if nach_f:
+        wann = parse_datetime_safe((nach or {}).get("zeit", ""))
+        zeilen = "<br>".join(
+            f"• <b>{f['name']}</b> · Fall vom {datum_kurz(f['fall'])} — "
+            f"Check-in vom {datum_kurz(f['checkin'])}, "
+            + ("einen Tag" if f.get("tage") == 1
+               else f"{f.get('tage', '?')} Tage")
+            + " später"
+            for f in nach_f)
+        box(f"🔄 <b>{len(nach_f)} nachgeholte "
+            + ("Check-in" if len(nach_f) == 1 else "Check-ins")
+            + " zugeordnet</b>"
+            + (f" ({wann:%d.%m. um %H:%M})" if wann else "")
+            + f"<br><br>{zeilen}<br><br>Diese Fälle sind geschlossen, die "
+            "Check-ins verbraucht. Hier ist nichts mehr zu tun.", "ok")
+
+    if sperr_f:
+        wann = parse_datetime_safe((sperr or {}).get("zeit", ""))
+        zeilen = "<br>".join(
+            f"• <b>{f['name']}</b> · Sperre vom {datum_kurz(f['fall'])} — "
+            f"Check-in vom {datum_kurz(f['checkin'])}, an dem Tag keine "
+            "Buchung"
+            for f in sperr_f)
+        box(f"🔓 <b>{len(sperr_f)} "
+            + ("Sperre" if len(sperr_f) == 1 else "Sperren")
+            + " aufgelöst</b>"
+            + (f" ({wann:%d.%m. um %H:%M})" if wann else "")
+            + f"<br><br>{zeilen}<br><br><b>Hier musst du ran:</b> Der "
+            "Wellpass-Zugang ist bei EGYM noch zu. Erst dort freischalten, "
+            "dann unten bei „Freigabe nötig“ abhaken.", "warn")
+
+    if st.button("✓ Gesehen", key="auto_dash_gesehen"):
+        einstellung_setzen("auto_nachholungen_zuletzt", {})
+        einstellung_setzen("auto_sperren_zuletzt", {})
+        st.rerun()
+    st.markdown("---")
 
 
 def _freigaben_anzeigen():
