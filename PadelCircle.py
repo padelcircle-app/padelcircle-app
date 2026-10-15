@@ -359,7 +359,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # läuft, und genau das war am 14.10.2026 die offene Frage: Die Anzeige
 # stand acht Fassungen lang auf „101". `tests/test_23_stand.py` lässt
 # die Gegenprobe scheitern, wenn sie hinterherhinkt.
-APP_STAND       = "Fassung 111 · 14.10.2026"
+APP_STAND       = "Fassung 112 · 15.10.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -4304,34 +4304,27 @@ def offene_fehler(datum_str: str) -> pd.DataFrame:
 @st.cache_data(ttl=900, show_spinner=False)
 def offene_je_tag() -> dict:
     """
-    Anzahl offener Fälle für ALLE Tage in einem einzigen Durchlauf.
+    Anzahl offener Fälle für ALLE Tage. → {"2026-07-14": 3, …}
 
-    Für Dropdown-Beschriftungen und Serien-Berechnung. Vorher rief die
-    format_func für jeden Tag offene_fehler() auf — bei 26 Tagen also
-    26 Filterläufe bei jedem Rendern der Seite.
+    Gezählt wird mit `offene_fehler()` selbst, Tag für Tag — nicht mit
+    einer zweiten, nachgebauten Rechnung.
 
-    → {"2026-07-14": 3, …}
+    Vorher stand hier eine eigene Fassung derselben Logik, aus
+    Geschwindigkeitsgründen. Am 15.10.2026 zeigte das Auswahlfeld
+    „Freitag, 09.10.2026 · 1 offen", während auf der Seite daneben
+    „0 offene Fälle · für diesen Tag ist alles geklärt" stand — beide
+    Zahlen aus demselben Bildaufbau. Welche der beiden Rechnungen recht
+    hatte, liess sich nicht sagen; über 50 echte Tage stimmten sie
+    überein, in Marcels Bestand nicht.
+
+    Zwei Rechnungen für dieselbe Frage sind eine Fehlerquelle, die man
+    nicht debuggen, sondern abschaffen sollte. Die Geschwindigkeit
+    kostet das nichts: `offene_fehler` ist je Tag zwischengespeichert,
+    und die Tabellendaten kommen ohnehin aus dem gemeinsamen Abruf.
     """
-    df = loadsheet("buchungen")
-    if df.empty or "Fehler" not in df.columns or "analysis_date" not in df.columns:
-        return {}
-
-    fehler = df[df["Fehler"].astype(str) == "Ja"].copy()
-    if fehler.empty:
-        return {}
-
-    datums_spalte = "Datum" if "Datum" in fehler.columns else "analysis_date"
-    erledigt = behobene_keys()
-    if erledigt:
-        keys = (fehler["Name_norm"].astype(str) + "_"
-                + fehler[datums_spalte].astype(str))
-        fehler = fehler[~keys.isin(erledigt)]
-        if fehler.empty:
-            return {}
-
     zaehler = {}
-    for tag, gruppe in fehler.groupby(fehler["analysis_date"].astype(str)):
-        anzahl = len(_ohne_gedeckte(gruppe, tag))
+    for tag in verfuegbare_tage():
+        anzahl = len(offene_fehler(str(tag)))
         if anzahl:
             zaehler[str(tag)] = int(anzahl)
     return zaehler
