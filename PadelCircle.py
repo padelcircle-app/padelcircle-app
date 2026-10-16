@@ -359,7 +359,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # läuft, und genau das war am 14.10.2026 die offene Frage: Die Anzeige
 # stand acht Fassungen lang auf „101". `tests/test_23_stand.py` lässt
 # die Gegenprobe scheitern, wenn sie hinterherhinkt.
-APP_STAND       = "Fassung 116 · 15.10.2026"
+APP_STAND       = "Fassung 117 · 16.10.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -3085,6 +3085,83 @@ def monatsvergleich(bis_tag: int = None) -> list:
     return out
 
 
+@st.cache_data(ttl=900, show_spinner=False)
+def wert_je_wochentag() -> dict:
+    """
+    Was ein Tag im Schnitt einbringt, je Wochentag.
+    → {0: 1505.27, …, 6: 2578.18}   (0 = Montag) · Platz plus Wellpass
+
+    Gemessen am 16.10.2026 über 77 Tage: Montag 1.505 €, Sonntag
+    2.578 € — Faktor 1,71. Wer den Monat mit „Schnitt mal Anzahl Tage"
+    hochrechnet, rechnet an diesem Unterschied vorbei.
+    """
+    roh = _rohdaten_aufbereitet()
+    if roh.empty or "_datum" not in roh.columns:
+        return {}
+    je_wochentag = {}
+    for tag in {d for d in roh["_datum"] if d is not None}:
+        wert = _kennzahlen(roh[roh["_datum"] == tag])["gesamt_effektiv"]
+        je_wochentag.setdefault(tag.weekday(), []).append(wert)
+    alle = [w for liste in je_wochentag.values() for w in liste]
+    mittel = sum(alle) / len(alle) if alle else 0.0
+    # Ein Wochentag mit ein, zwei Messwerten ist Zufall, kein Muster —
+    # dann lieber der Gesamtschnitt.
+    return {wt: (sum(liste) / len(liste) if len(liste) >= 3 else mittel)
+            for wt, liste in je_wochentag.items()}
+
+
+def monats_hochrechnung(monat: str, bis_tag: int, ist: float) -> dict:
+    """
+    Den Monat hochrechnen — mit den Tagen, die noch KOMMEN.
+
+    → {wert, einfach, faktor, rest_tage, rest_verteilung}
+
+    Marcel am 16.10.2026: „Einfach grob 30 Tage pro Tag runterrechnen
+    finde ich passt nicht zu 100 % — Samstage, Sonntage und Freitage
+    sind ja meistens mehr ausgebucht."
+
+    Stimmt, und zwar deutlich. Gerechnet wird deshalb in zwei Schritten:
+
+      1. Was wäre nach dem üblichen Wochentagsmuster bis heute zu
+         erwarten gewesen? Das Verhältnis zum tatsächlichen Stand ist
+         der `faktor` — läuft der Monat 10 % über dem Muster, gilt das
+         auch für den Rest.
+      2. Die verbleibenden Tage einzeln mit ihrem Wochentagswert,
+         mal diesem Faktor.
+
+    Fällt das Muster aus (zu wenig Daten), bleibt es beim alten Weg:
+    Schnitt mal Anzahl Tage. Der steht als `einfach` immer daneben,
+    damit der Unterschied sichtbar ist.
+    """
+    jahr, mon = int(monat[:4]), int(monat[5:7])
+    letzter = monthrange(jahr, mon)[1]
+    bis_tag = max(1, min(int(bis_tag), letzter))
+    einfach = round(ist / bis_tag * letzter, 2)
+    leer = {"wert": einfach, "einfach": einfach, "faktor": 1.0,
+            "rest_tage": letzter - bis_tag, "rest_verteilung": {}}
+
+    werte = wert_je_wochentag()
+    if not werte or ist <= 0:
+        return leer
+
+    gelaufen = [date(jahr, mon, t) for t in range(1, bis_tag + 1)]
+    rest = [date(jahr, mon, t) for t in range(bis_tag + 1, letzter + 1)]
+    erwartet_bisher = sum(werte.get(t.weekday(), 0.0) for t in gelaufen)
+    erwartet_rest = sum(werte.get(t.weekday(), 0.0) for t in rest)
+    if erwartet_bisher <= 0:
+        return leer
+
+    faktor = ist / erwartet_bisher
+    verteilung = {}
+    for t in rest:
+        verteilung[t.weekday()] = verteilung.get(t.weekday(), 0) + 1
+    return {"wert": round(ist + faktor * erwartet_rest, 2),
+            "einfach": einfach,
+            "faktor": round(faktor, 3),
+            "rest_tage": len(rest),
+            "rest_verteilung": verteilung}
+
+
 def vergleichs_urteil(jetzt: dict, frueher: list,
                       feld: str = "gesamt_effektiv") -> dict:
     """
@@ -3118,10 +3195,12 @@ def vergleichs_urteil(jetzt: dict, frueher: list,
         "bestes": round(bestes, 2),
         "abstand": round(jetzt[feld] - schnitt, 2),
         "prozent": round((jetzt[feld] / schnitt - 1) * 100, 1) if schnitt else 0.0,
-        # Auf den ganzen Monat hochgerechnet: Was bisher je Tag kam,
-        # mal die Tage des Monats. Eine grobe Linie, kein Versprechen —
-        # Wochenenden und Events verteilen sich nicht gleichmässig.
-        "hochrechnung": round(jetzt[feld] / tage * monthrange(jahr, mon)[1], 2),
+        # Hochgerechnet mit den Wochentagen, die noch kommen — nicht
+        # „Schnitt mal Anzahl Tage". Siehe monats_hochrechnung().
+        "hochrechnung": monats_hochrechnung(
+            jetzt["monat"], jetzt["tage_moeglich"], jetzt[feld])["wert"],
+        "hochrechnung_teile": monats_hochrechnung(
+            jetzt["monat"], jetzt["tage_moeglich"], jetzt[feld]),
         "verlaesslich": len(brauchbar) >= 2,
     }
 
@@ -14335,8 +14414,29 @@ def _dash_monatsstand():
         else:
             kpi("gegen den Schnitt", "—", "zu wenig Vergleichsmonate")
     with c3:
+        teile = u.get("hochrechnung_teile") or {}
+        rest = teile.get("rest_tage", 0)
         kpi("Hochrechnung Monat", geld(u["hochrechnung"]),
-            "grobe Linie, kein Versprechen")
+            f"noch {rest} " + ("Tag" if rest == 1 else "Tage")
+            + " · nach Wochentagen gerechnet")
+
+    teile = u.get("hochrechnung_teile") or {}
+    if teile.get("rest_verteilung"):
+        wie = ", ".join(
+            f"{anz} {WOCHENTAGE[wt] if anz == 1 else WOCHENTAGE_MEHRZAHL[wt]}"
+            for wt, anz in sorted(teile["rest_verteilung"].items(),
+                                  key=lambda x: -x[1]))
+        unterschied = round(u["hochrechnung"] - teile.get("einfach", 0), 2)
+        st.caption(
+            f"Im Rest des Monats liegen: {wie}. Jeder Tag wird mit dem "
+            "gerechnet, was ein solcher Wochentag im Schnitt einbringt "
+            f"(Sonntag {geld(wert_je_wochentag().get(6, 0))}, Montag "
+            f"{geld(wert_je_wochentag().get(0, 0))}) — mal dem Faktor "
+            f"{teile.get('faktor', 1):.2f}".replace(".", ",")
+            + f", mit dem dieser Monat über dem Muster liegt. „Schnitt mal "
+            f"Tage“ käme auf {geld(teile.get('einfach', 0))}, also "
+            + ("+" if unterschied >= 0 else "−") + f"{geld(abs(unterschied))} "
+            "Unterschied.")
 
     if u["verlaesslich"]:
         if u["abstand"] >= 0:
