@@ -359,7 +359,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # läuft, und genau das war am 14.10.2026 die offene Frage: Die Anzeige
 # stand acht Fassungen lang auf „101". `tests/test_23_stand.py` lässt
 # die Gegenprobe scheitern, wenn sie hinterherhinkt.
-APP_STAND       = "Fassung 118 · 16.10.2026"
+APP_STAND       = "Fassung 119 · 16.10.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -684,6 +684,10 @@ def stunde_aus_zeit(zeit_str) -> int:
 SHEET_SPALTEN = {
     "playtomic_raw":    None,
     "buchungsexport":   None,
+    # Wer hatte den Wellpass — aus Playtomics Manager-API, nicht geraten.
+    "rabatte":          ["datum", "zeit", "court", "konto", "name", "preis",
+                         "gezahlt", "wellpass", "zahler_konto", "zahler_name",
+                         "payment_id", "booking_id"],
     "buchungen":        None,
     "checkins":         None,
     "customers":        None,
@@ -10501,6 +10505,57 @@ def _analysieren_zahlungen(pdf, cdf, bdf=None, tage_ersetzen=None) -> bool:
         bewertet = neu_bewertet
         st.caption(f"{len(korrekturen)} Beträge über die Buchungsdatei "
                    "richtiggestellt.")
+
+    # ── Playtomics eigene Auskunft schlägt jede Rückrechnung ────────────
+    #
+    # Liegt für einen Tag `rabatte.csv` vor, steht dort je Anmeldung,
+    # wer den Wellpass benutzt hat — mit Konto, regulärem Anteil und
+    # gezahltem Betrag. Das ist keine Schätzung, sondern die Auskunft
+    # der Kasse.
+    #
+    # Korrigiert wird nur, was den ZAHLER betrifft: Wer laut Auskunft
+    # keinen Wellpass hatte, ist Vollzahler — auch wenn sein Betrag
+    # nach einem Rabatt aussieht, weil er für einen anderen mitbezahlt
+    # hat (Daniel Stache, 11.10., 42 €). Mitspieler ohne eigene
+    # Zahlungszeile kommen weiterhin über den Buchungsexport dazu.
+    wahrheit = rabatt_wahrheit(tuple(sorted({str(g["datum"]) for g in slots})))
+    if wahrheit:
+        bekannt = {d for d, _z, _k in wahrheit}
+        richtig, raus = 0, 0
+        neu_bewertet = []
+        for g, art, txt, voll, eigen in bewertet:
+            tag, zeit = str(g["datum"]), g["zeit"]
+            # Zuerst über das Konto — der Name ist genau das, was
+            # zwischen den beiden Quellen auseinandergeht.
+            konto = str(g.get("user_id", "") or "").strip()
+            w = (wahrheit.get((tag, zeit, konto)) if konto else None)                 or wahrheit.get((tag, zeit, g["name_norm"]))
+            # Nur Tage anfassen, für die die Auskunft wirklich vorliegt.
+            if w is None or tag not in bekannt or g.get("turnier"):
+                neu_bewertet.append((g, art, txt, voll, eigen))
+                continue
+            if w["wellpass"] and art != "wellpass":
+                art = "wellpass"
+                voll, eigen = w["preis"], w["gezahlt"]
+                txt = (f"{euro(eigen)} statt {euro(voll)} — laut Playtomic"
+                       if eigen else "0 € — Platz über Wellpass gedeckt")
+                richtig += 1
+            elif not w["wellpass"] and art == "wellpass":
+                # Genau Marcels Fall: Der Betrag sah nach Rabatt aus,
+                # weil er den Anteil eines anderen enthielt.
+                art = "vollzahler"
+                voll = eigen = w["preis"]
+                txt = (f"{euro(w['preis'])} voll bezahlt — laut Playtomic "
+                       "ohne Wellpass")
+                raus += 1
+            neu_bewertet.append((g, art, txt, voll, eigen))
+        bewertet = neu_bewertet
+        if richtig or raus:
+            st.caption(
+                f"Wellpass-Auskunft von Playtomic angewandt: {raus} "
+                + ("Platz" if raus == 1 else "Plätze")
+                + " waren kein Rabatt (für jemand anderen mitbezahlt), "
+                f"{richtig} " + ("Platz" if richtig == 1 else "Plätze")
+                + " dafür erkannt.")
     # Die Tage, die dieser Lauf abdeckt — daran hängt, welche alten
     # Fragen sich erledigt haben.
     luecken_merken(unklar, {str(g["datum"]) for g in slots})
@@ -11174,6 +11229,77 @@ def _export_teilnehmer_index(bdf: pd.DataFrame) -> dict:
             if n and n.lower() != "nan":
                 namen.append(normalize_name(n))
     return idx
+
+
+def rabatte_speichern(rdf: pd.DataFrame) -> int:
+    """Die Rabatt-Auskunft ablegen — je Anmeldung eine Zeile."""
+    if rdf is None or rdf.empty or "datum" not in rdf.columns:
+        return 0
+    spalten = [c for c in SHEET_SPALTEN["rabatte"] if c in rdf.columns]
+    n = append_rows(rdf[spalten].copy(), "rabatte",
+                    ["datum", "zeit", "court", "konto", "payment_id"],
+                    aktualisieren=True)
+    _cache_funktion_leeren("rabatt_wahrheit")
+    return n
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def rabatt_wahrheit(tage: tuple) -> dict:
+    """
+    Wer hatte an diesem Slot den Wellpass — laut Playtomic.
+    → {(datum, zeit, name_norm): {"wellpass", "preis", "gezahlt", "zahler"}}
+
+    Die App rechnete das bisher aus den Beträgen zurück. Das geht
+    schief, sobald jemand für einen anderen mitbezahlt: Daniel Stache
+    zahlte am 11.10. 13,50 € für sich plus 1,50 € für Caro, die den
+    Wellpass hatte — 42 € auf einem Namen. Aus dieser Zahl ist der
+    Rabattträger nicht zu bestimmen; die Auskunft dagegen nennt ihn.
+
+    Geschlüsselt wird über das KONTO, nicht über den Namen. Der Name
+    ist ja gerade das Unzuverlässige: Die Zahlungsdatei kennt „a k",
+    die Auskunft „Alisa …". Beide führen dieselbe Playtomic-Nummer —
+    `User id` in den Zahlungen, `konto` in der Auskunft. Zusätzlich ein
+    Eintrag über den Namen, für Zeilen ohne Konto.
+    """
+    df = loadsheet("rabatte", SHEET_SPALTEN["rabatte"])
+    if df.empty or "datum" not in df.columns:
+        return {}
+    menge = {str(t) for t in tage}
+    teil = df[df["datum"].astype(str).isin(menge)] if menge else df
+    out = {}
+    for _, r in teil.iterrows():
+        konto = str(r.get("konto", "") or "").strip()
+        name = normalize_name(r.get("name", ""))
+        tag, zeit = str(r["datum"]), str(r.get("zeit", ""))
+        wellpass = str(r.get("wellpass", "")).strip().lower() == "ja"
+        eintrag = {
+            "wellpass": wellpass,
+            "preis": parse_betrag(r.get("preis", "")),
+            "gezahlt": parse_betrag(r.get("gezahlt", "")),
+            "zahler": normalize_name(r.get("zahler_name", "")),
+            "konto": konto,
+        }
+        for schluessel in ((tag, zeit, konto) if konto else None,
+                           (tag, zeit, name) if name else None):
+            if schluessel is None:
+                continue
+            # Mehrere Zeilen derselben Person im selben Slot: Ein
+            # Wellpass schlägt durch — wer ihn benutzt hat, hat ihn
+            # benutzt.
+            vorher = out.get(schluessel)
+            if vorher and vorher["wellpass"] and not wellpass:
+                continue
+            out[schluessel] = eintrag
+    return out
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def tage_mit_rabattauskunft() -> set:
+    """Für welche Tage liegt die Auskunft vor?"""
+    df = loadsheet("rabatte", SHEET_SPALTEN["rabatte"])
+    if df.empty or "datum" not in df.columns:
+        return set()
+    return {str(t) for t in df["datum"].astype(str) if str(t).strip()}
 
 
 def buchungsexport_pruefen(bdf: pd.DataFrame, pdf: pd.DataFrame = None) -> dict:
@@ -11914,7 +12040,7 @@ def checkins_konsolidieren(tage) -> int:
 
 
 def _verarbeiten_zahlungen(z_datei, c_datei, o_datei=None,
-                           b_datei=None) -> bool:
+                           b_datei=None, r_datei=None) -> bool:
     """
     Neuer Weg: Zahlungen + Check-ins, ohne Buchungsexport.
 
@@ -11976,6 +12102,22 @@ def _verarbeiten_zahlungen(z_datei, c_datei, o_datei=None,
                 # Mit ablegen: „Neu berechnen" braucht ihn später genauso, und
                 # Mitspieler wie Court stehen nur hier.
                 buchungsexport_speichern(bdf)
+
+    # Fünfte, freiwillige Datei: Playtomics Auskunft, wer den Wellpass
+    # benutzt hat. Sie muss VOR der Rechnung abgelegt sein — die
+    # Korrekturschicht liest sie aus dem Blatt.
+    if r_datei is not None:
+        try:
+            rdf = pd.read_csv(r_datei)
+            n = rabatte_speichern(rdf)
+            if n:
+                mit = int((rdf["wellpass"].astype(str).str.lower()
+                           == "ja").sum()) if "wellpass" in rdf.columns else 0
+                st.caption(f"Wellpass-Auskunft: {len(rdf)} Anmeldungen, "
+                           f"davon {mit} mit Rabatt.")
+        except Exception as e:                      # noqa: BLE001
+            st.warning("⚠️ Die Wellpass-Auskunft konnte nicht gelesen "
+                       f"werden ({type(e).__name__}) — gerechnet wird ohne sie.")
 
     return _analysieren_zahlungen(pdf, cdf, bdf)
 
@@ -12089,6 +12231,7 @@ AUSTAUSCH_ARTEN = {"zahlungen": "Zahlungen · bezahlt",
                    "checkins":  "Wellpass Check-ins",
                    "buchungen": "Buchungen",
                    "kunden":    "Spielerliste",
+                   "rabatte":   "Wellpass-Rabatte",
                    "events":    "Geplante Events"}
 
 
@@ -12181,6 +12324,10 @@ def austausch_art(name: str, kopf: bytes) -> str:
     # Die geplanten Events — der Blick nach vorne, nicht zurück.
     if erste.startswith("datum,") and "preis_wellpass" in erste:
         return "events"
+    # Wer hatte den Wellpass — aus Playtomics eigener Auskunft, statt
+    # aus den Beträgen zurückgerechnet. Siehe F-2026-10-16-01.
+    if erste.startswith("datum,") and "wellpass" in erste and "konto" in erste:
+        return "rabatte"
     if "Mitglied;" in text or "Vor- & Nachname" in text:
         return "checkins"
     if "Corporate Name;" in text:
@@ -12556,10 +12703,12 @@ def abgleich_automatisch() -> dict:
             pass                                    # nicht der Rede wert
     b = gefunden.get("buchungen")
     o = gefunden.get("offen")
+    r = gefunden.get("rabatte")
     erfolg = _verarbeiten_zahlungen(
         io.BytesIO(z["inhalt"]), io.BytesIO(c["inhalt"]),
         io.BytesIO(o["inhalt"]) if o else None,
-        io.BytesIO(b["inhalt"]) if b else None)
+        io.BytesIO(b["inhalt"]) if b else None,
+        io.BytesIO(r["inhalt"]) if r else None)
     if not erfolg:
         return {"tage": [], "grund": "Der Abgleich ist nicht durchgelaufen."}
     st.session_state.pop("drive_dateien", None)
@@ -12899,6 +13048,7 @@ def modul_daten():
         zc_datei = _datei_oder_ordner(zc_datei, "checkins")
         o_datei = _datei_oder_ordner(o_datei, "offen")
         b_datei = _datei_oder_ordner(b_datei, "buchungen")
+        r_datei = _datei_oder_ordner(None, "rabatte")
 
         st.markdown("")
         if st.button("🔄 Abgleichen", type="primary", use_container_width=True,
@@ -12919,7 +13069,8 @@ def modul_daten():
                 else:
                     st.toast(f"Spielerliste: {k_erg['kunden']} Konten")
             with st.spinner(lade_text("verarbeite")):
-                if _verarbeiten_zahlungen(z_datei, zc_datei, o_datei, b_datei):
+                if _verarbeiten_zahlungen(z_datei, zc_datei, o_datei,
+                                          b_datei, r_datei):
                     st.session_state.pop("drive_dateien", None)
                     st.rerun()
 
