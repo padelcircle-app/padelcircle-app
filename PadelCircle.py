@@ -359,7 +359,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # läuft, und genau das war am 14.10.2026 die offene Frage: Die Anzeige
 # stand acht Fassungen lang auf „101". `tests/test_23_stand.py` lässt
 # die Gegenprobe scheitern, wenn sie hinterherhinkt.
-APP_STAND       = "Fassung 117 · 16.10.2026"
+APP_STAND       = "Fassung 118 · 16.10.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -17128,6 +17128,7 @@ def _wa_pruefen():
         box("An diesem Tag gab es keine Check-ins.", "info")
         return
 
+    loesbare = int(df["Weg"].isin(LOESBARE_WEGE).sum()) if "Weg" in df else 0
     zugeordnet = int((df["Zugeordnet zu"] != "— keiner Buchung —").sum())
     p1, p2, p3 = st.columns(3)
     with p1:
@@ -17139,18 +17140,29 @@ def _wa_pruefen():
             euro(len(df) * wellpass_wert_am(datum)) + " vergütet")
 
     st.markdown("")
+    if loesbare:
+        st.caption(f"{loesbare} dieser Zeilen beruhen auf einer "
+                   + ("Verknüpfung" if loesbare == 1 else "Verknüpfung")
+                   + " zweier Namen (Spalte „Weg“). Stimmt eine davon "
+                   "nicht, kannst du sie direkt unter der Tabelle lösen.")
     zeig = df.drop(columns=[c for c in ("_ci_norm", "_ziel_norm")
                             if c in df.columns])
     st.dataframe(zeig, use_container_width=True, hide_index=True,
                  height=min(600, 60 + 35 * len(zeig)))
+
+    # Direkt unter die Tabelle, nicht unter den CSV-Knopf.
+    #
+    # Marcel am 16.10.2026: „Kann ich über diese Tabelle die Verknüpfung
+    # auch löschen?" — gebaut war das seit Fassung 116, nur stand es
+    # unterhalb des Downloads und damit ausserhalb des Blickfelds. Eine
+    # Möglichkeit, die man suchen muss, gibt es für den Benutzer nicht.
+    _verknuepfung_loesen_block(df, datum)
 
     st.download_button(
         "⬇️ Als CSV",
         data=zeig.to_csv(index=False, sep=";").encode("utf-8-sig"),
         file_name=f"zuordnungen_{datum}.csv", mime="text/csv",
         use_container_width=True)
-
-    _verknuepfung_loesen_block(df, datum)
 
     st.caption("Spalte Weg — 'Name identisch' heisst, Playtomic und EGYM "
                "schreiben denselben Namen. 'Bestätigte Verknüpfung' heisst, "
