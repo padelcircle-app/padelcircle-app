@@ -359,7 +359,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # läuft, und genau das war am 14.10.2026 die offene Frage: Die Anzeige
 # stand acht Fassungen lang auf „101". `tests/test_23_stand.py` lässt
 # die Gegenprobe scheitern, wenn sie hinterherhinkt.
-APP_STAND       = "Fassung 119 · 16.10.2026"
+APP_STAND       = "Fassung 120 · 17.10.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -1501,6 +1501,7 @@ STATUS_CACHES = ("offene_fehler", "offene_je_tag", "_auto_kandidaten_gerechnet",
                  "_rabattierte_namen_am", "verbrauchte_checkins",
                  "offene_checkins", "offene_checkins_zeitraum",
                  "zuordnung_vorschlag", "nachhol_kandidaten",
+                 "spaetere_checkins_vergeben",
                  "nachholung_quelle", "anspruch_bilanz", "erledigte_faelle",
                  "offene_freigaben", "falsche_zuordnungen",
                  "eigener_anspruch", "anspruch_verdacht",
@@ -1517,6 +1518,7 @@ ABGELEITETE_CACHES = ("tages_kennzahlen", "verfuegbare_tage", "monats_kennzahlen
                       "offene_je_tag", "_auto_kandidaten_gerechnet",
                       "_rabattierte_namen_am", "eigener_anspruch",
                       "zuordnung_vorschlag", "nachhol_kandidaten",
+                      "spaetere_checkins_vergeben",
                       "offene_checkins", "offene_checkins_zeitraum",
                       "verbrauchte_checkins", "anspruch_bilanz", "nachholung_quelle",
                       "mapping_gedeckt_je_tag", "mapping_belegte_checkins",
@@ -2682,7 +2684,8 @@ def rejected_speichern(buchung_name: str, checkin_name: str):
         "timestamp": datetime.now().isoformat()}]), "rejected_matches")
     cache_leeren("rejected_matches",
                  funktionen=("rejected_matches_laden", "zuordnung_vorschlag",
-                             "nachhol_kandidaten"))
+                             "nachhol_kandidaten",
+                             "spaetere_checkins_vergeben"))
 
 
 def rejected_entfernen(buchung_name: str, checkin_name: str):
@@ -2693,7 +2696,8 @@ def rejected_entfernen(buchung_name: str, checkin_name: str):
         savesheet(df, "rejected_matches")
         cache_leeren("rejected_matches",
                      funktionen=("rejected_matches_laden", "zuordnung_vorschlag",
-                                 "nachhol_kandidaten"))
+                                 "nachhol_kandidaten",
+                                 "spaetere_checkins_vergeben"))
 
 
 def name_aus_email(mail: str) -> str:
@@ -9924,7 +9928,8 @@ def wellpass_platz_anlegen(name: str, datum: str, zeit: str, anteil: float,
         "offene_checkins_zeitraum", "verfuegbare_tage", "checkin_erklaerung",
         "buchungs_rabatte_am", "_rabattierte_namen_am", "eigener_anspruch",
         "anspruch_verdacht", "anspruch_bilanz", "_auto_kandidaten_gerechnet",
-        "checkin_zuordnungen", "zuordnung_vorschlag", "nachhol_kandidaten"))
+        "checkin_zuordnungen", "zuordnung_vorschlag", "nachhol_kandidaten",
+        "spaetere_checkins_vergeben"))
     return True
 
 
@@ -16849,6 +16854,21 @@ def _wa_fall(r, i: int, datum: str, angeboten: set = None, rang: int = 0):
                 st.toast("Fall geschlossen.")
                 st.rerun()
 
+    # ── „Ich habe doch eingecheckt" ─────────────────────────────────
+    #
+    # Eingecheckt ja — nur nicht verwertbar für diesen Fall. Ohne diese
+    # Zeile sucht man den Check-in von Hand und findet ihn erst in der
+    # Zuordnungsprüfung: Er steht nirgends unter „überzählig", weil er
+    # an seinem eigenen Tag gebraucht wird.
+    for s_ci in ([] if platzhalter_zeile
+                 else spaetere_checkins_vergeben(name, datum,
+                                                 fenster=fenster_fall))[:2]:
+        st.caption(
+            f"ℹ️ **{s_ci['name']}** hat am **{datum_kurz(s_ci['datum'])}**"
+            + (f" um {s_ci['zeit']}" if s_ci["zeit"] else "")
+            + f" eingecheckt — {s_ci['grund']}. "
+            "Für diesen Fall bleibt davon nichts übrig.")
+
     # ── Aktionen ────────────────────────────────────────────────────
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -18974,6 +18994,7 @@ def nachholung_speichern(checkin_datum: str, checkin_name: str,
                              "verbrauchte_checkins", "offene_checkins",
                              "offene_checkins_zeitraum", "zuordnung_vorschlag",
                              "nachhol_kandidaten", "nachholung_quelle",
+                             "spaetere_checkins_vergeben",
                              "anspruch_bilanz", "eigener_anspruch",
                              "anspruch_verdacht", "falsche_zuordnungen",
                              "mapping_gedeckt_je_tag",
@@ -19064,6 +19085,63 @@ def offene_checkins_zeitraum(von: date, bis: date,
     return df.drop_duplicates(subset=["analysis_date", "Name_norm"])
 
 
+def _nachname_passt(ziel: str, kand: str) -> bool:
+    """
+    Sind das derselbe Vor- UND Nachname?
+
+    Der Nachname muss eindeutig passen, der Vorname wenigstens
+    erkennbar. Sonst würden zwei verschiedene Menschen mit gleichem
+    Nachnamen zusammengeworfen. Fehlt auf einer Seite der Nachname —
+    ein Playtomic-Konto heisst schlicht „Daniel" — ist die Frage nicht
+    zu beantworten, und die Antwort lautet Nein.
+    """
+    such_vor, such_nach = _namensteile(ziel)
+    kand_vor, kand_nach = _namensteile(kand)
+    return (bool(such_nach) and bool(kand_nach)
+            and _teil_aehnlich(such_nach, kand_nach) >= 85
+            and _teil_aehnlich(such_vor, kand_vor) >= 55)
+
+
+def _nachhol_punktwert(ziel: str, kand: str, anzeige: str, mail: str,
+                       mapping: dict, abgelehnt: set) -> float:
+    """
+    Taugt dieser Check-in-Name als Nachholung für den gesuchten Fall?
+    → Punktwert, oder 0.0 wenn er die Schwelle reisst.
+
+    Steht hier allein, weil zwei Ansichten dieselbe Frage stellen:
+    `nachhol_kandidaten()` bietet den Check-in zum Zuordnen an,
+    `spaetere_checkins_vergeben()` erklärt, warum ein anderer NICHT
+    angeboten wird. Zwei Kopien derselben Regel hätten sich auseinander
+    entwickelt und an derselben Person verschiedene Antworten gegeben.
+    """
+    if (ziel, kand) in abgelehnt:
+        return 0.0
+
+    score = 0.0
+    if ziel == kand:
+        score = 100.0
+    else:
+        fm = fuzzy_match(ziel, [kand], mapping, abgelehnt)
+        if fm:
+            score = fm[0][1]
+        if mail:
+            score = max(score, email_aehnlichkeit(mail, anzeige))
+
+    # Eine Nachholung hat Geldwirkung — hier zählt mehr als ein
+    # hoher Punktwert.
+    #
+    # Entweder der Name stimmt praktisch überein (ab 88 %), oder der
+    # Nachname passt eindeutig und der Gesamtwert ist solide. Das
+    # zweite Kriterium fängt Fälle wie eine Kurzform des Vornamens
+    # bei gleichem Nachnamen — die landen bei gut 80 % und wären
+    # sonst durchgefallen. Namenspaare mit bloss ähnlichen
+    # Anfangsbuchstaben bleiben trotzdem draussen, weil dort der
+    # Nachname nicht passt.
+    if score >= 88 or (_nachname_passt(ziel, kand) and score >= 70):
+        return round(score, 1)
+    return 0.0
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def nachhol_kandidaten(name: str, fall_datum: str,
                        fenster: int = None) -> list:
@@ -19098,9 +19176,6 @@ def nachhol_kandidaten(name: str, fall_datum: str,
         anzeige = str(r["Name"])
         ci_datum = str(r["analysis_date"])
 
-        if (ziel, kand) in abgelehnt:
-            continue
-
         # Am Spieltag selbst wäre es kein Nachholen, sondern eine
         # Namensvariante — die läuft über die normale Zuordnung.
         ci_d = parse_date_safe(ci_datum)
@@ -19112,40 +19187,131 @@ def nachhol_kandidaten(name: str, fall_datum: str,
         if eigener_anspruch(kand, ci_datum):
             continue
 
-        score = 0.0
-        if ziel == kand:
-            score = 100.0
-        else:
-            fm = fuzzy_match(ziel, [kand], mapping, abgelehnt)
-            if fm:
-                score = fm[0][1]
-            if mail:
-                score = max(score, email_aehnlichkeit(mail, anzeige))
-
-        # Eine Nachholung hat Geldwirkung — hier zählt mehr als ein
-        # hoher Punktwert.
-        #
-        # Entweder der Name stimmt praktisch überein (ab 88 %), oder der
-        # Nachname passt eindeutig und der Gesamtwert ist solide. Das
-        # zweite Kriterium fängt Fälle wie eine Kurzform des Vornamens
-        # bei gleichem Nachnamen — die landen bei gut 80 % und wären
-        # sonst durchgefallen. Namenspaare mit bloss ähnlichen
-        # Anfangsbuchstaben bleiben trotzdem draussen, weil dort der
-        # Nachname nicht passt.
-        such_vor, such_nach = _namensteile(ziel)
-        kand_vor, kand_nach = _namensteile(kand)
-        # Nachname muss eindeutig passen — und der Vorname wenigstens
-        # erkennbar. Sonst würden zwei verschiedene Menschen mit
-        # gleichem Nachnamen zusammengeworfen.
-        passt = (bool(such_nach) and bool(kand_nach)
-                 and _teil_aehnlich(such_nach, kand_nach) >= 85
-                 and _teil_aehnlich(such_vor, kand_vor) >= 55)
-
-        if score >= 88 or (passt and score >= 70):
-            treffer.append((anzeige, kand, ci_datum, round(score, 1),
-                            tage_danach))
+        score = _nachhol_punktwert(ziel, kand, anzeige, mail,
+                                   mapping, abgelehnt)
+        if score:
+            treffer.append((anzeige, kand, ci_datum, score, tage_danach))
 
     return sorted(treffer, key=lambda x: (-x[3], x[4]))
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def spaetere_checkins_vergeben(name: str, fall_datum: str,
+                               fenster: int = None) -> list:
+    """
+    Die Person HAT nach dem Spieltag eingecheckt — der Check-in hilft
+    diesem Fall aber nicht. Warum nicht?
+
+    → [{"name", "datum", "zeit", "grund", "tage_danach"}, …]
+
+    Das Gegenstück zu `nachhol_kandidaten()`: Dort stehen die Check-ins,
+    die den Fall schliessen können. Hier die, die es nicht können —
+    mitsamt dem Grund.
+
+    Marlen Krüger sagte zu, den Check-in nachzuholen, und tat es auch:
+    am Mittwoch. An demselben Mittwoch spielte sie aber selbst. EGYM
+    vergütet pro Person und Tag nur einmal, also gehört der Check-in
+    ihrem eigenen Platz — für den Fall vom Dienstag bleibt nichts übrig.
+    In den „überzähligen Check-ins" taucht er deshalb nie auf (er ist ja
+    keiner), und der Fall stand ohne Erklärung weiter offen. Marcel
+    suchte den Check-in von Hand und fand ihn erst in der
+    Zuordnungsprüfung.
+
+    Vier Gründe kommen vor, in dieser Reihenfolge geprüft:
+      • der Check-in hat bereits einen anderen Fall geschlossen,
+      • die Person hatte an dem Tag selbst einen Rabatt-Platz offen,
+      • der Check-in gehört zu einer Buchung an demselben Tag,
+      • eine Namensverknüpfung hat ihn einer Buchung zugeschlagen.
+
+    Diese Funktion ändert nichts und entscheidet nichts — sie erklärt
+    nur. Welcher Check-in zugeordnet werden DARF, bleibt allein die
+    Antwort von `nachhol_kandidaten()`; beide fragen über
+    `_nachhol_punktwert()` denselben Namensvergleich.
+    """
+    fenster = fenster or fenster_nachhol()
+    if ist_mitspieler_platzhalter(name):
+        return []
+    start = parse_date_safe(fall_datum)
+    if start is None:
+        return []
+
+    c = loadsheet("checkins")
+    if c.empty or not {"analysis_date", "Name_norm", "Name"} <= set(c.columns):
+        return []
+
+    df = c.copy()
+    df["_d"] = df["analysis_date"].map(parse_date_safe)
+    df = df[df["_d"].notna()]
+    df = df[(df["_d"] > start) & (df["_d"] <= start + timedelta(days=fenster))]
+    if df.empty:
+        return []
+
+    # Zwei Scans am selben Tag sind ein Check-in. Der, der ein Spiel
+    # deckt, erklärt die Lage besser — der kommt nach vorn.
+    if "Gespielt" in df.columns:
+        df = df.sort_values("Gespielt", ascending=False, kind="stable")
+    df = df.drop_duplicates(subset=["analysis_date", "Name_norm"])
+
+    mapping = mapping_laden()
+    abgelehnt = rejected_matches_laden()
+    ziel = normalize_name(name)
+    mail = email_fuer(name)
+    verbraucht = verbrauchte_checkins()
+    belegt = mapping_belegte_checkins()
+    eigener_fall = checkin_schluessel(str(fall_datum), ziel)
+
+    raus = []
+    for _, r in df.iterrows():
+        kand = str(r["Name_norm"])
+        anzeige = str(r["Name"])
+        ci_datum = str(r["analysis_date"])
+        if not _nachhol_punktwert(ziel, kand, anzeige, mail, mapping,
+                                  abgelehnt):
+            continue
+        # Strenger als der Vorschlag — mit Absicht.
+        #
+        # Ein Vorschlag fragt und wartet auf einen Klick. Dieser Hinweis
+        # BEHAUPTET etwas: „Die Person hat eingecheckt." Stimmt der Name
+        # nicht, schickt er Marcel in die falsche Richtung — schlimmer,
+        # als gar nichts zu sagen.
+        #
+        # An den echten Daten vom 15.10. sofort sichtbar: Der Fall heisst
+        # „Daniel" (ein Playtomic-Konto ohne Nachnamen). Zum Zuordnen
+        # bietet die App „Daniel Leone" an, 90 %. Ohne diese Schranke
+        # hätte der Hinweis zusätzlich „Daniel Theophiel hat eingecheckt"
+        # behauptet — ein dritter Mensch.
+        if ziel != kand and not _nachname_passt(ziel, kand):
+            continue
+
+        schluessel = checkin_schluessel(ci_datum, kand)
+        ziel_fall = str(verbraucht.get(schluessel, "") or "")
+        eigene = eigener_anspruch(kand, ci_datum)
+        gespielt = str(r.get("Gespielt", "")) == "Ja"
+        ist_belegt = kand in belegt.get(ci_datum, set())
+
+        if ziel_fall and ziel_fall != eigener_fall:
+            fall_tag = ziel_fall.split("|", 1)[0]
+            grund = ("zählt bereits für den Fall vom "
+                     f"{datum_kurz(fall_tag)}")
+        elif eigene:
+            grund = ("hat an dem Tag selbst mit Rabatt gespielt — "
+                     "EGYM vergütet pro Person und Tag nur einmal")
+        elif gespielt:
+            grund = "gehört zur eigenen Buchung an dem Tag"
+        elif ist_belegt:
+            grund = ("ist über eine Namensverknüpfung schon einer "
+                     "Buchung zugeordnet")
+        else:
+            # Frei — den bietet `nachhol_kandidaten()` zum Zuordnen an.
+            # Hier hätte er nichts zu suchen.
+            continue
+
+        raus.append({"name": anzeige, "datum": ci_datum,
+                     "zeit": str(r.get("Checkin_Zeit", "") or ""),
+                     "grund": grund,
+                     "tage_danach": (parse_date_safe(ci_datum) - start).days})
+
+    return sorted(raus, key=lambda x: x["tage_danach"])
 
 
 def faelle_mit_nachricht(tage: list) -> pd.DataFrame:
