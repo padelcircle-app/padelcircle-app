@@ -359,7 +359,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # läuft, und genau das war am 14.10.2026 die offene Frage: Die Anzeige
 # stand acht Fassungen lang auf „101". `tests/test_23_stand.py` lässt
 # die Gegenprobe scheitern, wenn sie hinterherhinkt.
-APP_STAND       = "Fassung 120 · 17.10.2026"
+APP_STAND       = "Fassung 121 · 17.10.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -4819,7 +4819,13 @@ def offene_freigaben() -> pd.DataFrame:
     noch_gesperrt = (set(historie["Name_norm"].astype(str))
                      if not historie.empty else set())
     offen = offen[~offen["name_norm"].astype(str).isin(noch_gesperrt)]
-    return offen.sort_values("timestamp", ascending=False)
+    # Je Person genau eine Aufgabe, die jüngste. `sheet_zeile_setzen`
+    # hält das Blatt zwar sauber, ältere Fassungen taten es nicht — und
+    # zwei Zeilen zu derselben Person hiessen zwei Knöpfe mit demselben
+    # Namen. Streamlit bricht die ganze Seite ab, wenn ein Knopfname
+    # zweimal vorkommt.
+    return (offen.sort_values("timestamp", ascending=False)
+            .drop_duplicates(subset=["name_norm"], keep="first"))
 
 
 def freigabe_bestaetigen(name_norm: str):
@@ -16928,7 +16934,7 @@ def _wa_tagesarbeit():
     # Automatik, dann die Freigabe-Liste als bleibender Kasten.
     schranke = _freigabe_schranke()
     _auto_dashboard()
-    _freigaben_anzeigen(als_dialog=not schranke)
+    _freigaben_anzeigen(als_dialog=not schranke, bereich="tag")
 
     zaehler = offene_je_tag()
 
@@ -17414,7 +17420,8 @@ def _verknuepfung_loesen_block(df: pd.DataFrame, datum: str):
                 "warn")
 
 
-def _freigabe_dialog(name: str, name_norm: str, letzte_sperre: str = ""):
+def _freigabe_dialog(name: str, name_norm: str, letzte_sperre: str = "",
+                     bereich: str = ""):
     """
     Der Hinweis, dass jemand wieder freigegeben werden muss — mit Beleg.
 
@@ -17422,7 +17429,13 @@ def _freigabe_dialog(name: str, name_norm: str, letzte_sperre: str = ""):
     habe ich entsperrt, weil die sich gestern eingecheckt haben und die
     hatten keine Buchung." Genau das steht jetzt dabei, statt nur
     „hat keine offene Sperre mehr".
+
+    `bereich` trennt die Knopfnamen. Die Liste steht in „Tagesarbeit"
+    UND in „Übersicht", und Streamlit baut beide Reiter in einem Durchlauf
+    — zwei Knöpfe mit demselben Namen brachen die ganze Seite ab
+    (F-2026-10-17-02).
     """
+    kenn = f"{bereich}_{name_norm}" if bereich else str(name_norm)
     beleg = ""
     if letzte_sperre:
         quelle = nachholung_quelle(name_norm, letzte_sperre)
@@ -17437,13 +17450,13 @@ def _freigabe_dialog(name: str, name_norm: str, letzte_sperre: str = ""):
         "hier bestätigen.", "warn")
     f1, f2 = st.columns([1.4, 1])
     with f1:
-        if st.button("✅ Zugang wieder freigegeben", key=f"fg_ok_{name_norm}",
+        if st.button("✅ Zugang wieder freigegeben", key=f"fg_ok_{kenn}",
                      use_container_width=True, type="primary"):
             freigabe_bestaetigen(name_norm)
             st.toast(f"{name} ist freigegeben.")
             st.rerun()
     with f2:
-        if st.button("Später", key=f"fg_spaeter_{name_norm}",
+        if st.button("Später", key=f"fg_spaeter_{kenn}",
                      use_container_width=True):
             st.rerun()
 
@@ -17562,7 +17575,7 @@ def _freigabe_schranke() -> bool:
     return True
 
 
-def _freigaben_anzeigen(als_dialog: bool = True):
+def _freigaben_anzeigen(als_dialog: bool = True, bereich: str = ""):
     """
     Wer wieder freigegeben werden muss — bewusst ganz oben.
 
@@ -17599,10 +17612,11 @@ def _freigaben_anzeigen(als_dialog: bool = True):
 
             @dialog(f"{name} wieder freigeben?")
             def _zeigen(name=name, nn=nn, ls=str(f.get("letzte_sperre", ""))):
-                _freigabe_dialog(name, nn, ls)
+                _freigabe_dialog(name, nn, ls, bereich)
             _zeigen()
         else:
-            _freigabe_dialog(name, nn, str(f.get("letzte_sperre", "")))
+            _freigabe_dialog(name, nn, str(f.get("letzte_sperre", "")),
+                             bereich)
     st.markdown("---")
 
 
@@ -17756,7 +17770,7 @@ def _wa_uebersicht():
     st.markdown("---")
 
     # ── Freigabe nötig ───────────────────────────────────────────────────
-    _freigaben_anzeigen()
+    _freigaben_anzeigen(bereich="uebersicht")
 
     # ── Gesperrt-Historie ────────────────────────────────────────────────
     st.markdown("##### Gesperrte Spieler")
