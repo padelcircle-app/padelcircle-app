@@ -359,7 +359,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # läuft, und genau das war am 14.10.2026 die offene Frage: Die Anzeige
 # stand acht Fassungen lang auf „101". `tests/test_23_stand.py` lässt
 # die Gegenprobe scheitern, wenn sie hinterherhinkt.
-APP_STAND       = "Fassung 121 · 17.10.2026"
+APP_STAND       = "Fassung 122 · 18.10.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -11242,12 +11242,61 @@ def _export_teilnehmer_index(bdf: pd.DataFrame) -> dict:
     return idx
 
 
+def _kontonummer_text(wert) -> str:
+    """
+    Eine Playtomic-Kontonummer als sauberer Text.
+
+    `pandas` liest die Spalte als Kommazahl, weil Zeilen ohne Konto leer
+    sind — aus 17656036 wird 17656036.0. Im Blatt steht danach
+    „17656036", beim nächsten Import heisst dieselbe Zeile wieder
+    „17656036.0", und der Abgleich findet sie nicht wieder: Das Blatt
+    verdoppelte sich bei jedem Import (384 → 768 → 1152 …).
+
+    Dasselbe trifft den Nachschlag in `rabatt_wahrheit()`: Die Zahlungen
+    führen „17656036", die Auskunft „17656036.0" — zwei Schreibweisen
+    derselben Nummer finden sich nie.
+    """
+    if wert is None:
+        return ""
+    try:
+        if pd.isna(wert):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    text = str(wert).strip()
+    if not text or text.lower() in ("nan", "none", "<na>"):
+        return ""
+    # „17656036.0" → „17656036"; echte Nachkommastellen bleiben stehen.
+    if text.endswith(".0"):
+        kern = text[:-2]
+        if kern.lstrip("-").isdigit():
+            return kern
+    return text
+
+
+def rabatte_saeubern(rdf: pd.DataFrame) -> pd.DataFrame:
+    """
+    Die Auskunft auf feste Spalten und reinen Text bringen.
+
+    Alles, was ins Blatt geht, soll genau so wieder herauskommen —
+    sonst stimmen die Schlüssel beim nächsten Import nicht mehr.
+    """
+    df = rdf.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+    for spalte in SHEET_SPALTEN["rabatte"]:
+        if spalte not in df.columns:
+            df[spalte] = ""
+    df = df[SHEET_SPALTEN["rabatte"]]
+    for spalte in SHEET_SPALTEN["rabatte"]:
+        df[spalte] = df[spalte].map(_kontonummer_text)
+    return df
+
+
 def rabatte_speichern(rdf: pd.DataFrame) -> int:
     """Die Rabatt-Auskunft ablegen — je Anmeldung eine Zeile."""
     if rdf is None or rdf.empty or "datum" not in rdf.columns:
         return 0
-    spalten = [c for c in SHEET_SPALTEN["rabatte"] if c in rdf.columns]
-    n = append_rows(rdf[spalten].copy(), "rabatte",
+    n = append_rows(rabatte_saeubern(rdf), "rabatte",
                     ["datum", "zeit", "court", "konto", "payment_id"],
                     aktualisieren=True)
     _cache_funktion_leeren("rabatt_wahrheit")
@@ -12118,17 +12167,27 @@ def _verarbeiten_zahlungen(z_datei, c_datei, o_datei=None,
     # benutzt hat. Sie muss VOR der Rechnung abgelegt sein — die
     # Korrekturschicht liest sie aus dem Blatt.
     if r_datei is not None:
+        # In drei Schritten, jeder mit eigener Meldung. Vorher stand nur
+        # „(TypeError)" da — der Name einer Fehlerart sagt weder, an
+        # welcher Stelle sie auftrat, noch woran es lag, und von hier aus
+        # liess sie sich nicht nachstellen.
+        schritt, rdf = "gelesen", None
         try:
             rdf = pd.read_csv(r_datei)
+            schritt = "gespeichert"
             n = rabatte_speichern(rdf)
+            schritt = "gezählt"
             if n:
                 mit = int((rdf["wellpass"].astype(str).str.lower()
                            == "ja").sum()) if "wellpass" in rdf.columns else 0
                 st.caption(f"Wellpass-Auskunft: {len(rdf)} Anmeldungen, "
                            f"davon {mit} mit Rabatt.")
         except Exception as e:                      # noqa: BLE001
-            st.warning("⚠️ Die Wellpass-Auskunft konnte nicht gelesen "
-                       f"werden ({type(e).__name__}) — gerechnet wird ohne sie.")
+            st.warning(f"⚠️ Die Wellpass-Auskunft wurde nicht {schritt}: "
+                       f"{type(e).__name__} — {str(e)[:200]}. "
+                       "Gerechnet wird ohne sie.")
+            st.caption("Diese Meldung gehört in den Fehlerlog — sie nennt "
+                       "die Stelle, an der es hakt.")
 
     return _analysieren_zahlungen(pdf, cdf, bdf)
 
