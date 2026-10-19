@@ -359,7 +359,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # läuft, und genau das war am 14.10.2026 die offene Frage: Die Anzeige
 # stand acht Fassungen lang auf „101". `tests/test_23_stand.py` lässt
 # die Gegenprobe scheitern, wenn sie hinterherhinkt.
-APP_STAND       = "Fassung 123 · 19.10.2026"
+APP_STAND       = "Fassung 124 · 19.10.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -750,7 +750,14 @@ def get_sheet():
 # Sammelabfrage vorbei und werden erst geholt, wenn sie wirklich
 # gebraucht werden. playtomic_raw allein sind rund 40 % aller Zellen der
 # Mappe — im WhatsApp-Ablauf wird davon keine einzige angefasst.
-LAZY_BLAETTER = ("playtomic_raw", "buchungsexport")
+#
+# `rabatte` kam am 19.10.2026 dazu, bevor es weh tat: Playtomics
+# Auskunft wächst um rund 184 Zeilen am Tag (12 Spalten, also gut 2.200
+# Zellen täglich). Nach einem Jahr wären das über 800.000 Zellen —
+# mehr als die ganze Mappe heute hat. Gelesen wird sie nur beim
+# Einarbeiten neuer Tage; bei jedem anderen Seitenaufbau wird sie nicht
+# einmal angefasst.
+LAZY_BLAETTER = ("playtomic_raw", "buchungsexport", "rabatte")
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
