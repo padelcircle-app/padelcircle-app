@@ -359,7 +359,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # läuft, und genau das war am 14.10.2026 die offene Frage: Die Anzeige
 # stand acht Fassungen lang auf „101". `tests/test_23_stand.py` lässt
 # die Gegenprobe scheitern, wenn sie hinterherhinkt.
-APP_STAND       = "Fassung 122 · 18.10.2026"
+APP_STAND       = "Fassung 123 · 19.10.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -12714,6 +12714,26 @@ def austausch_status() -> dict:
     return stand
 
 
+def _mac_holt_gerade() -> dict:
+    """
+    Ist der Mac in genau diesem Moment am Holen? → Stand oder {}
+
+    Für den Fall, dass im Ordner noch die Dateien von gestern liegen.
+    Dann gibt es zwei sehr verschiedene Lagen, und sie brauchen zwei
+    verschiedene Sätze: Entweder der Mac schläft — dann hilft nur
+    aufwecken. Oder er ist gerade dabei — dann hilft warten.
+
+    `austausch_status()` erkennt ein stehengebliebenes „läuft" selbst
+    (älter als zehn Minuten = Abbruch), hier zählt also wirklich nur
+    das frische.
+    """
+    try:
+        stand = austausch_status()
+    except Exception:                           # noqa: BLE001
+        return {}
+    return stand if stand.get("zustand") == "laeuft" else {}
+
+
 def abgleich_automatisch() -> dict:
     """
     Fehlt ein Tag im Bestand und liegt er im Austausch-Ordner, wird er
@@ -12760,6 +12780,16 @@ def abgleich_automatisch() -> dict:
     im_ordner = austausch_tage(z["inhalt"]) | austausch_tage(c["inhalt"])
     treffer = sorted(fehlend & im_ordner)
     if not treffer:
+        # Marcel am 19.10.2026: Der Mac wachte um 08:19 auf und fing
+        # sofort an zu holen; Marcel öffnete die App um 08:21, mitten
+        # im Lauf. Im Ordner lagen noch die Dateien von gestern, also
+        # sagte die App „von Hand anstossen" — während der Mac genau
+        # das gerade tat. Zwei Minuten später war alles da.
+        stand = _mac_holt_gerade()
+        if stand:
+            return {"tage": [], "warten": True,
+                    "grund": (stand.get("text") or "Der Mac holt gerade.")
+                    + f" (gemeldet {stand.get('alter', 'gerade eben')})"}
         return {"tage": [], "grund": "Im Ordner liegt keiner der fehlenden Tage."}
 
     # Die Spielerliste zuerst — wie beim Knopf. Ohne sie fehlt an einem
@@ -21196,6 +21226,8 @@ def main():
             st.rerun()
         elif _auto["grund"]:
             st.session_state["_auto_abgleich_grund"] = _auto["grund"]
+            st.session_state["_auto_abgleich_warten"] = bool(
+                _auto.get("warten"))
 
     fertig = st.session_state.pop("_auto_abgleich_ergebnis", None)
     if fertig:
@@ -21205,7 +21237,16 @@ def main():
             + ", ".join(datum_kurz(t) for t in fertig)
             + ". Der Mac hatte sie heute früh geholt.", "ok")
     grund = st.session_state.pop("_auto_abgleich_grund", None)
-    if grund:
+    warten = st.session_state.pop("_auto_abgleich_warten", False)
+    if grund and warten:
+        box(f"⏳ <b>Der Mac holt die fehlenden Tage gerade.</b> {grund} "
+            "Sobald er fertig ist, arbeitet die App sie beim nächsten "
+            "Laden ein — ein bis zwei Minuten.", "info")
+        if st.button("↻ Jetzt nachsehen", key="auto_abgleich_nochmal"):
+            st.session_state.pop("_auto_abgleich_versucht", None)
+            st.session_state.pop("drive_dateien", None)
+            st.rerun()
+    elif grund:
         box(f"⚠️ Es fehlen Tage im Bestand, der automatische Abgleich kam "
             f"aber nicht durch: {grund} Unter „Daten“ kannst du ihn von "
             "Hand anstossen.", "warn")
