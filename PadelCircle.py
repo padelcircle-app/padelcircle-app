@@ -359,7 +359,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # läuft, und genau das war am 14.10.2026 die offene Frage: Die Anzeige
 # stand acht Fassungen lang auf „101". `tests/test_23_stand.py` lässt
 # die Gegenprobe scheitern, wenn sie hinterherhinkt.
-APP_STAND       = "Fassung 124 · 19.10.2026"
+APP_STAND       = "Fassung 125 · 21.10.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -12303,6 +12303,9 @@ def altbestand_zuruecknehmen() -> int:
 DRIVE_API = "https://www.googleapis.com/drive/v3"
 AUFTRAG_DATEI = "auftrag.json"
 STATUS_DATEI = "status.json"
+# Was die App schon eingearbeitet hat — damit der Mac weiss, was er
+# mitholen muss. Siehe bestand_melden().
+BESTAND_DATEI = "bestand.json"
 AUSTAUSCH_ARTEN = {"zahlungen": "Zahlungen · bezahlt",
                    "offen":     "Zahlungen · offene Posten",
                    "checkins":  "Wellpass Check-ins",
@@ -12719,6 +12722,52 @@ def austausch_status() -> dict:
                              "gemeldet — er schläft wahrscheinlich. Aufträge "
                              "holt er erst, wenn er wieder wach ist.")
     return stand
+
+
+def bestand_melden() -> bool:
+    """
+    Dem Mac sagen, bis zu welchem Tag die App alles hat.
+
+    → True, wenn gemeldet wurde (nur bei Änderung)
+
+    Der Mac merkt sich bisher nur, was er GEHOLT hat. Das ist nicht
+    dasselbe wie das, was im Sheet steht: Der Austausch-Ordner hält
+    immer nur die letzte Lieferung. Wird Montag der Sonntag geholt und
+    die App nicht geöffnet, und Dienstag der Montag, dann liegt der
+    Sonntag nicht mehr im Ordner — und fehlt im Bestand.
+
+    Marcel am 21.10.2026: „Kannst du einbauen, dass ich auch zwei Tage
+    später beide Tage hole und beide hochlade auf einmal?"
+
+    Mit dieser Meldung holt die Automatik am nächsten Morgen alles mit,
+    was die App noch nicht hat — und nur das.
+
+    Geschrieben wird nur bei Änderung. Sonst wäre es eine
+    Drive-Anfrage bei jedem Seitenaufbau, für eine Zahl, die sich
+    einmal am Tag ändert.
+    """
+    fehlend = sorted(str(t) for t in fehlende_tage_bis_gestern())
+    gestern = date.today() - timedelta(days=1)
+    if fehlend:
+        erster = parse_date_safe(fehlend[0])
+        bis = (erster - timedelta(days=1)) if erster else None
+    else:
+        bis = gestern
+    stand = {"vollstaendig_bis": str(bis) if bis else "",
+             "fehlend": fehlend[:14],
+             "zeit": datetime.now().isoformat(timespec="seconds")}
+
+    frueher = einstellung("bestand_gemeldet") or {}
+    if isinstance(frueher, dict) and \
+            frueher.get("vollstaendig_bis") == stand["vollstaendig_bis"] and \
+            frueher.get("fehlend") == stand["fehlend"]:
+        return False
+
+    geklappt, _meldung = drive_schreiben(
+        BESTAND_DATEI, json.dumps(stand, ensure_ascii=False))
+    if geklappt:
+        einstellung_setzen("bestand_gemeldet", stand)
+    return geklappt
 
 
 def _mac_holt_gerade() -> dict:
@@ -21235,6 +21284,13 @@ def main():
             st.session_state["_auto_abgleich_grund"] = _auto["grund"]
             st.session_state["_auto_abgleich_warten"] = bool(
                 _auto.get("warten"))
+        # Dem Mac sagen, was jetzt im Bestand ist — damit er morgen früh
+        # genau die Tage mitholt, die noch fehlen. Schreibt nur bei
+        # Änderung, kostet also im Normalfall nichts.
+        try:
+            bestand_melden()
+        except Exception:                           # noqa: BLE001
+            pass                                    # eine Meldung, kein Muss
 
     fertig = st.session_state.pop("_auto_abgleich_ergebnis", None)
     if fertig:
