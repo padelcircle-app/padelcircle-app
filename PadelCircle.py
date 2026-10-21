@@ -359,7 +359,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # läuft, und genau das war am 14.10.2026 die offene Frage: Die Anzeige
 # stand acht Fassungen lang auf „101". `tests/test_23_stand.py` lässt
 # die Gegenprobe scheitern, wenn sie hinterherhinkt.
-APP_STAND       = "Fassung 125 · 21.10.2026"
+APP_STAND       = "Fassung 126 · 21.10.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -12196,7 +12196,13 @@ def _verarbeiten_zahlungen(z_datei, c_datei, o_datei=None,
             st.caption("Diese Meldung gehört in den Fehlerlog — sie nennt "
                        "die Stelle, an der es hakt.")
 
-    return _analysieren_zahlungen(pdf, cdf, bdf)
+    ergebnis = _analysieren_zahlungen(pdf, cdf, bdf)
+    if ergebnis:
+        # Welche Tage diese Lieferung abgedeckt hat — auch die ohne eine
+        # einzige Zeile. Sonst hielte fehlende_tage_bis_gestern() einen
+        # leeren Tag für ein Loch und liesse ihn ewig nachholen.
+        tage_gesehen_merken(_abgedeckte_tage(pdf))
+    return ergebnis
 
 
 def tage_entfernen(tage: list) -> dict:
@@ -12881,17 +12887,96 @@ def abgleich_automatisch() -> dict:
     return {"tage": treffer, "grund": ""}
 
 
+# So weit zurück wird nach Lücken MITTENDRIN gesucht. Weiter zurück
+# wäre nicht falsch, aber `von` des Hol-Auftrags richtet sich nach dem
+# ersten fehlenden Tag — eine alte Lücke liesse den Mac zwei Monate
+# aufrollen. Ältere Löcher bleiben Handarbeit.
+LUECKEN_FENSTER_TAGE = 30
+
+
+def gesehene_tage() -> set:
+    """
+    Kalendertage, die schon einmal in einer eingelesenen Datei lagen.
+
+    Nur dafür da, einen Tag OHNE Buchungen von einem Tag zu
+    unterscheiden, der nie eingelesen wurde. Über 74 zusammenhängende
+    Tage im Prüfbestand gab es keinen einzigen Tag ohne Zahlung —
+    sollte es ihn doch einmal geben, wird er genau einmal gemeldet und
+    danach nie wieder.
+    """
+    wert = einstellung("gesehene_tage") or []
+    if isinstance(wert, str):
+        wert = [t for t in wert.split(",") if t.strip()]
+    return {str(t).strip() for t in wert if str(t).strip()}
+
+
+def tage_gesehen_merken(tage) -> int:
+    """Diese Tage lagen in einer Datei — egal ob mit oder ohne Zeilen."""
+    neu = {str(t).strip() for t in tage if str(t).strip()}
+    if not neu:
+        return 0
+    alle = gesehene_tage() | neu
+    grenze = str(date.today() - timedelta(days=400))
+    alle = {t for t in alle if t >= grenze}
+    einstellung_setzen("gesehene_tage", sorted(alle))
+    return len(alle)
+
+
+def _abgedeckte_tage(pdf) -> list:
+    """Jeder Kalendertag zwischen der ersten und der letzten Zahlung."""
+    if pdf is None or pdf.empty or "Service date" not in pdf.columns:
+        return []
+    dt = pdf["Service date"].map(parse_datetime_safe).dropna()
+    if dt.empty:
+        return []
+    von, bis = min(dt).date(), max(dt).date()
+    if (bis - von).days > 400:
+        return []                       # unplausibel — lieber nichts merken
+    return [str(von + timedelta(days=i))
+            for i in range((bis - von).days + 1)]
+
+
 def fehlende_tage_bis_gestern() -> list:
-    """Welche Tage fehlen zwischen dem letzten Tag im Bestand und gestern?"""
-    tage = [str(t) for t in verfuegbare_tage()]
+    """
+    Welche Tage fehlen im Bestand — bis gestern?
+
+    Sah bis Fassung 126 nur auf den LETZTEN Tag im Bestand. Ein Loch
+    mittendrin blieb damit unsichtbar: Am 20.10.2026 lieferte der Mac
+    den 17.–19.10., eingearbeitet wurde nur bis zum 18., und am 21.10.
+    kam der 20. dazu. Der 19. fehlte — aber weil der letzte Tag (20.)
+    gestern war, meldete diese Funktion „nichts fehlt". Damit lief auch
+    alles leer, was auf ihr aufbaut: der automatische Abgleich, der
+    Knopf „fehlende Tage" und die Meldung an den Mac.
+
+    Marcel am 21.10.2026: „Mir fehlt da immer noch der 19."
+
+    Gesucht wird jetzt beides: der Rand nach gestern UND Löcher
+    innerhalb der letzten LUECKEN_FENSTER_TAGE. Ein Tag, der schon
+    einmal in einer Datei lag, gilt als erledigt, auch wenn an ihm
+    nichts gebucht wurde — siehe gesehene_tage().
+    """
+    tage = {str(t) for t in verfuegbare_tage()}
     gestern = date.today() - timedelta(days=1)
     if not tage:
         return [str(gestern)]
-    letzter = parse_date_safe(max(tage))
-    if letzter is None or letzter >= gestern:
-        return []
-    return [str(letzter + timedelta(days=i))
-            for i in range(1, (gestern - letzter).days + 1)]
+    bekannt = sorted(d for d in (parse_date_safe(t) for t in tage) if d)
+    if not bekannt:
+        return [str(gestern)]
+
+    fehlend = []
+    letzter = bekannt[-1]
+    if letzter < gestern:
+        fehlend += [str(letzter + timedelta(days=i))
+                    for i in range(1, (gestern - letzter).days + 1)]
+
+    gesehen = gesehene_tage()
+    tag = max(bekannt[0], gestern - timedelta(days=LUECKEN_FENSTER_TAGE))
+    while tag < letzter:
+        text = str(tag)
+        if text not in tage and text not in gesehen:
+            fehlend.append(text)
+        tag += timedelta(days=1)
+    return sorted(set(fehlend))
 
 
 def _partner_blatt_einrichten(schluessel: str):
