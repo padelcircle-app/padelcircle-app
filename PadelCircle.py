@@ -359,7 +359,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # läuft, und genau das war am 14.10.2026 die offene Frage: Die Anzeige
 # stand acht Fassungen lang auf „101". `tests/test_23_stand.py` lässt
 # die Gegenprobe scheitern, wenn sie hinterherhinkt.
-APP_STAND       = "Fassung 126 · 21.10.2026"
+APP_STAND       = "Fassung 127 · 22.10.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -12307,6 +12307,12 @@ def altbestand_zuruecknehmen() -> int:
 # dort synchronisiert Google Drive den Ordner wie einen normalen Ordner.
 
 DRIVE_API = "https://www.googleapis.com/drive/v3"
+# Der Eintrag für einen frei gewählten Zeitraum und seine Obergrenze.
+# Der Mac bricht einen Lauf nach zehn Minuten ab; drei Tage dauern gut
+# zweieinhalb, also ist bei rund zwei Wochen Schluss.
+SELBST = "Zeitraum selbst wählen"
+SELBST_MAX_TAGE = 14
+
 AUFTRAG_DATEI = "auftrag.json"
 STATUS_DATEI = "status.json"
 # Was die App schon eingearbeitet hat — damit der Mac weiss, was er
@@ -13038,7 +13044,7 @@ def modul_daten():
         else:
             luecke = ""
         auswahl = ([luecke] if luecke else []) + ["Gestern", "Letzte 7 Tage",
-                                                  "Diesen Monat"]
+                                                  "Diesen Monat", SELBST]
         # Die Lücke ändert sich mit jedem Abgleich. Steht in der Sitzung
         # noch die von vorhin, kennt die Auswahl sie nicht mehr.
         if st.session_state.get("drive_zeitraum") not in auswahl:
@@ -13052,10 +13058,48 @@ def modul_daten():
                "Letzte 7 Tage": str(date.today() - timedelta(days=7)),
                "Diesen Monat": str(date.today().replace(day=1))}.get(
                    zeitraum, fehlt[0] if fehlt else gestern)
+        bis = gestern
         knopf = "fehlende Tage" if zeitraum == luecke else zeitraum.lower()
+        fehler = ""
+
+        # Zeitraum selbst wählen — Marcel am 22.10.2026: „Kann ich auch
+        # angeben, die Daten vom 18. bis zum 21. zu holen?" Die festen
+        # Auswahlen treffen den Fall nicht, in dem mitten im Bestand
+        # etwas nachzuholen ist.
+        if zeitraum == SELBST:
+            gestern_tag = date.today() - timedelta(days=1)
+            w1, w2 = st.columns(2)
+            with w1:
+                von_w = st.date_input(
+                    "Von", value=gestern_tag - timedelta(days=2),
+                    max_value=gestern_tag, format="DD.MM.YYYY",
+                    key="drive_von")
+            with w2:
+                bis_w = st.date_input(
+                    "Bis", value=gestern_tag, max_value=gestern_tag,
+                    format="DD.MM.YYYY", key="drive_bis")
+            von, bis = str(von_w), str(bis_w)
+            spanne = (bis_w - von_w).days + 1
+            if bis_w < von_w:
+                fehler = "„Bis“ liegt vor „Von“."
+            elif spanne > SELBST_MAX_TAGE:
+                fehler = (f"{spanne} Tage auf einmal sind zu viel — "
+                          f"höchstens {SELBST_MAX_TAGE}. Playtomic braucht "
+                          "für jeden Export eine eigene Seite; ein langer "
+                          "Zeitraum läuft in die Zeitgrenze des Mac.")
+            knopf = (datum_kurz(von) if von == bis
+                     else f"{datum_kurz(von)}–{datum_kurz(bis)}")
+            if fehler:
+                box("⚠️ " + fehler, "warn")
+            else:
+                st.caption(f"{spanne} " + ("Tag" if spanne == 1 else "Tage")
+                           + " · heute ist noch nicht vorbei und kommt "
+                             "deshalb nicht in Frage.")
+
         with h1:
             if st.button(f"📥 Daten holen · {knopf}", type="primary",
-                         use_container_width=True, key="btn_drive_holen"):
+                         use_container_width=True, key="btn_drive_holen",
+                         disabled=bool(fehler)):
                 # Der Auftrag liegt im Austausch-Ordner. Das Hol-Programm auf
                 # dem Mac sieht ihn dort, lädt die vier Dateien und meldet
                 # sich über status.json zurück. Die App wartet darauf —
@@ -13066,7 +13110,9 @@ def modul_daten():
                         {"gestellt": gestellt.isoformat(timespec="seconds"),
                          # Heute ist noch nicht vorbei — halbe Tage ergäben
                          # offene Fälle für Leute, die gleich erst spielen.
-                         "von": von, "bis": gestern},
+                         # `bis` ist deshalb höchstens gestern; bei einem
+                         # selbst gewählten Zeitraum kann es früher liegen.
+                         "von": von, "bis": bis},
                         ensure_ascii=False))
                 st.session_state.pop("drive_wartet", None)
                 if not geklappt:
