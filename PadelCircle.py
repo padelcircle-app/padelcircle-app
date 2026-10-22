@@ -359,7 +359,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # läuft, und genau das war am 14.10.2026 die offene Frage: Die Anzeige
 # stand acht Fassungen lang auf „101". `tests/test_23_stand.py` lässt
 # die Gegenprobe scheitern, wenn sie hinterherhinkt.
-APP_STAND       = "Fassung 128 · 22.10.2026"
+APP_STAND       = "Fassung 129 · 22.10.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -10415,6 +10415,42 @@ def wellpass_platz_beim_gast(bdf, bewertet: list, checkins: list) -> set:
     return umbuchen
 
 
+def zusatz_ohne_doppelte(zusatz: list, bewertet: list) -> tuple:
+    """
+    Ein Mensch, eine Uhrzeit, eine Zeile. → (bereinigte Liste, Anzahl weg)
+
+    Dieselbe Person kann auf zwei Wegen in die Auswertung kommen: über
+    ihre eigene Zahlungszeile UND als Mitspieler, den die Buchungsdatei
+    benennt, weil jemand anderes für sie bezahlt hat. Beides zusammen
+    sind zwei Zeilen für einen Platz. EGYM vergütet aber einmal, und die
+    zweite Zeile lässt sich nicht schliessen: Der Check-in hängt an der
+    einen, die andere bleibt für immer offen.
+
+    Marcel am 22.10.2026, Jonas.valentino, 21.10., 17:00: In der
+    Zuordnungsprüfung stand „zugeordnet zu Jonas.valentino", im
+    Tagesgeschäft stand er trotzdem als offener Fall. Zwei Zeilen, zwei
+    Antworten — genau der Widerspruch, den die Prüfansicht aufdecken
+    soll, nur diesmal in den Daten selbst.
+
+    Die eigene Zahlungszeile gewinnt: An ihr hängen das
+    Playtomic-Konto, die Rabatt-Auskunft und die Check-in-Zuordnung.
+    Ein „Mitspieler von …" ohne Namen kollidiert nie — der trägt einen
+    eigenen Platzhalternamen. Ein stornierter Platz zählt nicht als
+    eigene Zeile; er erzeugt gar keine, und dann ist die Zeile aus der
+    Buchungsdatei die einzige, die es gibt.
+    """
+    eigene = {(str(g["datum"]), g["zeit"], g["name_norm"])
+              for g, art, *_rest in bewertet if art != "storniert"}
+    behalten, weg = [], 0
+    for z in zusatz:
+        schluessel = (str(z["datum"]), z["zeit"], z["name_norm"])
+        if schluessel in eigene and not z.get("ohne_namen"):
+            weg += 1
+            continue
+        behalten.append(z)
+    return behalten, weg
+
+
 def _analysieren_zahlungen(pdf, cdf, bdf=None, tage_ersetzen=None) -> bool:
     """
     Wellpass-Abgleich allein aus Zahlungen und Check-ins.
@@ -10654,6 +10690,14 @@ def _analysieren_zahlungen(pdf, cdf, bdf=None, tage_ersetzen=None) -> bool:
                 "grund": (f"0 € — Wellpass-Platz, den {g['name']} mitbezahlt "
                           "hat · wer das war, steht in Playtomic"),
             })
+
+    zusatz, doppelt = zusatz_ohne_doppelte(zusatz, bewertet)
+    if doppelt:
+        st.caption(
+            f"{doppelt} " + ("Platz" if doppelt == 1 else "Plätze")
+            + " doppelt: Die Person hat eine eigene Zahlungszeile und steht "
+              "zusätzlich als Mitspieler in der Buchungsdatei. Gezählt wird "
+              "die eigene.")
 
     ansprueche = [(g, txt) for g, art, txt, _v, _a in bewertet
                   if art == "wellpass"]
