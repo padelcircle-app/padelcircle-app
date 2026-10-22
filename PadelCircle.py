@@ -359,7 +359,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # läuft, und genau das war am 14.10.2026 die offene Frage: Die Anzeige
 # stand acht Fassungen lang auf „101". `tests/test_23_stand.py` lässt
 # die Gegenprobe scheitern, wenn sie hinterherhinkt.
-APP_STAND       = "Fassung 127 · 22.10.2026"
+APP_STAND       = "Fassung 128 · 22.10.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -10551,13 +10551,13 @@ def _analysieren_zahlungen(pdf, cdf, bdf=None, tage_ersetzen=None) -> bool:
             if w is None or tag not in bekannt or g.get("turnier"):
                 neu_bewertet.append((g, art, txt, voll, eigen))
                 continue
-            if w["wellpass"] and art != "wellpass":
+            if rabatt_gewaehrt(w) and art != "wellpass":
                 art = "wellpass"
                 voll, eigen = w["preis"], w["gezahlt"]
                 txt = (f"{euro(eigen)} statt {euro(voll)} — laut Playtomic"
                        if eigen else "0 € — Platz über Wellpass gedeckt")
                 richtig += 1
-            elif not w["wellpass"] and art == "wellpass":
+            elif not rabatt_gewaehrt(w) and art == "wellpass":
                 # Genau Marcels Fall: Der Betrag sah nach Rabatt aus,
                 # weil er den Anteil eines anderen enthielt.
                 art = "vollzahler"
@@ -11308,6 +11308,38 @@ def rabatte_speichern(rdf: pd.DataFrame) -> int:
                     aktualisieren=True)
     _cache_funktion_leeren("rabatt_wahrheit")
     return n
+
+
+def rabatt_gewaehrt(w: dict) -> bool:
+    """
+    Hat der Wellpass an diesem Platz wirklich den Preis gesenkt?
+
+    Playtomic setzt das Wellpass-Kennzeichen auch dann, wenn der Rabatt
+    am Ende NICHT abgezogen wurde. Niklas Weltner, 19.10.2026, 17:00,
+    Single Court Padel 6: In der Auskunft steht `wellpass = ja`, in der
+    Reservierung steht „Egym Wellpass" — und bezahlt hat er die vollen
+    22 €, Preis wie Zahlung gleich. Die App machte daraus einen offenen
+    Fall und wollte ihm schreiben, er habe den Check-in vergessen.
+    Dabei ist kein Geld offen: Der Platz ist voll bezahlt, von EGYM ist
+    nichts zu holen, und es gibt nichts nachzuholen.
+
+    Marcel am 22.10.2026: „Da ist genauso wieder der gleiche Fehler."
+    Diesmal in die andere Richtung — die Auskunft aus Fassung 119 hat
+    ihn erzeugt.
+
+    Gemessen an der Datei vom 22.10.: 81 Zeilen mit Wellpass sind
+    wirklich rabattiert, genau EINE ist es nicht. Die eine ist seine.
+
+    Kennt die Auskunft keinen Preis (0 oder leer), bleibt es beim
+    Kennzeichen — dann ist nichts zu vergleichen, und raten wäre
+    schlechter als das, was dasteht.
+    """
+    if not w or not w.get("wellpass"):
+        return False
+    preis = float(w.get("preis") or 0)
+    if preis <= 0:
+        return True                         # nichts zu vergleichen
+    return float(w.get("gezahlt") or 0) < preis - 0.01
 
 
 @st.cache_data(ttl=900, show_spinner=False)
