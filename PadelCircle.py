@@ -359,7 +359,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # läuft, und genau das war am 14.10.2026 die offene Frage: Die Anzeige
 # stand acht Fassungen lang auf „101". `tests/test_23_stand.py` lässt
 # die Gegenprobe scheitern, wenn sie hinterherhinkt.
-APP_STAND       = "Fassung 129 · 22.10.2026"
+APP_STAND       = "Fassung 130 · 25.10.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -16920,9 +16920,12 @@ def _wa_seitenspalte(datum: str, offen_heute: pd.DataFrame):
             ziel_norm = normalize_name(erklaerung["treffer"])
             if st.button(f"↔ Ist {erklaerung['treffer']}",
                          key=f"uez_map_{datum}_{i}", use_container_width=True):
-                mapping_hinzufuegen(ziel_norm, ci_norm, bester_score)
-                cache_leeren()
-                st.toast("Als dieselbe Person gemerkt.")
+                with st.spinner("Gemerkt — der Tag wird neu gerechnet …"):
+                    gerechnet = verknuepfung_anlegen(ziel_norm, ci_norm,
+                                                     datum, bester_score)
+                st.toast("Als dieselbe Person gemerkt."
+                         if gerechnet else "Gemerkt — der Tag liess sich "
+                         "aber nicht neu rechnen.")
                 st.rerun()
         elif warnung:
             box(warnung, "warn")
@@ -17150,11 +17153,16 @@ def _wa_fall(r, i: int, datum: str, angeboten: set = None, rang: int = 0):
         with v1:
             if st.button("✓ Ist dieselbe", key=f"wa_zu_{datum}_{i}",
                          type="primary", use_container_width=True):
-                mapping_hinzufuegen(nn, bester_norm, score,
-                                    user_id=str(r.get("User_Id", "") or ""))
-                if nachholung_speichern(datum, bester_norm, datum, nn):
-                    st.toast("Gemerkt.")
-                    st.rerun()
+                # Erst die Nachholung festhalten, dann verknüpfen und
+                # rechnen: Die Neuberechnung schreibt die Buchungszeilen
+                # neu und soll die Nachholung dabei schon kennen.
+                nachholung_speichern(datum, bester_norm, datum, nn)
+                with st.spinner("Gemerkt — der Tag wird neu gerechnet …"):
+                    verknuepfung_anlegen(
+                        nn, bester_norm, datum, score,
+                        user_id=str(r.get("User_Id", "") or ""))
+                st.toast("Gemerkt.")
+                st.rerun()
         with v2:
             if st.button("✗ Nein", key=f"wa_ab_{datum}_{i}",
                          use_container_width=True):
@@ -17588,6 +17596,37 @@ def checkin_zuordnungen(datum: str) -> pd.DataFrame:
         zeilen.append(eintrag)
 
     return pd.DataFrame(zeilen)
+
+
+def verknuepfung_anlegen(buchung_norm: str, checkin_norm: str, datum: str,
+                         score: float = 100.0, user_id: str = "") -> bool:
+    """
+    Zwei Namen als dieselbe Person merken — und den Tag neu rechnen.
+
+    Das Gegenstück zu `verknuepfung_aufloesen()`, und es braucht
+    denselben dritten Schritt aus demselben Grund: Die Spalten
+    `Check-in` und `Checkin_Name` stehen FEST in den Buchungszeilen.
+    Ohne neue Rechnung bleibt dort stehen, dass kein Check-in da ist —
+    auch wenn die Verknüpfung längst gespeichert ist.
+
+    Marcel am 25.10.2026: „Du sagst mir, dass du den einen zugeordnet
+    hast, laut der Zuordnung, aber der taucht mir trotzdem als offener
+    Fall auf. Und das ist immer bei dem, wo ich den selber verknüpft
+    habe." Genau das: Die Zuordnungsprüfung liest die Buchungszeile und
+    zeigt „von dir verknüpft", die Fallliste liest dieselbe Zeile und
+    sieht „Check-in: Nein". Zwei Ansichten, zwei Antworten.
+
+    Scheitert die Neuberechnung, ist die Verknüpfung trotzdem
+    gespeichert — darum die ehrliche Rückgabe.
+
+    → True, wenn der Tag neu gerechnet wurde
+    """
+    mapping_hinzufuegen(str(buchung_norm), str(checkin_norm), score,
+                        user_id=str(user_id or ""))
+    cache_leeren()
+    if not datum:
+        return False
+    return neu_berechnen([str(datum)])
 
 
 def verknuepfung_aufloesen(buchung_norm: str, checkin_norm: str,
