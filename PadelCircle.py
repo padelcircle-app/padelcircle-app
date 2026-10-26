@@ -359,7 +359,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # läuft, und genau das war am 14.10.2026 die offene Frage: Die Anzeige
 # stand acht Fassungen lang auf „101". `tests/test_23_stand.py` lässt
 # die Gegenprobe scheitern, wenn sie hinterherhinkt.
-APP_STAND       = "Fassung 130 · 25.10.2026"
+APP_STAND       = "Fassung 131 · 26.10.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -14033,6 +14033,28 @@ def _dash_tag():
             "Tag", tage, format_func=datum_lang,
             label_visibility="collapsed", key="tag_wahl")
 
+    # Diesen Tag neu rechnen — dort, wo man steht.
+    #
+    # Eine Korrektur an den Rechenregeln ändert nur, wie Zeilen NEU
+    # geschrieben werden. Was im Blatt steht, bleibt stehen, bis der Tag
+    # neu gerechnet wird. Marcel hat deswegen zweimal denselben Fall
+    # gemeldet (Jonas.valentino, 21.10.), und beide Male lautete die
+    # Antwort „geh in die Daten-Zentrale, Reiter Bestand, Einzelne Tage
+    # wählen". Ein Weg, den man dreimal erklären muss, gehört an die
+    # Stelle, wo das Problem sichtbar wird.
+    with st.expander("Stimmt hier etwas nicht?"):
+        box("Nach einer Korrektur an den Rechenregeln steht im Blatt noch "
+            "das alte Ergebnis. Dieser Knopf rechnet den Tag aus den "
+            "gespeicherten Zahlungen neu. Deine Verknüpfungen, "
+            "Nachholungen und erledigten Fälle bleiben unberührt.", "info")
+        if st.button(f"🔄 {datum_lang(datum)} neu berechnen",
+                     use_container_width=True, key=f"tag_neu_{datum}"):
+            with st.spinner("Wird neu gerechnet …"):
+                erfolg = neu_berechnen([str(datum)])
+            if erfolg:
+                st.toast("Neu gerechnet.")
+                st.rerun()
+
     st.markdown("")
     k = tages_kennzahlen(datum)
 
@@ -17363,6 +17385,27 @@ def _wa_tagesarbeit():
 
     datum = st.session_state.wa_tag_wahl
     offen = offene_fehler(datum)
+
+    # Diesen Tag neu rechnen — hier, wo der Fall steht.
+    #
+    # Eine Korrektur an den Rechenregeln ändert nur, wie Zeilen NEU
+    # geschrieben werden. Was im Blatt steht, bleibt stehen. Marcel hat
+    # denselben Fall zweimal gemeldet (Jonas.valentino, 21.10.), und
+    # beide Male lautete die Antwort „geh in die Daten-Zentrale, Reiter
+    # Bestand, Einzelne Tage wählen". Ein Weg, den man zweimal erklären
+    # muss, gehört an die Stelle, wo das Problem sichtbar wird.
+    with st.expander("Ein Fall sieht falsch aus?"):
+        box("Nach einer Korrektur an den Rechenregeln steht im Blatt noch "
+            "das alte Ergebnis — der Fall verschwindet erst, wenn der Tag "
+            "neu gerechnet wird. Verknüpfungen, Nachholungen und erledigte "
+            "Fälle bleiben dabei unberührt.", "info")
+        if st.button(f"🔄 {datum_lang(datum)} neu berechnen",
+                     use_container_width=True, key=f"wa_neu_{datum}"):
+            with st.spinner("Wird neu gerechnet …"):
+                erfolg = neu_berechnen([str(datum)])
+            if erfolg:
+                st.toast("Neu gerechnet.")
+                st.rerun()
 
     st.markdown("")
 
