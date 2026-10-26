@@ -359,7 +359,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # läuft, und genau das war am 14.10.2026 die offene Frage: Die Anzeige
 # stand acht Fassungen lang auf „101". `tests/test_23_stand.py` lässt
 # die Gegenprobe scheitern, wenn sie hinterherhinkt.
-APP_STAND       = "Fassung 131 · 26.10.2026"
+APP_STAND       = "Fassung 132 · 26.10.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -15306,10 +15306,7 @@ def _vielspieler():
                            f"seit {datum_kurz(r['erster_besuch'])}")
             with c2:
                 nummer = telefon_fuer(str(r["Name"])) if hat_nummern else ""
-                if nummer:
-                    st.caption(f"📱 {nummer}")
-                else:
-                    st.caption("keine Nummer")
+                kontakt_kopierbar("📱 Telefon", nummer, "keine Nummer")
 
             text = danke_nachricht(str(r["Name"]), int(r["buchungen"]))
             with st.expander("Danke-Nachricht"):
@@ -15365,7 +15362,7 @@ def _winback():
                        f"({datum_kurz(r['letzter_besuch'])})")
         with c2:
             nummer = telefon_fuer(str(r["Name"])) if hat_nummern else ""
-            st.caption(f"📱 {nummer}" if nummer else "keine Nummer")
+            kontakt_kopierbar("📱 Telefon", nummer, "keine Nummer")
 
         text = winback_nachricht(str(r["Name"]), int(r["tage_her"]))
         with st.expander("Nachricht"):
@@ -17058,6 +17055,27 @@ def _wa_seitenspalte(datum: str, offen_heute: pd.DataFrame):
 WA_BLOCK = 10
 
 
+def kontakt_kopierbar(symbol: str, wert: str, leer: str):
+    """
+    Telefonnummer oder E-Mail zum Kopieren anzeigen.
+
+    Marcel am 26.10.2026: „Kannst du mir einen kleinen Kopieren-Knopf
+    neben Mail und Nummer machen?" Streamlit bringt genau einen
+    eingebauten Kopierknopf mit — den an einem `st.code`-Block, oben
+    rechts beim Überfahren mit der Maus. Ein eigener Knopf bräuchte ein
+    eingebettetes HTML-Fenster je Fall; bei zehn Fällen wären das
+    zwanzig davon auf einer Seite.
+
+    Kopiert wird nur der Wert. Das Symbol steht in der Zeile darüber,
+    damit es nicht mit in die Zwischenablage wandert.
+    """
+    if not wert:
+        st.caption(f"{symbol} {leer}")
+        return
+    st.caption(symbol)
+    st.code(wert, language=None)
+
+
 def _wa_fall(r, i: int, datum: str, angeboten: set = None, rang: int = 0):
     """Ein einzelner Fall mit allen Aktionen."""
     name = str(r["Name"])
@@ -17115,9 +17133,10 @@ def _wa_fall(r, i: int, datum: str, angeboten: set = None, rang: int = 0):
 
     k1, k2 = st.columns(2)
     with k1:
-        st.caption(f"📱 {nummer}" if len(nummer) > 5 else "📱 keine Nummer")
+        kontakt_kopierbar("📱 Telefon",
+                          nummer if len(nummer) > 5 else "", "keine Nummer")
     with k2:
-        st.caption(f"✉️ {mail}" if mail else "✉️ keine E-Mail")
+        kontakt_kopierbar("✉️ E-Mail", mail, "keine E-Mail")
     if kontakt["unsicher"]:
         box(f"⚠️ <b>Kontakt nicht eindeutig.</b> {kontakt['grund']}", "warn")
 
