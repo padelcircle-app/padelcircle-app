@@ -121,6 +121,11 @@ CONFIG = {
     # (11,40 € statt 12,35 € pro Check-in).
     "wellpass_brutto":     13.00,
     "wellpass_anteil":      0.95,
+    # Mehrwertsteuer. Wird gebraucht, weil die zwei Geldquellen auf
+    # verschiedenen Böden stehen: was Playtomic abrechnet und auszahlt,
+    # ist netto; die 12,35 € je Check-in von EGYM sind brutto. Beides
+    # einfach zu addieren ergibt eine Zahl, die es nicht gibt.
+    "mwst":                 0.19,
     # Was Playtomic pro Wellpass-Spieler vom Platzpreis abzieht.
     # NICHT dasselbe wie wellpass_brutto — das ist die Vergütung von EGYM.
     # Der Abzug hat sich im Betrieb schon geändert (13,00 € → 12,00 €),
@@ -335,6 +340,21 @@ LOADING = {
 WELLPASS_WERT   = round(CONFIG["wellpass_brutto"] * CONFIG["wellpass_anteil"], 2)
 
 
+def netto_aus_brutto(brutto: float) -> float:
+    """
+    Brutto → netto. Ein Satz, eine Stelle.
+
+    Gebraucht für die Wellpass-Vergütung: EGYM zahlt 12,35 € brutto je
+    Check-in, Playtomic rechnet netto ab. Erst wenn beides netto steht,
+    darf man es zusammenzählen.
+    """
+    return round(float(brutto) / (1.0 + CONFIG["mwst"]), 2)
+
+
+# Was ein Check-in netto wert ist — 12,35 € brutto bei 19 % sind 10,38 €.
+WELLPASS_WERT_NETTO = netto_aus_brutto(WELLPASS_WERT)
+
+
 def wellpass_wert_am(datum=None) -> float:
     """
     Was EGYM dir pro Check-in zahlt: 13,00 € brutto, davon 95 %.
@@ -359,7 +379,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # läuft, und genau das war am 14.10.2026 die offene Frage: Die Anzeige
 # stand acht Fassungen lang auf „101". `tests/test_23_stand.py` lässt
 # die Gegenprobe scheitern, wenn sie hinterherhinkt.
-APP_STAND       = "Fassung 132 · 26.10.2026"
+APP_STAND       = "Fassung 133 · 29.10.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -1668,7 +1688,13 @@ def fenster_rueckblick() -> int:
 
 
 def monatsziel(monat: str = None) -> float:
-    """Monatsziel in €. Pro Monat überschreibbar, sonst Standardwert."""
+    """
+    Monatsziel in €, netto. Pro Monat überschreibbar, sonst Standardwert.
+
+    Netto, weil die App den Monat netto rechnet: Playtomic zahlt netto,
+    die EGYM-Vergütung wird vor dem Zusammenzählen auf netto gebracht.
+    Ein Ziel in Bruttozahlen wäre je Monat anders viel wert.
+    """
     if monat:
         spezial = einstellung(f"monatsziel_{monat}")
         if spezial is not None:
@@ -3013,8 +3039,9 @@ def _kennzahlen(df: pd.DataFrame) -> dict:
         "umsatz": 0.0, "online": 0.0, "guthaben": 0.0,
         "baelle": 0.0, "schlaeger": 0.0, "sonstige": 0.0,
         "wellpass_anzahl": 0, "wellpass_wert": 0.0,
+        "wellpass_netto": 0.0,
         "buchungen": 0, "team_buchungen": 0,
-        "gesamt_effektiv": 0.0, "spieler": 0,
+        "gesamt_effektiv": 0.0, "gesamt_netto": 0.0, "spieler": 0,
     }
     if df.empty:
         return k
@@ -3044,7 +3071,15 @@ def _kennzahlen(df: pd.DataFrame) -> dict:
         k["sonstige"] = float(extras.loc[~(extras["_baelle"] | extras["_schlaeger"]),
                                          "_betrag"].sum())
 
+    # Zwei Summen, weil zwei Böden:
+    #   gesamt_effektiv — was auf dem Konto landet (Playtomic netto
+    #                     plus Wellpass brutto). Die Zahl zum Zählen,
+    #                     nicht zum Vergleichen.
+    #   gesamt_netto    — beides netto. Die Zahl, mit der man rechnet,
+    #                     Monate vergleicht und Ziele setzt.
+    k["wellpass_netto"] = netto_aus_brutto(k["wellpass_wert"])
     k["gesamt_effektiv"] = round(k["umsatz"] + k["wellpass_wert"], 2)
+    k["gesamt_netto"] = round(k["umsatz"] + k["wellpass_netto"], 2)
     return k
 
 
@@ -3115,7 +3150,7 @@ def wert_je_wochentag() -> dict:
         return {}
     je_wochentag = {}
     for tag in {d for d in roh["_datum"] if d is not None}:
-        wert = _kennzahlen(roh[roh["_datum"] == tag])["gesamt_effektiv"]
+        wert = _kennzahlen(roh[roh["_datum"] == tag])["gesamt_netto"]
         je_wochentag.setdefault(tag.weekday(), []).append(wert)
     alle = [w for liste in je_wochentag.values() for w in liste]
     mittel = sum(alle) / len(alle) if alle else 0.0
@@ -3178,13 +3213,17 @@ def monats_hochrechnung(monat: str, bis_tag: int, ist: float) -> dict:
 
 
 def vergleichs_urteil(jetzt: dict, frueher: list,
-                      feld: str = "gesamt_effektiv") -> dict:
+                      feld: str = "gesamt_netto") -> dict:
     """
     Wie steht der laufende Monat da?
     → {schnitt, bestes, abstand, prozent, hochrechnung, verlaesslich}
 
-    Gerechnet wird mit `gesamt_effektiv` — Platzeinnahmen PLUS
-    EGYM-Vergütung. Marcel am 08.10.2026: „du hast bei der
+    Gerechnet wird mit `gesamt_netto` — Platzeinnahmen PLUS
+    EGYM-Vergütung, beides netto. Die EGYM-Vergütung kommt brutto
+    herein; sie unverändert auf Playtomics Nettobeträge zu addieren
+    hätte jeden Monat um die Mehrwertsteuer der Check-ins zu hoch
+    ausgewiesen — und zwar einen Monat mit vielen Check-ins stärker
+    als einen mit wenigen. Genau deshalb wäre ein Vergleich schief. Marcel am 08.10.2026: „du hast bei der
     Zusammenrechnung vom Monat aber Wellpass vergessen." Stimmt: Die
     Vergütung ist bei einer Halle mit so vielen Wellpass-Spielern ein
     erheblicher Teil, und ein Monat mit vielen Check-ins sah ohne sie
@@ -5543,10 +5582,14 @@ def prognose_monat(monat: str) -> dict:
         vergangen = tage_im_monat
 
     tage_mit_daten = len(tage) or 1
-    schnitt = k["gesamt_effektiv"] / tage_mit_daten
+    # Netto als Grundlage: Playtomic rechnet netto ab, EGYM zahlt
+    # brutto. Nur netto sind die Monate untereinander vergleichbar —
+    # und nur so bedeutet das Monatsziel in jedem Monat dasselbe.
+    schnitt = k["gesamt_netto"] / tage_mit_daten
 
     return {
-        "ist": k["gesamt_effektiv"],
+        "ist": k["gesamt_netto"],
+        "ist_konto": k["gesamt_effektiv"],
         "schnitt_pro_tag": round(schnitt, 2),
         "prognose": round(schnitt * tage_im_monat, 2),
         "tage_erfasst": tage_mit_daten,
@@ -14062,19 +14105,20 @@ def _dash_tag():
     idx = tage.index(datum)
     vor = tages_kennzahlen(tage[idx + 1]) if idx + 1 < len(tage) else None
     delta_umsatz = None
-    if vor and vor["gesamt_effektiv"]:
-        delta_umsatz = ((k["gesamt_effektiv"] - vor["gesamt_effektiv"])
-                        / vor["gesamt_effektiv"] * 100)
+    if vor and vor["gesamt_netto"]:
+        delta_umsatz = ((k["gesamt_netto"] - vor["gesamt_netto"])
+                        / vor["gesamt_netto"] * 100)
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        kpi("Gesamt effektiv", geld(k["gesamt_effektiv"]), "inkl. Wellpass",
+        kpi("Gesamt netto", geld(k["gesamt_netto"]),
+            f"{geld(k['gesamt_effektiv'])} aufs Konto",
             delta=delta_umsatz, delta_text="ggü. Vortag")
     with c2:
-        kpi("Playtomic", geld(k["umsatz"]), f"{k['buchungen']} Buchungen")
+        kpi("Playtomic netto", geld(k["umsatz"]), f"{k['buchungen']} Buchungen")
     with c3:
         kpi("Wellpass", str(k["wellpass_anzahl"]),
-            f"{geld(k['wellpass_wert'])} von EGYM")
+            f"{geld(k['wellpass_wert'])} brutto von EGYM")
     with c4:
         kpi("Spieler", str(k["spieler"]), "eindeutige Personen")
 
@@ -14105,22 +14149,30 @@ def _dash_monat():
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        kpi("Gesamt effektiv", geld(k["gesamt_effektiv"]), "inkl. Wellpass")
+        kpi("Gesamt netto", geld(k["gesamt_netto"]),
+            f"{geld(k['gesamt_effektiv'])} aufs Konto")
     with c2:
-        kpi("Playtomic", geld(k["umsatz"]))
+        kpi("Playtomic netto", geld(k["umsatz"]))
     with c3:
-        kpi("Wellpass", geld(k["wellpass_wert"]),
-            f"{k['wellpass_anzahl']} Check-ins")
+        kpi("Wellpass brutto", geld(k["wellpass_wert"]),
+            f"{k['wellpass_anzahl']} Check-ins · "
+            f"{geld(k['wellpass_netto'])} netto")
     with c4:
         kpi("Ø pro Tag", geld(pg["schnitt_pro_tag"]),
-            f"{pg['tage_erfasst']} Tage erfasst")
+            f"netto · {pg['tage_erfasst']} Tage erfasst")
+
+    st.caption(
+        "Playtomic rechnet netto ab, EGYM zahlt brutto. „Gesamt netto\" "
+        "ist die vergleichbare Zahl, „aufs Konto\" das, was wirklich "
+        "überwiesen wird. Ziel und Hochrechnung laufen auf netto. "
+        "Einzelheiten im Reiter Einnahmen.")
 
     # ── Zielfortschritt ─────────────────────────────────────────────────
     ziel = pg["ziel"]
     if ziel > 0:
         st.markdown("")
-        erreicht = prozent(k["gesamt_effektiv"], ziel)
-        rest = max(0.0, ziel - k["gesamt_effektiv"])
+        erreicht = prozent(k["gesamt_netto"], ziel)
+        rest = max(0.0, ziel - k["gesamt_netto"])
         prog_text = (f"Hochrechnung Monatsende: <b>{geld(pg['prognose'])}</b><br>"
                      f"Ziel: {geld(ziel)} · "
                      + (f"noch {geld(rest)}" if rest > 0 else "Ziel erreicht 🎉"))
@@ -14792,22 +14844,46 @@ def _dash_einnahmen():
                          key="ein_monat")
 
     k = monats_kennzahlen(monat)
-    playtomic = float(k["umsatz"])
-    wellpass = float(k["wellpass_wert"])
-    gesamt = playtomic + wellpass
+    playtomic = float(k["umsatz"])          # netto, so rechnet Playtomic ab
+    wellpass = float(k["wellpass_wert"])    # brutto, so zahlt EGYM
+    wellpass_netto = float(k["wellpass_netto"])
+    gesamt = round(playtomic + wellpass, 2)        # was aufs Konto kommt
+    gesamt_netto = float(k["gesamt_netto"])        # vergleichbare Zahl
+    mwst_drin = round(wellpass - wellpass_netto, 2)
+    satz = wellpass_wert_am(f"{monat}-01")
 
     box("Nur die beiden Quellen, die dir tatsächlich Geld überweisen. "
         "Gerechnet wird ausschliesslich mit den hochgeladenen Exporten — "
         "wie du einen Fall später abschliesst, ändert hier nichts.", "info")
 
+    st.markdown("**So kommt das Geld an**")
     e1, e2, e3 = st.columns(3)
     with e1:
-        kpi("Playtomic", geld(playtomic), f"{k['buchungen']} Buchungen")
+        kpi("Playtomic netto", geld(playtomic), f"{k['buchungen']} Buchungen")
     with e2:
-        kpi("Wellpass", geld(wellpass),
-            f"{k['wellpass_anzahl']} vergütete Check-ins")
+        kpi("Wellpass brutto", geld(wellpass),
+            f"{k['wellpass_anzahl']} × {euro(satz)}")
     with e3:
-        kpi("Gesamt", geld(gesamt), monat_lang(monat))
+        kpi("Auf dem Konto", geld(gesamt), "netto + brutto gemischt")
+
+    st.markdown("**Alles netto — die vergleichbare Zahl**")
+    n1, n2, n3 = st.columns(3)
+    with n1:
+        kpi("Wellpass netto", geld(wellpass_netto),
+            f"{euro(satz)} brutto = {euro(netto_aus_brutto(satz))} netto")
+    with n2:
+        kpi("Gesamt netto", geld(gesamt_netto), monat_lang(monat))
+    with n3:
+        kpi("Darin MwSt", geld(mwst_drin),
+            f"{CONFIG['mwst']*100:.0f} % aus der EGYM-Vergütung")
+
+    box("ℹ️ <b>Warum zwei Summen?</b> Playtomic rechnet netto ab — der "
+        "Betrag im Export ist schon ohne Mehrwertsteuer. EGYM zahlt "
+        f"{euro(satz)} je Check-in <b>brutto</b>, da steckt die "
+        "Mehrwertsteuer noch drin. <b>Auf dem Konto</b> ist die Summe, die "
+        "wirklich überwiesen wird — zum Vergleichen taugt sie nicht, weil "
+        "zwei verschiedene Böden addiert werden. <b>Gesamt netto</b> ist "
+        "die Zahl für Monatsvergleiche, Ziele und jede Kalkulation.", "info")
 
     # ── Wie sich die Wellpass-Zahl ergibt ───────────────────────────────
     roh, verguetet, doppelte = checkins_roh_und_verguetet(monat)
@@ -14825,15 +14901,16 @@ def _dash_einnahmen():
                 "zweimal am Tag eincheckt, wird nur einmal gezählt — der "
                 "zweite Platz ist unbezahlt geblieben.", "info")
 
-    if gesamt > 0:
-        anteil = wellpass / gesamt * 100
+    if gesamt_netto > 0:
+        anteil = wellpass_netto / gesamt_netto * 100
         st.markdown("")
-        st.caption(f"Wellpass macht {anteil:.0f} % der Einnahmen aus")
+        st.caption(f"Wellpass macht {anteil:.0f} % der Netto-Einnahmen aus "
+                   f"({geld(wellpass_netto)} von {geld(gesamt_netto)})")
         st.progress(min(1.0, anteil / 100))
 
     # ── Aufschlüsselung Playtomic ───────────────────────────────────────
     st.markdown("---")
-    st.markdown("**Woraus sich Playtomic zusammensetzt**")
+    st.markdown("**Woraus sich Playtomic zusammensetzt** · alles netto")
     posten = [
         ("Online bezahlt", k["online"]),
         ("Über Guthaben", k["guthaben"]),
@@ -14859,29 +14936,30 @@ def _dash_einnahmen():
         tk = tages_kennzahlen(t)
         zeilen.append({
             "Datum": datum_kurz(t),
-            "Playtomic": round(float(tk["umsatz"]), 2),
-            "Wellpass": round(float(tk["wellpass_wert"]), 2),
+            "Playtomic netto": round(float(tk["umsatz"]), 2),
             "Check-ins": int(tk["wellpass_anzahl"]),
-            "Gesamt": round(float(tk["umsatz"]) + float(tk["wellpass_wert"]), 2),
+            "Wellpass brutto": round(float(tk["wellpass_wert"]), 2),
+            "Wellpass netto": round(float(tk["wellpass_netto"]), 2),
+            "Gesamt netto": round(float(tk["gesamt_netto"]), 2),
+            "Auf dem Konto": round(float(tk["gesamt_effektiv"]), 2),
         })
 
     if not zeilen:
         return
 
     df = pd.DataFrame(zeilen)
+    geldspalten = ("Playtomic netto", "Wellpass brutto", "Wellpass netto",
+                   "Gesamt netto", "Auf dem Konto")
 
     zeig = df.copy()
-    for spalte in ("Playtomic", "Wellpass", "Gesamt"):
+    for spalte in geldspalten:
         zeig[spalte] = zeig[spalte].map(euro)
     st.dataframe(ohne_geld(zeig), use_container_width=True, hide_index=True, height=340)
 
-    summe = pd.DataFrame([{
-        "Datum": "Summe",
-        "Playtomic": geld(df["Playtomic"].sum()),
-        "Wellpass": geld(df["Wellpass"].sum()),
-        "Check-ins": int(df["Check-ins"].sum()),
-        "Gesamt": geld(df["Gesamt"].sum()),
-    }])
+    zeile = {"Datum": "Summe", "Check-ins": int(df["Check-ins"].sum())}
+    for spalte in geldspalten:
+        zeile[spalte] = geld(df[spalte].sum())
+    summe = pd.DataFrame([{s: zeile[s] for s in df.columns}])
     st.dataframe(ohne_geld(summe), use_container_width=True, hide_index=True)
 
     st.download_button(
@@ -14930,18 +15008,21 @@ def _dash_monatsstand():
     box(f"Verglichen werden die ersten <b>{tag} Tage</b> jedes Monats — "
         f"Stand {datum_kurz(str(jetzt['bis']))}. Ein halber Monat gegen "
         "einen ganzen wäre kein Vergleich.<br>Gerechnet wird mit "
-        "<b>Platzeinnahmen plus EGYM-Vergütung</b> — die Wellpass-Check-ins "
-        "sind echtes Geld und gehören dazu.", "info")
+        "<b>Platzeinnahmen plus EGYM-Vergütung, beides netto</b> — die "
+        "Wellpass-Check-ins sind echtes Geld und gehören dazu, aber EGYM "
+        "zahlt brutto, deshalb wird die Vergütung erst auf netto "
+        "umgerechnet.", "info")
 
     u = vergleichs_urteil(jetzt, frueher)
     c1, c2, c3 = st.columns(3)
     with c1:
-        # Gesamt heisst Platz PLUS Wellpass. Ohne die EGYM-Vergütung sähe
-        # ein Monat mit vielen Check-ins schlechter aus, als er war.
+        # Gesamt heisst Platz PLUS Wellpass, beides netto. Ohne die
+        # EGYM-Vergütung sähe ein Monat mit vielen Check-ins schlechter
+        # aus, als er war; mit ihrer Bruttozahl besser.
         kpi(f"{monat_lesbar(jetzt['monat'])} · Tag 1–{tag}",
-            geld(jetzt["gesamt_effektiv"]),
-            f"{geld(jetzt['umsatz'])} Platz + {geld(jetzt['wellpass_wert'])} "
-            f"Wellpass ({jetzt['wellpass_anzahl']} Check-ins)")
+            geld(jetzt["gesamt_netto"]),
+            f"{geld(jetzt['umsatz'])} Platz + {geld(jetzt['wellpass_netto'])} "
+            f"Wellpass netto ({jetzt['wellpass_anzahl']} Check-ins)")
     with c2:
         if u["verlaesslich"]:
             zeichen = "+" if u["abstand"] >= 0 else ""
@@ -14992,12 +15073,12 @@ def _dash_monatsstand():
         luecke = m["tage_moeglich"] - m["tage_mit_daten"]
         zeilen.append({
             "Monat": monat_lesbar(m["monat"]),
-            f"Gesamt Tag 1–{tag}": geld(m["gesamt_effektiv"]),
+            f"Netto Tag 1–{tag}": geld(m["gesamt_netto"]),
             "davon Platz": geld(m["umsatz"]),
-            "davon Wellpass": geld(m["wellpass_wert"]),
+            "davon Wellpass netto": geld(m["wellpass_netto"]),
             "Buchungen": m["buchungen"],
             "Spieler": m["spieler"],
-            "je Tag": geld(m["gesamt_effektiv"] / max(1, m["tage_mit_daten"])),
+            "je Tag": geld(m["gesamt_netto"] / max(1, m["tage_mit_daten"])),
             # Ohne diese Spalte sähe ein Monat mit Datenlücken einfach
             # nur schwach aus, statt unvollständig.
             "Datenlage": "vollständig" if luecke <= 0
@@ -20594,10 +20675,12 @@ def modul_einstellungen():
     with t1:
         st.markdown("##### Monatsziel")
         st.caption("Gilt als Standard für alle Monate. Einzelne Monate kannst "
-                   "du darunter überschreiben.")
+                   "du darunter überschreiben. Die Zahl ist **netto** — "
+                   "Playtomic plus EGYM-Vergütung, letztere auf netto "
+                   "umgerechnet.")
 
         aktuell = monatsziel()
-        neu = st.number_input("Standard-Monatsziel (€)", min_value=0.0,
+        neu = st.number_input("Standard-Monatsziel (€ netto)", min_value=0.0,
                               value=float(aktuell), step=500.0, format="%.0f")
         if st.button("Speichern", type="primary"):
             einstellung_setzen("monatsziel", neu)
@@ -20611,7 +20694,7 @@ def modul_einstellungen():
         if monate:
             m = st.selectbox("Monat", monate,
                              format_func=lambda x: f"{MONATE_DE[int(x[5:7])-1]} {x[:4]}")
-            m_ziel = st.number_input("Ziel für diesen Monat (€)",
+            m_ziel = st.number_input("Ziel für diesen Monat (€ netto)",
                                      min_value=0.0, value=float(monatsziel(m)),
                                      step=500.0, format="%.0f", key="m_ziel")
             c1, c2 = st.columns(2)
@@ -20705,7 +20788,9 @@ def modul_einstellungen():
             st.caption("**Wellpass-Vergütung**")
             st.markdown(f"{geld(CONFIG['wellpass_brutto'])} × "
                         f"{CONFIG['wellpass_anteil']*100:.0f} % = "
-                        f"**{geld(WELLPASS_WERT)}** pro Check-in")
+                        f"**{geld(WELLPASS_WERT)}** brutto pro Check-in")
+            st.markdown(f"bei {CONFIG['mwst']*100:.0f} % MwSt sind das "
+                        f"**{geld(WELLPASS_WERT_NETTO)}** netto")
             st.caption("**Bearbeitungsgebühr**")
             st.markdown(f"**{geld(ADMIN_GEBUEHR)}** bei vergessenem Check-in")
         with c2:
@@ -21378,10 +21463,11 @@ def command_center():
         if darf_geld():
             c1, c2, c3, c4 = st.columns(4)
             with c2:
-                kpi("Umsatz Tag", geld(k["gesamt_effektiv"]), "inkl. Wellpass")
+                kpi("Umsatz Tag", geld(k["gesamt_netto"]),
+                    "netto, inkl. Wellpass")
             with c3:
-                kpi("Monat bisher", geld(mk["gesamt_effektiv"]),
-                    f"{MONATE_DE[int(monat_akt[5:7])-1]}")
+                kpi("Monat bisher", geld(mk["gesamt_netto"]),
+                    f"{MONATE_DE[int(monat_akt[5:7])-1]} · netto")
         else:
             # Team-Modus: dieselbe Zeile ohne Geld.
             c1, c4 = st.columns(2)
@@ -21417,12 +21503,12 @@ def command_center():
         c1, c2 = st.columns([1.2, 1])
         with c1:
             if ziel > 0 and darf_geld():
-                erreicht = prozent(mk["gesamt_effektiv"], ziel)
-                rest = max(0.0, ziel - mk["gesamt_effektiv"])
+                erreicht = prozent(mk["gesamt_netto"], ziel)
+                rest = max(0.0, ziel - mk["gesamt_netto"])
                 fortschritts_ring(
                     erreicht, f"{erreicht:.0f}%",
                     f"Monatsziel {MONATE_DE[int(monat_akt[5:7])-1]}",
-                    (f"{geld(mk['gesamt_effektiv'])} von {geld(ziel)}<br>"
+                    (f"{geld(mk['gesamt_netto'])} von {geld(ziel)}<br>"
                      + (f"noch {geld(rest)}" if rest > 0
                         else "Ziel erreicht 🎉")))
         with c2:
