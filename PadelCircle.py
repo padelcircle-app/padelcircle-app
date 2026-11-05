@@ -379,7 +379,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # läuft, und genau das war am 14.10.2026 die offene Frage: Die Anzeige
 # stand acht Fassungen lang auf „101". `tests/test_23_stand.py` lässt
 # die Gegenprobe scheitern, wenn sie hinterherhinkt.
-APP_STAND       = "Fassung 133 · 29.10.2026"
+APP_STAND       = "Fassung 134 · 05.11.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -650,14 +650,41 @@ def telefon_normalisieren(phone) -> str:
     if not p:
         return ""
     if p.startswith("+"):
+        pass
+    elif p.startswith("00"):
+        p = "+" + p[2:]
+    elif p.startswith("0"):
+        p = "+49" + p[1:]
+    elif p.startswith("49"):
+        p = "+" + p
+    else:
+        p = "+49" + p
+    return _ohne_verkehrsnull(p)
+
+
+def _ohne_verkehrsnull(p: str) -> str:
+    """
+    Die 0 zwischen Ländervorwahl und Nummer wegnehmen: `+49017624…` →
+    `+4917624…`
+
+    Marcel am 05.11.2026: „Da steht plus 49, 0 — und das gibt es ja
+    eigentlich so nie. Wenn ich das kopiere, findet es nicht direkt die
+    Nummer." Stimmt: Die 0 ist die deutsche Verkehrsausscheidungsziffer.
+    Sie steht VOR der Vorwahl, wenn man im Inland wählt, und entfällt,
+    sobald man international mit +49 wählt. Beides zusammen ergibt eine
+    Nummer, die es nicht gibt — WhatsApp findet dazu kein Konto.
+
+    Die Nummern kommen so aus Playtomic, weil die Leute sie selbst
+    eintippen: mal „0176…", mal „+49176…", und mal eben beides.
+
+    NUR für +49. Italien (+39) behält die Null bei Festnetznummern —
+    `+39 06…` ist Rom und richtig so. Was an Gästenummern hereinkommt,
+    bleibt deshalb unangetastet.
+    """
+    if not p.startswith("+49"):
         return p
-    if p.startswith("00"):
-        return "+" + p[2:]
-    if p.startswith("0"):
-        return "+49" + p[1:]
-    if p.startswith("49"):
-        return "+" + p
-    return "+49" + p
+    rest = p[3:].lstrip("0")
+    return "+49" + rest if rest else p
 
 
 def datum_lang(datum_str: str) -> str:
@@ -4165,6 +4192,154 @@ def auslastung_vorschlaege() -> list:
                          "Event oder Mexicano könnte ihn füllen.")})
     vorschlaege += sorted(preis, key=lambda v: -v["wert"])[:2]
     return vorschlaege[:5]
+
+
+# ── Wie viele Spieler, und kommen sie wieder? ─────────────────────────
+#
+# Marcel am 05.11.2026: „Wie viele registrierte Spieler haben wir jetzt
+# gerade, wie viele monatliche Spieler hatten wir im Oktober, und wie
+# hoch ist die Wiederkehrrate?"
+#
+# Gerechnet wird aus dem Blatt `buchungen` — eine Zeile je Person und
+# Platz. Das ist die einzige Quelle, die wirklich sagt, WER gespielt hat:
+# Der Zahlungsexport nennt nur den, der bezahlt hat, und das ist bei
+# einem Doppel einer von vieren.
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def spieler_je_monat() -> tuple:
+    """
+    Wer stand in welchem Monat wie oft auf dem Platz?
+    → ({"2026-10": {name_norm: Plätze}}, {"2026-10": Zahl der Tage})
+
+    Grundlage ist der BUCHUNGSEXPORT, nicht das Blatt `buchungen`. Der
+    Buchungsexport nennt alle Teilnehmer einer Buchung; das Blatt
+    `buchungen` entsteht aus den Zahlungen und kennt vor allem die, die
+    bezahlt haben. Für den September sind das 2.488 gegen 3.171
+    Platzbelegungen — bei einem Doppel zahlt einer für vier.
+
+    Stornierte Buchungen fliegen raus, das Team auch.
+    """
+    b = loadsheet("buchungsexport")
+    if b.empty or "booking_start_date" not in b.columns:
+        return {}, {}
+    namensspalten = [f"participant_name_{i}" for i in range(1, 21)
+                     if f"participant_name_{i}" in b.columns]
+    if not namensspalten:
+        return {}, {}
+
+    out, tage = {}, {}
+    fremd = CONFIG["playtomic_tenant_id"]
+    for r in b.itertuples(index=False):
+        if str(getattr(r, "status", "") or "").strip().upper() == "CANCELED":
+            continue
+        # Der Playtomic-Zugang umfasst zwei Standorte. Ein Export des
+        # anderen hätte hier nichts zu suchen — siehe
+        # buchungsexport_pruefen(); hier noch einmal zur Sicherheit.
+        kennung = str(getattr(r, "tenant_id", "") or "").strip()
+        if kennung and kennung != fremd:
+            continue
+        tag = _tag_von(getattr(r, "booking_start_date", ""))
+        if len(tag) < 10:
+            continue
+        monat = tag[:7]
+        tage.setdefault(monat, set()).add(tag)
+        namen = {normalize_name(getattr(r, sp, "")) for sp in namensspalten}
+        for name in namen:
+            if not name or name in TEAM_NORM:
+                continue
+            out.setdefault(monat, {})
+            out[monat][name] = out[monat].get(name, 0) + 1
+    return out, {m: len(t) for m, t in tage.items()}
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def spieler_entwicklung() -> pd.DataFrame:
+    """
+    Monat für Monat: wie viele Spieler, wie viele davon neu, und wie
+    viele vom Vormonat wiedergekommen sind.
+
+    „Neu" heisst: in keinem früheren erfassten Monat dabei. Der erste
+    Monat besteht deshalb zwangsläufig nur aus Neuen — das ist keine
+    Aussage über ihn, sondern über den Anfang der Aufzeichnung.
+    """
+    je_monat, tage = spieler_je_monat()
+    if not je_monat:
+        return pd.DataFrame()
+    zeilen, gesehen = [], set()
+    monate = sorted(je_monat)
+    for i, m in enumerate(monate):
+        jetzt = set(je_monat[m])
+        plaetze = sum(je_monat[m].values())
+        vor = set(je_monat[monate[i - 1]]) if i else set()
+        zeilen.append({
+            "monat": m,
+            "spieler": len(jetzt),
+            "plaetze": plaetze,
+            "je_spieler": round(plaetze / len(jetzt), 2) if jetzt else 0.0,
+            "neu": len(jetzt - gesehen),
+            "bekannt": len(jetzt & gesehen),
+            "vom_vormonat": (round(len(vor & jetzt) / len(vor) * 100, 1)
+                             if vor else None),
+            "mehrfach": sum(1 for a in je_monat[m].values() if a >= 2),
+        })
+        gesehen |= jetzt
+    df = pd.DataFrame(zeilen)
+    # Wie viele Tage des Monats überhaupt im Bestand sind. Ohne das sähe
+    # ein angefangener Monat wie ein Einbruch aus.
+    df["tage"] = df["monat"].map(lambda m: tage.get(m, 0))
+    df["tage_moeglich"] = df["monat"].map(_spieltage_moeglich)
+    return df
+
+
+def _spieltage_moeglich(monat: str) -> int:
+    """
+    Wie viele Tage dieses Monats überhaupt Spieltage sein KONNTEN.
+
+    Nicht einfach die Länge des Monats: Im Juli 2026 ging die Halle erst
+    am 5. auf, und der laufende Monat ist noch nicht vorbei. Ohne diese
+    Einschränkung stünde beim Eröffnungsmonat „27 von 31 Tagen" — als
+    fehlten Daten, die es nie gab.
+    """
+    jahr, mon = int(monat[:4]), int(monat[5:7])
+    erster = date(jahr, mon, 1)
+    letzter = date(jahr, mon, monthrange(jahr, mon)[1])
+    try:
+        auf = datetime.strptime(standort_start(), "%Y-%m-%d").date()
+        erster = max(erster, auf)
+    except (TypeError, ValueError):
+        pass
+    letzter = min(letzter, date.today() - timedelta(days=1))
+    return max(0, (letzter - erster).days + 1)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def besuchsklassen() -> list:
+    """
+    Wie oft kommt einer insgesamt? → [(Bezeichnung, Anzahl, Anteil), …]
+
+    Die eine Zahl, die „Wiederkehrrate" am ehrlichsten beantwortet: Wie
+    gross ist der Teil, der genau einmal da war und nie wieder.
+    """
+    gesamt = {}
+    for monat in spieler_je_monat()[0].values():
+        for name, anzahl in monat.items():
+            gesamt[name] = gesamt.get(name, 0) + anzahl
+    if not gesamt:
+        return []
+    stufen = [("genau einmal", 1, 1), ("2–3 Mal", 2, 3),
+              ("4–9 Mal", 4, 9), ("10 Mal und öfter", 10, 10 ** 9)]
+    return [(bez, sum(1 for a in gesamt.values() if unten <= a <= oben),
+             round(sum(1 for a in gesamt.values() if unten <= a <= oben)
+                   / len(gesamt) * 100, 1))
+            for bez, unten, oben in stufen]
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def registrierte_konten() -> int:
+    """Wie viele Konten im Playtomic-Kundenexport stehen."""
+    k = loadsheet("customers")
+    return 0 if k.empty else int(len(k))
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -15461,9 +15636,12 @@ def _winback():
 
 
 def modul_spieler():
-    head("Spieler & Community", "Rangliste · Vielspieler · Rückholung")
-    t1, t2, t3, t4, t5 = st.tabs(["🏆 Rangliste", "⭐ Vielspieler", "🔄 Rückholung",
-                                  "🔎 Analysen", "👤 Einzelner Spieler"])
+    head("Spieler & Community", "Wiederkehr · Rangliste · Rückholung")
+    t0, t1, t2, t3, t4, t5 = st.tabs(
+        ["📈 Wiederkehr", "🏆 Rangliste", "⭐ Vielspieler", "🔄 Rückholung",
+         "🔎 Analysen", "👤 Einzelner Spieler"])
+    with t0:
+        _spieler_wiederkehr()
     with t1:
         _spieler_rangliste()
     with t2:
@@ -15555,6 +15733,106 @@ def _spieler_profil():
                        f"Slots · davon <24 h: {int(a['<24h'])} · "
                        f"<2 h: {int(a['<2h'])} · nach Beginn: "
                        f"{int(a['nach Beginn'])}")
+
+
+def _spieler_wiederkehr():
+    """
+    Die drei Zahlen, die eine Halle beschreiben: wie viele Konten es
+    gibt, wie viele Leute im Monat wirklich da sind, und wie viele
+    davon wiederkommen.
+
+    Marcel am 05.11.2026. Gerechnet aus dem Blatt `buchungen`, also je
+    Person und Platz — nicht aus dem Zahlungsexport, der bei einem
+    Doppel nur einen von vier Spielern nennt.
+    """
+    df = spieler_entwicklung()
+    if df.empty:
+        box("Noch keine Buchungsdaten. Lade zuerst die Exporte hoch.", "warn")
+        return
+
+    konten = registrierte_konten()
+    # Der letzte VOLLE Monat — der laufende wäre kein Vergleich.
+    voll = df[df["tage"] >= df["tage_moeglich"] - 1]
+    letzter = voll.iloc[-1] if not voll.empty else df.iloc[-1]
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        kpi("Registrierte Konten", f"{konten:,}".replace(",", "."),
+            "im Playtomic-Kundenexport")
+    with c2:
+        kpi(f"Spieler im {monat_lang(letzter['monat'])}",
+            f"{int(letzter['spieler']):,}".replace(",", "."),
+            f"{int(letzter['plaetze'])} Plätze · "
+            f"Ø {letzter['je_spieler']:.1f}".replace(".", ","))
+    with c3:
+        wieder = letzter["vom_vormonat"]
+        kpi("Vom Vormonat wieder",
+            "—" if pd.isna(wieder) else f"{wieder:.0f} %",
+            "waren im Monat davor auch da")
+
+    box("<b>Registrierte Konten</b> sind alle, die bei Playtomic je für "
+        "diesen Club angelegt wurden — auch wer nie gespielt hat. "
+        "<b>Spieler im Monat</b> sind die, die tatsächlich auf dem Platz "
+        "standen: eine Zeile je Person und Slot, das Team nicht "
+        "mitgezählt.", "info")
+
+    # ── Monat für Monat ─────────────────────────────────────────────────
+    st.markdown("##### Monat für Monat")
+    zeig = pd.DataFrame([{
+        "Monat": monat_lang(r["monat"]),
+        "Spieler": int(r["spieler"]),
+        "Plätze": int(r["plaetze"]),
+        "Ø je Spieler": f"{r['je_spieler']:.1f}".replace(".", ","),
+        "zum ersten Mal": int(r["neu"]),
+        "schon mal da": int(r["bekannt"]),
+        "vom Vormonat wieder": ("—" if pd.isna(r["vom_vormonat"])
+                                else f"{r['vom_vormonat']:.0f} %"),
+        "zweimal und öfter": f"{r['mehrfach']} "
+                             f"({r['mehrfach'] / max(1, r['spieler']) * 100:.0f} %)",
+        "Datenlage": ("vollständig" if r["tage"] >= r["tage_moeglich"] - 1
+                      else f"{int(r['tage'])} von {int(r['tage_moeglich'])} Tagen"),
+    } for _, r in df.iloc[::-1].iterrows()])
+    st.dataframe(zeig, use_container_width=True, hide_index=True)
+    st.caption("„zum ersten Mal\" heisst: in keinem früheren erfassten Monat "
+               "dabei. Der erste Monat besteht deshalb nur aus Neuen — das "
+               "sagt etwas über den Beginn der Aufzeichnung, nicht über den "
+               "Monat.")
+
+    # ── Wie oft kommt einer ─────────────────────────────────────────────
+    klassen = besuchsklassen()
+    if klassen:
+        st.markdown("---")
+        st.markdown("##### Wie oft kommt einer insgesamt")
+        gesamt = sum(n for _b, n, _a in klassen)
+        st.dataframe(pd.DataFrame([
+            {"Besuche": bez, "Spieler": n, "Anteil": f"{anteil:.0f} %"}
+            for bez, n, anteil in klassen]),
+            use_container_width=True, hide_index=True)
+        einmal = next((n for bez, n, _a in klassen if bez == "genau einmal"), 0)
+        st.caption(
+            f"{gesamt} verschiedene Spieler über alle erfassten Monate. "
+            f"Die härteste Zahl ist die erste Zeile: {einmal} Personen "
+            f"({einmal / gesamt * 100:.0f} %) waren genau einmal da. Jeder "
+            "davon, der ein zweites Mal käme, wäre ein Platz mehr ohne "
+            "einen Euro Werbung.")
+
+    # ── Verlauf ─────────────────────────────────────────────────────────
+    if len(df) > 1:
+        st.markdown("---")
+        st.markdown("##### Spieler je Monat")
+        bild = df.copy()
+        bild["Monat"] = bild["monat"].map(monat_lang)
+        bild = bild.rename(columns={"bekannt": "schon mal da",
+                                    "neu": "zum ersten Mal"})
+        st.bar_chart(bild.set_index("Monat")[["schon mal da",
+                                              "zum ersten Mal"]],
+                     color=[C["blue_soft"], C["volt"]])
+
+    st.download_button(
+        "⬇️ Als CSV",
+        data=df.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
+        file_name="spieler_je_monat.csv", mime="text/csv",
+        use_container_width=True)
 
 
 def _spieler_analysen():
