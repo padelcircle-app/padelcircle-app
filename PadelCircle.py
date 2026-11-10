@@ -379,7 +379,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # läuft, und genau das war am 14.10.2026 die offene Frage: Die Anzeige
 # stand acht Fassungen lang auf „101". `tests/test_23_stand.py` lässt
 # die Gegenprobe scheitern, wenn sie hinterherhinkt.
-APP_STAND       = "Fassung 135 · 10.11.2026"
+APP_STAND       = "Fassung 136 · 10.11.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -4463,6 +4463,89 @@ def spieler_wachstum_wochen() -> pd.DataFrame:
     # Objektspalte, und die zeichnet st.line_chart nicht mehr.
     df.loc[~df["voll"], "schnitt4"] = float("nan")
     return df
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def wochen_bestand(fenster: int = 8) -> pd.DataFrame:
+    """
+    Je Woche: wer zum ersten Mal da war, wer wiederkam — und wer nicht
+    kam, obwohl er da sein könnte.
+
+    Marcel am 10.11.2026: „wie viele neue kommen, wie viele wieder
+    kommen die schonmal da waren jede woche und wie viele garnicht
+    kommen."
+
+    Die ersten beiden sind einfach. Die dritte hängt an einer Frage,
+    die beantwortet werden muss, bevor man sie zählen kann: WER hätte
+    denn kommen sollen? „Alle, die je hier waren" wächst jede Woche von
+    allein — nach einem Jahr stünden dort Tausende, und die Zahl sagte
+    nur noch, wie lange es die Halle gibt.
+
+    Deshalb der aktive Bestand: wer in den letzten `fenster` Wochen vor
+    dieser mindestens einmal da war. Gegen den wird gerechnet.
+
+    Damit zerfällt jede Woche sauber in vier Gruppen, ohne Überschneidung:
+
+      neu          zum ersten Mal überhaupt
+      wieder       war schon mal da und ist da  (davon `reaktiviert`:
+                   nach mehr als `fenster` Wochen Pause zurück)
+      pausiert     gehört zum aktiven Bestand, war diese Woche nicht da
+      weg          war irgendwann da, seit über `fenster` Wochen nicht
+                   mehr, und auch jetzt nicht
+
+    `rueckkehr` ist die Quote, auf die es ankommt: Welcher Anteil des
+    aktiven Bestands diese Woche tatsächlich kam. Sie steht nur bei
+    Wochen, hinter denen das Fenster wirklich gefüllt ist (`reif`) —
+    sonst wäre sie eine Aussage über das Alter der Halle.
+    """
+    je_woche, _tage = spieler_je_woche()
+    if not je_woche:
+        return pd.DataFrame()
+
+    wochen = sorted(je_woche, key=woche_montag)
+    mengen = {w: set(je_woche[w]) for w in wochen}
+
+    zeilen, frueher = [], set()
+    for i, w in enumerate(wochen):
+        jetzt = mengen[w]
+        # Das Fenster zählt Kalenderwochen, nicht Tabellenzeilen. Fehlt
+        # eine Woche im Bestand, dürfen die acht Wochen deswegen nicht
+        # weiter in die Vergangenheit rutschen — sonst gilt plötzlich
+        # als aktiv, wer vor drei Monaten das letzte Mal da war.
+        grenze = woche_montag(w) - timedelta(weeks=fenster)
+        aktiv = set()
+        for v in wochen[:i]:
+            if woche_montag(v) >= grenze:
+                aktiv |= mengen[v]
+
+        # Ist das Fenster überhaupt gefüllt? In den ersten Wochen nach
+        # der Eröffnung liegen hinter einer Woche noch keine acht
+        # anderen, und wo Wochen im Bestand fehlen, auch nicht. Die
+        # Rückkehrquote ist dann rechnerisch hoch, weil der Bestand
+        # noch klein ist — an den echten Daten fiel sie von 47 % auf
+        # 16 %, ohne dass ein einziger Spieler abgesprungen wäre. Das
+        # ist keine Entwicklung, das ist ein volllaufendes Fenster.
+        reif = all(
+            woche_von_tag((woche_montag(w) - timedelta(weeks=k)).isoformat())
+            in mengen for k in range(1, fenster + 1))
+
+        wieder = jetzt & frueher
+        zeilen.append({
+            "woche": w,
+            "montag": woche_montag(w).isoformat(),
+            "da": len(jetzt),
+            "neu": len(jetzt - frueher),
+            "wieder": len(wieder),
+            "reaktiviert": len(wieder - aktiv),
+            "pausiert": len(aktiv - jetzt),
+            "weg": len(frueher - aktiv - jetzt),
+            "aktiv_vorher": len(aktiv),
+            "rueckkehr": (round(len(jetzt & aktiv) / len(aktiv) * 100, 1)
+                          if aktiv and reif else None),
+            "reif": reif,
+        })
+        frueher |= jetzt
+    return pd.DataFrame(zeilen)
 
 
 def _fehlende_wochen(df: pd.DataFrame) -> list:
@@ -15955,6 +16038,118 @@ def _spieler_profil():
                        f"{int(a['nach Beginn'])}")
 
 
+def _wochen_bestand_block(wachstum: pd.DataFrame):
+    """
+    Neu · Wieder da · Nicht gekommen — Woche für Woche.
+
+    Marcel am 10.11.2026: „wie viele neue kommen, wie viele wieder
+    kommen die schonmal da waren jede woche und wie viele garnicht
+    kommen."
+
+    Die dritte Zahl braucht einen Bezug, sonst ist sie keine Zahl,
+    sondern nur das Alter der Halle — siehe `wochen_bestand()`. Der
+    Regler darüber legt ihn fest.
+    """
+    st.markdown("##### Neu, wieder da, nicht gekommen")
+    fenster = st.slider(
+        "Als aktiver Spieler gilt, wer in den letzten … Wochen da war",
+        2, 16, 8, key="wachstum_bestand_fenster",
+        help="Gegen diesen Kreis wird gerechnet, wer nicht gekommen "
+             "ist. Vier Wochen ist streng, zwölf grosszügig. Der Wert "
+             "ändert nur die Sicht, nicht die Daten.")
+
+    b = wochen_bestand(fenster)
+    if b.empty:
+        return
+    b = b.merge(wachstum[["woche", "voll", "tage", "tage_moeglich"]],
+                on="woche", how="left")
+    b["voll"] = b["voll"].fillna(False).astype(bool)
+    voll = b[b["voll"]]
+    if voll.empty:
+        box("Noch keine abgeschlossene Woche.", "info")
+        return
+    l = voll.iloc[-1]
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        kpi("Zum ersten Mal", f"{int(l['neu'])}",
+            f"{woche_label(l['woche'])} · noch nie hier gewesen")
+    with c2:
+        kpi("Wieder da", f"{int(l['wieder'])}",
+            f"davon {int(l['reaktiviert'])} nach mehr als "
+            f"{fenster} Wochen Pause")
+    with c3:
+        quote = l["rueckkehr"]
+        kpi("Nicht gekommen", f"{int(l['pausiert'])}",
+            f"von {int(l['aktiv_vorher'])} aktiven Spielern · "
+            + ("—" if pd.isna(quote) else f"{quote:.0f} % kamen"))
+
+    box(f"Jede Woche zerfällt in vier Gruppen, ohne Überschneidung. "
+        f"<b>Zum ersten Mal</b>: noch nie hier gewesen. <b>Wieder da</b>: "
+        f"war schon einmal hier und ist diese Woche hier. "
+        f"<b>Nicht gekommen</b>: war in den {fenster} Wochen davor "
+        f"mindestens einmal hier, diese Woche nicht — das sind die, die "
+        f"du zurückholen kannst. <b>Länger weg</b>: seit über {fenster} "
+        f"Wochen nicht mehr gesehen; die sind schwerer zu erreichen, "
+        f"stehen aber namentlich im Reiter 🔄 Rückholung.", "info")
+
+    bild = b.copy()
+    bild.index = pd.to_datetime(bild["montag"])
+    bild = bild.rename(columns={"neu": "zum ersten Mal",
+                                "wieder": "wieder da",
+                                "pausiert": "nicht gekommen",
+                                "rueckkehr": "Rückkehrquote %"})
+
+    st.markdown("**Wer da war**")
+    st.bar_chart(bild[["wieder da", "zum ersten Mal"]],
+                 color=[C["blue_soft"], C["volt"]])
+    st.caption("Solange der helle Teil hoch bleibt, kommt Nachschub von "
+               "aussen. Wird er schmaler, während die Säule noch wächst, "
+               "lebt das Wachstum von den Bekannten — stabiler, aber mit "
+               "Obergrenze. Genau dort beginnt der Peak, und man sieht "
+               "es hier Wochen bevor es in der Gesamtzahl auffällt.")
+
+    st.markdown("**Wer nicht kam**")
+    st.line_chart(bild[["Rückkehrquote %"]], color=[C["volt"]])
+    st.caption(f"Welcher Anteil der aktiven Spieler in der Woche "
+               f"tatsächlich kam — die Gegenzahl sind die, die nicht "
+               f"kamen. Diese Quote ist ehrlicher als die nackte Zahl: "
+               f"Wächst der Bestand, steigt „nicht gekommen\" "
+               f"zwangsläufig mit, auch wenn niemand abspringt. Die "
+               f"Linie beginnt erst, wenn {fenster} Wochen Geschichte "
+               f"dahinterstehen; davor misst sie nur, wie jung die "
+               f"Halle ist.")
+
+    st.markdown("**Jede Woche einzeln**")
+    zeig = pd.DataFrame([{
+        "Woche": woche_label(r["woche"]),
+        "Spieler": int(r["da"]),
+        "zum ersten Mal": int(r["neu"]),
+        "wieder da": int(r["wieder"]),
+        "davon zurückgeholt": int(r["reaktiviert"]),
+        "nicht gekommen": int(r["pausiert"]),
+        "aktiver Bestand": int(r["aktiv_vorher"]),
+        "Rückkehrquote": ("—" if pd.isna(r["rueckkehr"])
+                          else f"{r['rueckkehr']:.0f} %"),
+        f"über {fenster} Wochen weg": int(r["weg"]),
+        "Datenlage": ("vollständig" if r["voll"]
+                      else f"{int(r['tage'])} von {int(r['tage_moeglich'])} Tagen"),
+    } for _, r in b.iloc[::-1].iterrows()])
+    st.dataframe(zeig, use_container_width=True, hide_index=True,
+                 height=min(560, 60 + 35 * len(zeig)))
+    st.caption("Die ersten Wochen nach der Eröffnung bestehen "
+               "zwangsläufig fast nur aus Erstspielern, und „nicht "
+               "gekommen\" steht dort niedrig, weil es noch kaum "
+               "jemanden gab, der hätte kommen können. Aussagekräftig "
+               "wird die Tabelle ab etwa der achten Woche.")
+
+    st.download_button(
+        "⬇️ Neu / wieder / nicht gekommen als CSV",
+        data=b.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
+        file_name="wochen_bestand.csv", mime="text/csv",
+        use_container_width=True)
+
+
 def _spieler_wachstum():
     """
     Wächst es noch, oder kommt der Peak? — Woche für Woche.
@@ -16050,17 +16245,7 @@ def _spieler_wachstum():
                "einzelne Woche kippt schon wegen Ferien, Feiertag oder "
                "einer Woche Dauerregen.")
 
-    st.markdown("##### Woher die Spieler kommen")
-    bild = bild.rename(columns={"neu": "zum ersten Mal",
-                                "bekannt": "schon mal da"})
-    st.bar_chart(bild[["schon mal da", "zum ersten Mal"]],
-                 color=[C["blue_soft"], C["volt"]])
-    st.caption("Solange der helle Teil hoch bleibt, kommt Nachschub von "
-               "aussen. Wird er schmaler, während die Gesamthöhe noch "
-               "steigt, lebt das Wachstum von den Bekannten — das ist "
-               "stabiler, aber es hat eine Obergrenze. Genau dort "
-               "beginnt der Peak, und man sieht es hier Wochen bevor es "
-               "in der Gesamtzahl auffällt.")
+    _wochen_bestand_block(df)
 
     # ── Tabelle ─────────────────────────────────────────────────────────
     st.markdown("---")
