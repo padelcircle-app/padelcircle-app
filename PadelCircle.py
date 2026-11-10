@@ -379,7 +379,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # läuft, und genau das war am 14.10.2026 die offene Frage: Die Anzeige
 # stand acht Fassungen lang auf „101". `tests/test_23_stand.py` lässt
 # die Gegenprobe scheitern, wenn sie hinterherhinkt.
-APP_STAND       = "Fassung 136 · 10.11.2026"
+APP_STAND       = "Fassung 137 · 10.11.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -1961,6 +1961,65 @@ def betraege_spalte(df: pd.DataFrame) -> pd.Series:
     return total.where(total != 0, df["Non-applicable total"].map(parse_betrag))
 
 
+def netto_spalte(df: pd.DataFrame) -> pd.Series:
+    """
+    Dieselben Beträge ohne Umsatzsteuer.
+
+    Marcel am 10.11.2026: „die Playtomic einnahmen sind brutto wir
+    müssen die versteuern mit 19%." Das stimmt, und der Export sagt es
+    selbst: `Total` ist brutto, `Subtotal` netto, `Taxes` die Steuer
+    dazwischen. Im September 2026 waren das 46.576 € brutto gegen
+    39.828 € netto.
+
+    (In Fassung 133 stand das Gegenteil — damals hiess es, Playtomic
+    rechne netto ab. Geprüft an 10.577 Zahlungszeilen aus dem August:
+    Total = Subtotal × 1,19 auf den Cent genau.)
+
+    Benutzt wird Playtomics eigene Aufteilung und nicht stur ÷ 1,19.
+    Es gibt Zeilen mit Steuersatz 0 — offene und stornierte Zahlungen,
+    bei denen kein Geld floss. Durch 1,19 geteilt, erfänden sie Steuer
+    auf Geld, das nie jemand bekommen hat.
+
+    Fehlt die Spalte — alte Importe —, bleibt die Umrechnung.
+    """
+    roh = betraege_spalte(df)
+    if "Subtotal" not in df.columns:
+        return roh.map(netto_aus_brutto)
+    netto = df["Subtotal"].map(parse_betrag)
+    if "Non-applicable subtotal" in df.columns:
+        # Dieselbe Weiche wie oben: Wer aus dem Club-Guthaben zahlt,
+        # steht mit Total = 0 da, und sein Anteil in der
+        # Non-applicable-Spalte.
+        total = df["Total"].map(parse_betrag)
+        netto = netto.where(total != 0,
+                            df["Non-applicable subtotal"].map(parse_betrag))
+    return netto.where(netto != 0, roh.map(netto_aus_brutto))
+
+
+def bezahlt_spalte(df: pd.DataFrame) -> pd.Series:
+    """
+    Ist das Geld dieser Zeile überhaupt geflossen?
+
+    Der Zahlungsexport enthält nur `Paid` und `Refund`. Die Datei mit
+    den offenen Posten bringt `Pending` und `Voided` mit, und die
+    landen bewusst in derselben Tabelle: Die Anspruchsrechnung braucht
+    ihre Preise, sonst fehlt der Vergleichswert für einen vollen
+    Anteil — siehe `_verarbeiten_zahlungen()`.
+
+    Umsatz sind sie nicht. `Pending` heisst gebucht und unbezahlt,
+    `Voided` heisst abgebrochen. Bis Fassung 136 liefen beide als
+    Einnahme mit: im September 2026 5.667 € stornierte und 490 €
+    offene Zahlungen, zusammen 6.157 € von 46.576 € — 13 % zu viel.
+
+    Zeilen ohne Statusspalte stammen aus älteren Importen; die kamen
+    aus dem Zahlungsexport und sind bezahlt.
+    """
+    if "Payment status" not in df.columns:
+        return pd.Series(True, index=df.index)
+    stand = df["Payment status"].astype(str).str.strip().str.lower()
+    return stand.isin(("paid", "refund")) | stand.isin(("", "nan", "-", "none"))
+
+
 def zahlen_normalisieren(df: pd.DataFrame) -> pd.DataFrame:
     """
     Beträge auf Punkt-Schreibweise bringen.
@@ -2981,6 +3040,8 @@ def _rohdaten_aufbereitet() -> pd.DataFrame:
     df["_stunde"] = df["_dt"].map(lambda d: d.hour)
     df["_wochentag"] = df["_dt"].map(lambda d: d.weekday())
     df["_betrag"] = betraege_spalte(df)
+    df["_netto"] = netto_spalte(df)
+    df["_bezahlt"] = bezahlt_spalte(df)
     df["_name_norm"] = (df["User name"].map(normalize_name)
                         if "User name" in df.columns else "")
     df["_team"] = df["_name_norm"].isin(TEAM_NORM)
@@ -3071,25 +3132,39 @@ def verguetung_wert(von: date = None, bis: date = None) -> float:
 def _kennzahlen(df: pd.DataFrame) -> dict:
     """Kernkennzahlen aus einem gefilterten Rohdaten-Ausschnitt."""
     k = {
-        "umsatz": 0.0, "online": 0.0, "guthaben": 0.0,
+        "umsatz": 0.0, "umsatz_netto": 0.0, "umsatz_ust": 0.0,
+        "nicht_geflossen": 0.0,
+        "online": 0.0, "guthaben": 0.0,
         "baelle": 0.0, "schlaeger": 0.0, "sonstige": 0.0,
         "wellpass_anzahl": 0, "wellpass_wert": 0.0,
         "wellpass_netto": 0.0,
         "buchungen": 0, "team_buchungen": 0,
-        "gesamt_effektiv": 0.0, "gesamt_netto": 0.0, "spieler": 0,
+        "gesamt_effektiv": 0.0, "gesamt_netto": 0.0, "ust": 0.0,
+        "spieler": 0,
     }
     if df.empty:
         return k
 
-    k["umsatz"] = float(df["_betrag"].sum())
+    # Geld nur aus Zeilen, bei denen Geld floss. Gezählt wird weiter
+    # über alle Zeilen: Eine offene Buchung ist eine Buchung und ein
+    # Spieler, nur eben keine Einnahme — siehe `bezahlt_spalte()`.
+    kasse = df[df["_bezahlt"]]
+    k["umsatz"] = round(float(kasse["_betrag"].sum()), 2)
+    k["umsatz_netto"] = round(float(kasse["_netto"].sum()), 2)
+    k["umsatz_ust"] = round(k["umsatz"] - k["umsatz_netto"], 2)
+    k["nicht_geflossen"] = round(float(df["_betrag"].sum()) - k["umsatz"], 2)
+
     buchungen = df[df["_buchung"]]
-    extras = df[~df["_buchung"]]
+    bezahlte_buchungen = buchungen[buchungen["_bezahlt"]]
+    extras = kasse[~kasse["_buchung"]]
 
     k["buchungen"] = int(len(buchungen))
     k["spieler"] = int(buchungen["_name_norm"].nunique())
-    k["online"] = float(buchungen.loc[(buchungen["_betrag"] > 0) &
-                                      (~buchungen["_wallet"]), "_betrag"].sum())
-    k["guthaben"] = float(buchungen.loc[buchungen["_wallet"], "_betrag"].sum())
+    k["online"] = float(bezahlte_buchungen.loc[
+        (bezahlte_buchungen["_betrag"] > 0)
+        & (~bezahlte_buchungen["_wallet"]), "_betrag"].sum())
+    k["guthaben"] = float(
+        bezahlte_buchungen.loc[bezahlte_buchungen["_wallet"], "_betrag"].sum())
 
     # Wellpass-Vergütung kommt aus den EGYM-Check-ins, nicht aus
     # 0-€-Zeilen — sonst weichen Umsatz und Monatsabgleich voneinander ab.
@@ -3106,15 +3181,17 @@ def _kennzahlen(df: pd.DataFrame) -> dict:
         k["sonstige"] = float(extras.loc[~(extras["_baelle"] | extras["_schlaeger"]),
                                          "_betrag"].sum())
 
-    # Zwei Summen, weil zwei Böden:
-    #   gesamt_effektiv — was auf dem Konto landet (Playtomic netto
-    #                     plus Wellpass brutto). Die Zahl zum Zählen,
-    #                     nicht zum Vergleichen.
-    #   gesamt_netto    — beides netto. Die Zahl, mit der man rechnet,
+    # Drei Summen, weil drei Fragen:
+    #   gesamt_effektiv — was auf dem Konto landet. Beides brutto:
+    #                     die Kundenzahlungen und EGYMs Vergütung.
+    #   ust             — was davon dem Finanzamt gehört, 19 % auf
+    #                     beides.
+    #   gesamt_netto    — was bleibt. Die Zahl, mit der man rechnet,
     #                     Monate vergleicht und Ziele setzt.
     k["wellpass_netto"] = netto_aus_brutto(k["wellpass_wert"])
     k["gesamt_effektiv"] = round(k["umsatz"] + k["wellpass_wert"], 2)
-    k["gesamt_netto"] = round(k["umsatz"] + k["wellpass_netto"], 2)
+    k["gesamt_netto"] = round(k["umsatz_netto"] + k["wellpass_netto"], 2)
+    k["ust"] = round(k["gesamt_effektiv"] - k["gesamt_netto"], 2)
     return k
 
 
@@ -14588,10 +14665,11 @@ def _dash_tag():
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         kpi("Gesamt netto", geld(k["gesamt_netto"]),
-            f"{geld(k['gesamt_effektiv'])} aufs Konto",
+            f"{geld(k['gesamt_effektiv'])} brutto aufs Konto",
             delta=delta_umsatz, delta_text="ggü. Vortag")
     with c2:
-        kpi("Playtomic netto", geld(k["umsatz"]), f"{k['buchungen']} Buchungen")
+        kpi("Playtomic netto", geld(k["umsatz_netto"]),
+            f"{geld(k['umsatz'])} brutto · {k['buchungen']} Buchungen")
     with c3:
         kpi("Wellpass", str(k["wellpass_anzahl"]),
             f"{geld(k['wellpass_wert'])} brutto von EGYM")
@@ -14626,9 +14704,10 @@ def _dash_monat():
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         kpi("Gesamt netto", geld(k["gesamt_netto"]),
-            f"{geld(k['gesamt_effektiv'])} aufs Konto")
+            f"{geld(k['gesamt_effektiv'])} brutto · {geld(k['ust'])} USt")
     with c2:
-        kpi("Playtomic netto", geld(k["umsatz"]))
+        kpi("Playtomic netto", geld(k["umsatz_netto"]),
+            f"{geld(k['umsatz'])} brutto")
     with c3:
         kpi("Wellpass brutto", geld(k["wellpass_wert"]),
             f"{k['wellpass_anzahl']} Check-ins · "
@@ -14638,10 +14717,10 @@ def _dash_monat():
             f"netto · {pg['tage_erfasst']} Tage erfasst")
 
     st.caption(
-        "Playtomic rechnet netto ab, EGYM zahlt brutto. „Gesamt netto\" "
-        "ist die vergleichbare Zahl, „aufs Konto\" das, was wirklich "
-        "überwiesen wird. Ziel und Hochrechnung laufen auf netto. "
-        "Einzelheiten im Reiter Einnahmen.")
+        "Beide Quellen sind brutto — die Kundenzahlungen bei Playtomic "
+        "und EGYMs Vergütung. „Gesamt netto\" ist, was nach "
+        f"{CONFIG['mwst']*100:.0f} % Umsatzsteuer bleibt; Ziel und "
+        "Hochrechnung laufen darauf. Einzelheiten im Reiter Einnahmen.")
 
     # ── Zielfortschritt ─────────────────────────────────────────────────
     ziel = pg["ziel"]
@@ -14654,15 +14733,25 @@ def _dash_monat():
                      + (f"noch {geld(rest)}" if rest > 0 else "Ziel erreicht 🎉"))
         fortschritts_ring(erreicht, f"{erreicht:.0f}%",
                           f"{MONATE_DE[int(monat[5:7])-1]} {monat[:4]}", prog_text)
+        # Die Nettozahl ist seit Fassung 137 deutlich strenger: Playtomic
+        # wird versteuert, und offene wie stornierte Zahlungen zählen
+        # nicht mehr mit. Für den September waren das zusammen 12.614 €
+        # von 58.179 €. Ein Ziel aus der Zeit davor ist zu hoch gesetzt.
+        st.caption("Das Ziel ist eine Nettozahl. Seit Fassung 137 wird "
+                   "auch Playtomic versteuert und offene oder stornierte "
+                   "Zahlungen zählen nicht mehr mit — rückwirkend rund "
+                   "ein Fünftel weniger als vorher. Stammt dein Ziel aus "
+                   "der Zeit davor, steht es unter Einstellungen.")
 
     # ── Umsatz pro Tag ──────────────────────────────────────────────────
     monats_tage = sorted([t for t in tage if t.startswith(monat)])
     if not monats_tage:
         return
 
+    # Netto gegen netto — brutto wäre hier zwei verschiedene Böden.
     reihen = [{"tag": t[8:10],
-               "Playtomic": tages_kennzahlen(t)["umsatz"],
-               "Wellpass": tages_kennzahlen(t)["wellpass_wert"]}
+               "Playtomic": tages_kennzahlen(t)["umsatz_netto"],
+               "Wellpass": tages_kennzahlen(t)["wellpass_netto"]}
               for t in monats_tage]
     df = pd.DataFrame(reihen)
 
@@ -15320,46 +15409,56 @@ def _dash_einnahmen():
                          key="ein_monat")
 
     k = monats_kennzahlen(monat)
-    playtomic = float(k["umsatz"])          # netto, so rechnet Playtomic ab
-    wellpass = float(k["wellpass_wert"])    # brutto, so zahlt EGYM
+    playtomic = float(k["umsatz"])              # brutto, so zahlt der Kunde
+    playtomic_netto = float(k["umsatz_netto"])  # Playtomics eigene Aufteilung
+    playtomic_ust = float(k["umsatz_ust"])
+    wellpass = float(k["wellpass_wert"])        # brutto, so zahlt EGYM
     wellpass_netto = float(k["wellpass_netto"])
-    gesamt = round(playtomic + wellpass, 2)        # was aufs Konto kommt
-    gesamt_netto = float(k["gesamt_netto"])        # vergleichbare Zahl
-    mwst_drin = round(wellpass - wellpass_netto, 2)
+    gesamt = float(k["gesamt_effektiv"])        # was aufs Konto kommt
+    gesamt_netto = float(k["gesamt_netto"])     # was davon bleibt
+    ust = float(k["ust"])
     satz = wellpass_wert_am(f"{monat}-01")
 
     box("Nur die beiden Quellen, die dir tatsächlich Geld überweisen. "
         "Gerechnet wird ausschliesslich mit den hochgeladenen Exporten — "
         "wie du einen Fall später abschliesst, ändert hier nichts.", "info")
 
-    st.markdown("**So kommt das Geld an**")
+    st.markdown("**So kommt das Geld an — brutto**")
     e1, e2, e3 = st.columns(3)
     with e1:
-        kpi("Playtomic netto", geld(playtomic), f"{k['buchungen']} Buchungen")
+        kpi("Playtomic brutto", geld(playtomic), f"{k['buchungen']} Buchungen")
     with e2:
         kpi("Wellpass brutto", geld(wellpass),
             f"{k['wellpass_anzahl']} × {euro(satz)}")
     with e3:
-        kpi("Auf dem Konto", geld(gesamt), "netto + brutto gemischt")
+        kpi("Auf dem Konto", geld(gesamt), "beides brutto")
 
-    st.markdown("**Alles netto — die vergleichbare Zahl**")
+    st.markdown("**Was davon bleibt — netto**")
     n1, n2, n3 = st.columns(3)
     with n1:
+        kpi("Playtomic netto", geld(playtomic_netto),
+            f"{geld(playtomic_ust)} Umsatzsteuer")
+    with n2:
         kpi("Wellpass netto", geld(wellpass_netto),
             f"{euro(satz)} brutto = {euro(netto_aus_brutto(satz))} netto")
-    with n2:
-        kpi("Gesamt netto", geld(gesamt_netto), monat_lang(monat))
     with n3:
-        kpi("Darin MwSt", geld(mwst_drin),
-            f"{CONFIG['mwst']*100:.0f} % aus der EGYM-Vergütung")
+        kpi("Gesamt netto", geld(gesamt_netto),
+            f"{monat_lang(monat)} · {geld(ust)} ans Finanzamt")
 
-    box("ℹ️ <b>Warum zwei Summen?</b> Playtomic rechnet netto ab — der "
-        "Betrag im Export ist schon ohne Mehrwertsteuer. EGYM zahlt "
-        f"{euro(satz)} je Check-in <b>brutto</b>, da steckt die "
-        "Mehrwertsteuer noch drin. <b>Auf dem Konto</b> ist die Summe, die "
-        "wirklich überwiesen wird — zum Vergleichen taugt sie nicht, weil "
-        "zwei verschiedene Böden addiert werden. <b>Gesamt netto</b> ist "
-        "die Zahl für Monatsvergleiche, Ziele und jede Kalkulation.", "info")
+    box(f"ℹ️ <b>Beide Quellen sind brutto.</b> Was der Kunde bei Playtomic "
+        f"zahlt, enthält {CONFIG['mwst']*100:.0f} % Umsatzsteuer — der "
+        f"Export weist sie selbst aus, Spalte <i>Taxes</i>. EGYMs "
+        f"{euro(satz)} je Check-in ebenso. <b>Auf dem Konto</b> ist, was "
+        f"überwiesen wird; davon gehören <b>{geld(ust)}</b> dem Finanzamt, "
+        f"und <b>{geld(gesamt_netto)}</b> bleiben. Mit der Nettozahl "
+        f"rechnet die App: Monatsvergleiche, Ziele, Hochrechnung.", "info")
+
+    if k["nicht_geflossen"]:
+        box(f"Nicht mitgezählt: <b>{geld(k['nicht_geflossen'])}</b> aus "
+            f"offenen und stornierten Zahlungen. Die stehen in der Datei "
+            f"mit den offenen Posten, weil die Anspruchsrechnung ihre "
+            f"Preise braucht — Geld sind sie nicht. Bis Fassung 136 "
+            f"liefen sie als Einnahme mit.", "warn")
 
     # ── Wie sich die Wellpass-Zahl ergibt ───────────────────────────────
     roh, verguetet, doppelte = checkins_roh_und_verguetet(monat)
@@ -15386,7 +15485,7 @@ def _dash_einnahmen():
 
     # ── Aufschlüsselung Playtomic ───────────────────────────────────────
     st.markdown("---")
-    st.markdown("**Woraus sich Playtomic zusammensetzt** · alles netto")
+    st.markdown("**Woraus sich Playtomic zusammensetzt** · alles brutto")
     posten = [
         ("Online bezahlt", k["online"]),
         ("Über Guthaben", k["guthaben"]),
@@ -15412,11 +15511,13 @@ def _dash_einnahmen():
         tk = tages_kennzahlen(t)
         zeilen.append({
             "Datum": datum_kurz(t),
-            "Playtomic netto": round(float(tk["umsatz"]), 2),
+            "Playtomic brutto": round(float(tk["umsatz"]), 2),
+            "Playtomic netto": round(float(tk["umsatz_netto"]), 2),
             "Check-ins": int(tk["wellpass_anzahl"]),
             "Wellpass brutto": round(float(tk["wellpass_wert"]), 2),
             "Wellpass netto": round(float(tk["wellpass_netto"]), 2),
             "Gesamt netto": round(float(tk["gesamt_netto"]), 2),
+            "Umsatzsteuer": round(float(tk["ust"]), 2),
             "Auf dem Konto": round(float(tk["gesamt_effektiv"]), 2),
         })
 
@@ -15424,8 +15525,9 @@ def _dash_einnahmen():
         return
 
     df = pd.DataFrame(zeilen)
-    geldspalten = ("Playtomic netto", "Wellpass brutto", "Wellpass netto",
-                   "Gesamt netto", "Auf dem Konto")
+    geldspalten = ("Playtomic brutto", "Playtomic netto", "Wellpass brutto",
+                   "Wellpass netto", "Gesamt netto", "Umsatzsteuer",
+                   "Auf dem Konto")
 
     zeig = df.copy()
     for spalte in geldspalten:
@@ -15497,8 +15599,9 @@ def _dash_monatsstand():
         # aus, als er war; mit ihrer Bruttozahl besser.
         kpi(f"{monat_lesbar(jetzt['monat'])} · Tag 1–{tag}",
             geld(jetzt["gesamt_netto"]),
-            f"{geld(jetzt['umsatz'])} Platz + {geld(jetzt['wellpass_netto'])} "
-            f"Wellpass netto ({jetzt['wellpass_anzahl']} Check-ins)")
+            f"{geld(jetzt['umsatz_netto'])} Platz + "
+            f"{geld(jetzt['wellpass_netto'])} Wellpass "
+            f"({jetzt['wellpass_anzahl']} Check-ins), beides netto")
     with c2:
         if u["verlaesslich"]:
             zeichen = "+" if u["abstand"] >= 0 else ""
@@ -15550,7 +15653,7 @@ def _dash_monatsstand():
         zeilen.append({
             "Monat": monat_lesbar(m["monat"]),
             f"Netto Tag 1–{tag}": geld(m["gesamt_netto"]),
-            "davon Platz": geld(m["umsatz"]),
+            "davon Platz netto": geld(m["umsatz_netto"]),
             "davon Wellpass netto": geld(m["wellpass_netto"]),
             "Buchungen": m["buchungen"],
             "Spieler": m["spieler"],
