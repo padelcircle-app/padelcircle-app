@@ -379,7 +379,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # läuft, und genau das war am 14.10.2026 die offene Frage: Die Anzeige
 # stand acht Fassungen lang auf „101". `tests/test_23_stand.py` lässt
 # die Gegenprobe scheitern, wenn sie hinterherhinkt.
-APP_STAND       = "Fassung 134 · 05.11.2026"
+APP_STAND       = "Fassung 135 · 10.11.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -1606,6 +1606,14 @@ ABGELEITETE_CACHES = ("tages_kennzahlen", "verfuegbare_tage", "monats_kennzahlen
                       "geschenk_checkins", "falsche_zuordnungen",
                       "buchungsexport_fremde_tage", "buchungsexport_fremde_zeilen",
                       "buchungs_rabatte_am", "konten_je_name",
+                      # Spielerzahlen und Wachstum. Sie hängen am
+                      # Buchungsexport; nach einem Import muss die
+                      # Wochenkurve die neue Woche zeigen, nicht die von
+                      # vor 15 Minuten.
+                      "_spieler_belegungen", "spieler_je_monat",
+                      "spieler_je_woche", "spieler_entwicklung",
+                      "spieler_wachstum_wochen", "besuchsklassen",
+                      "registrierte_konten",
                       # Zwischenspeicher, die nur an einem Blatt hängen
                       "_rohdaten_aufbereitet", "erledigte_faelle")
 
@@ -4207,10 +4215,9 @@ def auslastung_vorschlaege() -> list:
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-def spieler_je_monat() -> tuple:
+def _spieler_belegungen() -> list:
     """
-    Wer stand in welchem Monat wie oft auf dem Platz?
-    → ({"2026-10": {name_norm: Plätze}}, {"2026-10": Zahl der Tage})
+    Eine Zeile je Buchung: (Tag, (name_norm, …)).
 
     Grundlage ist der BUCHUNGSEXPORT, nicht das Blatt `buchungen`. Der
     Buchungsexport nennt alle Teilnehmer einer Buchung; das Blatt
@@ -4219,16 +4226,22 @@ def spieler_je_monat() -> tuple:
     Platzbelegungen — bei einem Doppel zahlt einer für vier.
 
     Stornierte Buchungen fliegen raus, das Team auch.
+
+    Steht bewusst für sich und wird zweimal gebündelt — nach Monat und
+    nach Woche. Zwei eigene Durchläufe über denselben Export hätten
+    sich beim nächsten Filter auseinander entwickelt, und an den
+    Filtern hängt hier alles: Der falsche Standort allein machte aus
+    1.322 Septemberspielern 3.269.
     """
     b = loadsheet("buchungsexport")
     if b.empty or "booking_start_date" not in b.columns:
-        return {}, {}
+        return []
     namensspalten = [f"participant_name_{i}" for i in range(1, 21)
                      if f"participant_name_{i}" in b.columns]
     if not namensspalten:
-        return {}, {}
+        return []
 
-    out, tage = {}, {}
+    zeilen = []
     fremd = CONFIG["playtomic_tenant_id"]
     for r in b.itertuples(index=False):
         if str(getattr(r, "status", "") or "").strip().upper() == "CANCELED":
@@ -4242,14 +4255,43 @@ def spieler_je_monat() -> tuple:
         tag = _tag_von(getattr(r, "booking_start_date", ""))
         if len(tag) < 10:
             continue
-        monat = tag[:7]
-        tage.setdefault(monat, set()).add(tag)
         namen = {normalize_name(getattr(r, sp, "")) for sp in namensspalten}
+        zeilen.append((tag, tuple(sorted(n for n in namen
+                                         if n and n not in TEAM_NORM))))
+    return zeilen
+
+
+def _spieler_gebuendelt(schluessel) -> tuple:
+    """
+    Die Belegungen nach einem Zeitraum bündeln.
+    → ({schlüssel: {name_norm: Plätze}}, {schlüssel: Zahl der Tage})
+    """
+    out, tage = {}, {}
+    for tag, namen in _spieler_belegungen():
+        k = schluessel(tag)
+        tage.setdefault(k, set()).add(tag)
+        eimer = out.setdefault(k, {})
         for name in namen:
-            if not name or name in TEAM_NORM:
-                continue
-            out.setdefault(monat, {})
-            out[monat][name] = out[monat].get(name, 0) + 1
+            eimer[name] = eimer.get(name, 0) + 1
+    return out, {k: len(t) for k, t in tage.items()}
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def spieler_je_monat() -> tuple:
+    """
+    Wer stand in welchem Monat wie oft auf dem Platz?
+    → ({"2026-10": {name_norm: Plätze}}, {"2026-10": Zahl der Tage})
+    """
+    return _spieler_gebuendelt(lambda tag: tag[:7])
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def spieler_je_woche() -> tuple:
+    """
+    Dasselbe je Kalenderwoche.
+    → ({"2026-W45": {name_norm: Plätze}}, {"2026-W45": Zahl der Tage})
+    """
+    return _spieler_gebuendelt(woche_von_tag)
     return out, {m: len(t) for m, t in tage.items()}
 
 
@@ -4311,6 +4353,182 @@ def _spieltage_moeglich(monat: str) -> int:
         pass
     letzter = min(letzter, date.today() - timedelta(days=1))
     return max(0, (letzter - erster).days + 1)
+
+
+# ── Woche für Woche: wächst es noch? ─────────────────────────────────
+#
+# Marcel am 10.11.2026: „damit ich sehe obs mehr werden oder es langsam
+# an den Peak kommt."
+#
+# Der Monat ist dafür zu grob — bis er fertig ist, ist der Trend drei
+# Wochen alt. Die einzelne Woche ist zu laut: Ferien, eine Woche Regen,
+# ein Feiertag schlagen stärker aus als die Entwicklung. Deshalb steht
+# hier beides, Woche und der Schnitt der letzten vier.
+
+
+def woche_von_tag(tag: str) -> str:
+    """„2026-11-05" → „2026-W45". ISO-Woche, Montag bis Sonntag."""
+    jahr, nr, _wt = date.fromisoformat(str(tag)[:10]).isocalendar()
+    return f"{jahr}-W{nr:02d}"
+
+
+def woche_montag(woche: str) -> date:
+    """Der Montag einer Wochenkennung — das Gegenstück zu `woche_von_tag`."""
+    jahr, _t, nr = str(woche).partition("-W")
+    return date.fromisocalendar(int(jahr), int(nr), 1)
+
+
+def woche_label(woche: str) -> str:
+    """„2026-W45" → „KW 45 · 02.–08.11."."""
+    mo = woche_montag(woche)
+    so = mo + timedelta(days=6)
+    return (f"KW {mo.isocalendar()[1]} · {mo.day:02d}.{mo.month:02d}."
+            f"–{so.day:02d}.{so.month:02d}.")
+
+
+def _wochentage_moeglich(woche: str) -> int:
+    """
+    Wie viele Tage dieser Woche überhaupt Spieltage sein KONNTEN.
+
+    Die Eröffnungswoche hatte nur drei, und die laufende Woche ist noch
+    nicht vorbei. Ohne diese Grenze sähe beides wie ein Einbruch aus —
+    und ob es weniger wird, ist genau die Frage dieser Ansicht.
+    """
+    mo = woche_montag(woche)
+    erster, letzter = mo, mo + timedelta(days=6)
+    try:
+        auf = datetime.strptime(standort_start(), "%Y-%m-%d").date()
+        erster = max(erster, auf)
+    except (TypeError, ValueError):
+        pass
+    letzter = min(letzter, date.today() - timedelta(days=1))
+    return max(0, (letzter - erster).days + 1)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def spieler_wachstum_wochen() -> pd.DataFrame:
+    """
+    Woche für Woche: Spieler, Plätze, Neue, Wiederkehrer — und der
+    geglättete Verlauf.
+
+    Spalten: woche, montag, spieler, plaetze, je_spieler, neu, bekannt,
+    von_vorwoche, plaetze_tag, tage, tage_moeglich, voll, schnitt4.
+
+    `voll` ist die wichtigste davon. Eine angefangene Woche hat
+    zwangsläufig weniger Spieler als eine fertige; stünde sie
+    gleichberechtigt in der Kurve, zeigte die Ansicht jeden Montag
+    einen Absturz an, den es nicht gibt. Sie wird deshalb gezeigt, aber
+    weder in den Schnitt noch in das Urteil gerechnet.
+    """
+    je_woche, tage = spieler_je_woche()
+    if not je_woche:
+        return pd.DataFrame()
+
+    zeilen, gesehen = [], set()
+    wochen = sorted(je_woche, key=woche_montag)
+    for i, w in enumerate(wochen):
+        jetzt = set(je_woche[w])
+        plaetze = sum(je_woche[w].values())
+        vor = set(je_woche[wochen[i - 1]]) if i else set()
+        hatte = int(tage.get(w, 0))
+        moeglich = _wochentage_moeglich(w)
+        zeilen.append({
+            "woche": w,
+            "montag": woche_montag(w).isoformat(),
+            "spieler": len(jetzt),
+            "plaetze": plaetze,
+            "je_spieler": round(plaetze / len(jetzt), 2) if jetzt else 0.0,
+            "neu": len(jetzt - gesehen),
+            "bekannt": len(jetzt & gesehen),
+            "von_vorwoche": (round(len(vor & jetzt) / len(vor) * 100, 1)
+                             if vor else None),
+            "plaetze_tag": round(plaetze / hatte, 1) if hatte else 0.0,
+            "tage": hatte,
+            "tage_moeglich": moeglich,
+            # Voll heisst: Die Woche ist kalendarisch vorbei und liegt
+            # ganz nach der Eröffnung — UND der Bestand hat sie auch.
+            # Fehlten zwei Tage im Export, wäre die Woche kein
+            # Rückgang, sondern eine Lücke; beides sieht in der Kurve
+            # gleich aus, und nur das eine ist eine Nachricht wert.
+            "voll": moeglich >= 7 and hatte >= 6,
+        })
+        gesehen |= jetzt
+
+    df = pd.DataFrame(zeilen)
+    # Der Schnitt läuft nur über volle Wochen. Eine angefangene würde
+    # ihn nach unten ziehen und einen Rückgang vortäuschen.
+    nur_voll = df["spieler"].where(df["voll"])
+    df["schnitt4"] = nur_voll.rolling(4, min_periods=2).mean().round(1)
+    # float("nan"), nicht pd.NA: pd.NA macht aus der Zahlenspalte eine
+    # Objektspalte, und die zeichnet st.line_chart nicht mehr.
+    df.loc[~df["voll"], "schnitt4"] = float("nan")
+    return df
+
+
+def _fehlende_wochen(df: pd.DataFrame) -> list:
+    """
+    Welche Kalenderwochen zwischen der ersten und der letzten fehlen
+    im Bestand ganz? → ["2026-W41", …]
+
+    Eine Woche ohne eine einzige Buchung gibt es im Betrieb nicht —
+    wo eine fehlt, fehlt der Export. Das ist ein Unterschied, den die
+    Kurve allein nicht zeigen kann: Sie verbindet die Nachbarn und
+    sieht aus, als wäre nichts gewesen.
+    """
+    if df.empty:
+        return []
+    da = set(df["woche"])
+    lauf = woche_montag(df["woche"].iloc[0])
+    ende = woche_montag(df["woche"].iloc[-1])
+    fehlt = []
+    while lauf < ende:
+        lauf += timedelta(days=7)
+        w = woche_von_tag(lauf.isoformat())
+        if w not in da:
+            fehlt.append(w)
+    return fehlt
+
+
+def wachstum_urteil(df: pd.DataFrame) -> dict:
+    """
+    Wächst es noch, oder ist der Peak erreicht?
+    → {"text", "ton", "jetzt", "davor", "delta", "basis"} oder {}
+
+    Verglichen werden die letzten vier VOLLEN Wochen mit den vier
+    davor. Vier gegen vier, weil eine einzelne Woche zu laut ist — und
+    nicht mit dem Vorjahr, weil es für diese Halle noch keines gibt.
+    Aus demselben Grund sagt das Urteil nichts über die Saison: Dass
+    eine Hallensportart im November besser läuft als im August, ist
+    kein Verdienst und kein Trend.
+    """
+    if df.empty:
+        return {}
+    voll = df[df["voll"]]
+    if len(voll) < 6:
+        return {}
+    jetzt_reihe = voll["spieler"].iloc[-4:]
+    davor_reihe = voll["spieler"].iloc[-8:-4]
+    if davor_reihe.empty:
+        return {}
+    jetzt, davor = float(jetzt_reihe.mean()), float(davor_reihe.mean())
+    delta = (jetzt - davor) / davor * 100 if davor else 0.0
+
+    if delta >= 10:
+        text, ton = "Wächst deutlich", "ok"
+    elif delta >= 3:
+        text, ton = "Wächst", "ok"
+    elif delta > -3:
+        text, ton = "Plateau", "warn"
+    elif delta > -10:
+        text, ton = "Geht leicht zurück", "warn"
+    else:
+        text, ton = "Geht zurück", "err"
+    return {"text": text, "ton": ton,
+            "jetzt": round(jetzt, 1), "davor": round(davor, 1),
+            "delta": round(delta, 1),
+            "basis": f"Schnitt aus {len(jetzt_reihe)} Wochen gegen "
+                     f"{len(davor_reihe)} davor"}
+
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -15636,21 +15854,23 @@ def _winback():
 
 
 def modul_spieler():
-    head("Spieler & Community", "Wiederkehr · Rangliste · Rückholung")
-    t0, t1, t2, t3, t4, t5 = st.tabs(
-        ["📈 Wiederkehr", "🏆 Rangliste", "⭐ Vielspieler", "🔄 Rückholung",
-         "🔎 Analysen", "👤 Einzelner Spieler"])
+    head("Spieler & Community", "Wachstum · Wiederkehr · Rückholung")
+    t0, t1, t2, t3, t4, t5, t6 = st.tabs(
+        ["📈 Wachstum", "🔁 Wiederkehr", "🏆 Rangliste", "⭐ Vielspieler",
+         "🔄 Rückholung", "🔎 Analysen", "👤 Einzelner Spieler"])
     with t0:
-        _spieler_wiederkehr()
+        _spieler_wachstum()
     with t1:
-        _spieler_rangliste()
+        _spieler_wiederkehr()
     with t2:
-        _vielspieler()
+        _spieler_rangliste()
     with t3:
-        _winback()
+        _vielspieler()
     with t4:
-        _spieler_analysen()
+        _winback()
     with t5:
+        _spieler_analysen()
+    with t6:
         _spieler_profil()
 
 
@@ -15733,6 +15953,152 @@ def _spieler_profil():
                        f"Slots · davon <24 h: {int(a['<24h'])} · "
                        f"<2 h: {int(a['<2h'])} · nach Beginn: "
                        f"{int(a['nach Beginn'])}")
+
+
+def _spieler_wachstum():
+    """
+    Wächst es noch, oder kommt der Peak? — Woche für Woche.
+
+    Marcel am 10.11.2026: „damit ich sehe obs mehr werden oder es
+    langsam an den Peak kommt."
+
+    Die Ansicht beantwortet das mit drei Dingen, und keines davon ist
+    die nackte Wochenzahl: dem Schnitt der letzten vier Wochen, dem
+    Vergleich dieser vier mit den vier davor, und der Aufteilung in
+    Neue und Wiederkehrer. Die letzte Zahl sagt, woher das Wachstum
+    kommt — und hört es dort auf, hört es bald überall auf.
+    """
+    df = spieler_wachstum_wochen()
+    if df.empty:
+        box("Noch keine Buchungsdaten. Lade zuerst die Exporte hoch.", "warn")
+        return
+
+    voll = df[df["voll"]]
+    if voll.empty:
+        box("Noch keine abgeschlossene Woche im Bestand.", "info")
+        return
+    letzte = voll.iloc[-1]
+    urteil = wachstum_urteil(df)
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        kpi("Letzte volle Woche",
+            f"{int(letzte['spieler']):,}".replace(",", "."),
+            f"{woche_label(letzte['woche'])} · "
+            f"{int(letzte['plaetze'])} Plätze")
+    with c2:
+        schnitt = letzte["schnitt4"]
+        kpi("Schnitt 4 Wochen",
+            "—" if pd.isna(schnitt) else f"{schnitt:,.0f}".replace(",", "."),
+            "Spieler je Woche, geglättet")
+    with c3:
+        if urteil:
+            kpi("Trend", f"{urteil['delta']:+.0f} %".replace(".", ","),
+                urteil["text"])
+        else:
+            kpi("Trend", "—", "noch zu wenige volle Wochen")
+
+    if urteil:
+        pfeil = "📈" if urteil["delta"] >= 3 else (
+            "📉" if urteil["delta"] <= -3 else "➡️")
+        delta_txt = f"{urteil['delta']:+.1f} %".replace(".", ",")
+        box(f"{pfeil} <b>{urteil['text']}.</b> Die letzten vier vollen "
+            f"Wochen brachten im Schnitt <b>{urteil['jetzt']:.0f} Spieler</b> "
+            f"je Woche, die vier davor {urteil['davor']:.0f} — "
+            f"{delta_txt}. ({urteil['basis']}.)", urteil["ton"])
+    else:
+        box("Für ein Urteil über den Trend braucht es mindestens sechs "
+            "abgeschlossene Wochen. Bis dahin steht unten nur der "
+            "Verlauf.", "info")
+
+    # Die laufende Woche steht in der Tabelle, aber nirgends im Trend —
+    # das muss dastehen, sonst sieht sie wie ein Einbruch aus.
+    laufend = df[~df["voll"]]
+    if not laufend.empty:
+        l = laufend.iloc[-1]
+        st.caption(
+            f"Die laufende Woche ({woche_label(l['woche'])}) hat erst "
+            f"{int(l['tage'])} von {int(l['tage_moeglich'])} Tagen im "
+            f"Bestand — sie steht unten in der Tabelle, zählt aber weder "
+            f"in den Schnitt noch in den Trend.")
+
+    # Fehlt eine Woche ganz, zeichnet die Kurve eine gerade Linie
+    # darüber — und die sieht aus wie eine ruhige Woche. In den
+    # Dateien auf dem Mac fehlten die Kalenderwochen 41 bis 44
+    # vollständig; die Kurve hätte den Oktober einfach weggeglättet.
+    luecken = _fehlende_wochen(df)
+    if luecken:
+        box(f"⚠️ Im Bestand fehlen <b>{len(luecken)} Wochen</b> ganz: "
+            + ", ".join(f"KW {woche_montag(w).isocalendar()[1]}"
+                        for w in luecken[:8])
+            + ("…" if len(luecken) > 8 else "")
+            + ". Dort hat die Kurve eine Lücke, und der Schnitt rechnet "
+              "über sie hinweg. Fehlende Exporte nachladen, dann "
+              "stimmt der Verlauf.", "warn")
+
+    # ── Verlauf ─────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("##### Spieler je Woche")
+    bild = df.copy()
+    bild.index = pd.to_datetime(bild["montag"])
+    bild = bild.rename(columns={"spieler": "Spieler",
+                                "schnitt4": "Schnitt 4 Wochen"})
+    st.line_chart(bild[["Spieler", "Schnitt 4 Wochen"]],
+                  color=[C["volt"], C["blue_soft"]])
+    st.caption("Die helle Linie ist die einzelne Woche, die blaue der "
+               "Schnitt der letzten vier. Auf die blaue schauen: Eine "
+               "einzelne Woche kippt schon wegen Ferien, Feiertag oder "
+               "einer Woche Dauerregen.")
+
+    st.markdown("##### Woher die Spieler kommen")
+    bild = bild.rename(columns={"neu": "zum ersten Mal",
+                                "bekannt": "schon mal da"})
+    st.bar_chart(bild[["schon mal da", "zum ersten Mal"]],
+                 color=[C["blue_soft"], C["volt"]])
+    st.caption("Solange der helle Teil hoch bleibt, kommt Nachschub von "
+               "aussen. Wird er schmaler, während die Gesamthöhe noch "
+               "steigt, lebt das Wachstum von den Bekannten — das ist "
+               "stabiler, aber es hat eine Obergrenze. Genau dort "
+               "beginnt der Peak, und man sieht es hier Wochen bevor es "
+               "in der Gesamtzahl auffällt.")
+
+    # ── Tabelle ─────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("##### Jede Woche einzeln")
+    zeig = pd.DataFrame([{
+        "Woche": woche_label(r["woche"]),
+        "Spieler": int(r["spieler"]),
+        "Plätze": int(r["plaetze"]),
+        # Nur bei vollen Wochen. Von der laufenden liegen meist
+        # Freitag bis Sonntag vor — die drei stärksten Tage. „155
+        # Plätze je Tag" gegen 101 im September wäre kein Wachstum,
+        # sondern das Wochenende.
+        "Plätze je Tag": ("—" if not r["voll"]
+                          else f"{r['plaetze_tag']:.0f}".replace(".", ",")),
+        "zum ersten Mal": int(r["neu"]),
+        "schon mal da": int(r["bekannt"]),
+        "von Vorwoche wieder": ("—" if pd.isna(r["von_vorwoche"])
+                                else f"{r['von_vorwoche']:.0f} %"),
+        "Schnitt 4 Wochen": ("—" if pd.isna(r["schnitt4"])
+                             else f"{r['schnitt4']:.0f}"),
+        "Datenlage": ("vollständig" if r["voll"]
+                      else f"{int(r['tage'])} von {int(r['tage_moeglich'])} Tagen"),
+    } for _, r in df.iloc[::-1].iterrows()])
+    st.dataframe(zeig, use_container_width=True, hide_index=True,
+                 height=min(560, 60 + 35 * len(zeig)))
+
+    box("Ein Wort zur Vorsicht: Die Halle ist seit Juli offen, es gibt "
+        "also noch kein Vorjahr zum Vergleichen. Ein Teil des Anstiegs "
+        "im Herbst ist Saison und nicht Wachstum — Padel ist drinnen, "
+        "und draussen wird es kalt. Was die Saison nicht erklärt, ist "
+        "der Anteil der Erstspieler: Der hängt an dem, was du tust.",
+        "info")
+
+    st.download_button(
+        "⬇️ Als CSV",
+        data=df.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
+        file_name="spieler_je_woche.csv", mime="text/csv",
+        use_container_width=True)
 
 
 def _spieler_wiederkehr():
