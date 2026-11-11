@@ -379,7 +379,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # läuft, und genau das war am 14.10.2026 die offene Frage: Die Anzeige
 # stand acht Fassungen lang auf „101". `tests/test_23_stand.py` lässt
 # die Gegenprobe scheitern, wenn sie hinterherhinkt.
-APP_STAND       = "Fassung 138 · 11.11.2026"
+APP_STAND       = "Fassung 139 · 11.11.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -11120,15 +11120,23 @@ def wellpass_platz_beim_gast(bdf, bewertet: list, checkins: list) -> set:
     Monaten nie eingecheckt, Danja um 20:00. Der Fall stand bei Birk,
     Danjas Check-in als überzählig daneben.
 
+    Das geht auch mehrfach. Ferdinand May spielte am 06.11. zwei Stunden
+    mit denselben drei Leuten, zwei davon mit Wellpass. Um 20:00 lief
+    EIN Gastplatz über sein Konto, um 21:00 ZWEI — und weil hier bis
+    Fassung 138 genau einer verlangt war, blieb der zweite Slot bei ihm
+    stehen. Er stand als offener Wellpass-Fall da, mit „9,00 € → 9,00 €"
+    daneben: In derselben Zeile stand, dass er voll bezahlt hat.
+
     Umgebucht wird nur, wenn alles zusammenpasst — sonst bleibt es, wie es
     war:
-      • genau EIN rabattierter Platz, daneben mindestens ein voller,
+      • mindestens ein rabattierter Platz, daneben mindestens ein voller
+        (wer gar keinen vollen Anteil zahlt, hatte den Rabatt selbst),
       • der Zahler hat nie eingecheckt — weder in dieser Datei noch im
         gespeicherten Bestand, auch nicht unter ähnlicher Schreibweise
         oder über eine Verknüpfung,
-      • genau EIN Mitspieler ohne eigene Zahlungszeile hat an dem Tag
-        eingecheckt.
-    In Juli und August traf das genau diesen einen Fall.
+      • genau so viele Mitspieler ohne eigene Zahlungszeile haben an dem
+        Tag eingecheckt, wie rabattierte Plätze auf seinem Konto liegen.
+    Bleibt eine Zahl offen, bleibt der Fall, wo er war.
 
     → {(datum, zeit, name_norm) der Zahler}
     """
@@ -11166,7 +11174,8 @@ def wellpass_platz_beim_gast(bdf, bewertet: list, checkins: list) -> set:
         anteile = moegliche_anteile(g["datum"], g.get("minute", -1))
         volle_plaetze = sum(1 for pl in g["plaetze"]
                             if pl["betrag"] > 0 and pl["betrag"] in anteile)
-        if not volle_plaetze or len(g["plaetze"]) - volle_plaetze != 1:
+        frei = len(g["plaetze"]) - volle_plaetze
+        if not volle_plaetze or frei < 1:
             continue
         nn = g["name_norm"]
         eigene_namen = {nn} | set(g.get("aliase", ()))
@@ -11181,7 +11190,7 @@ def wellpass_platz_beim_gast(bdf, bewertet: list, checkins: list) -> set:
             da = [n for n in namen
                   if (tag, zeit, normalize_name(n)) not in bekannt
                   and (tag, normalize_name(n)) in eingecheckt_am]
-            if len(da) == 1:
+            if len(da) == frei:
                 umbuchen.add((tag, zeit, nn))
             break
     return umbuchen
