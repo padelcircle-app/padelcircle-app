@@ -379,7 +379,7 @@ def wellpass_wert_summe(datumsliste) -> float:
 # läuft, und genau das war am 14.10.2026 die offene Frage: Die Anzeige
 # stand acht Fassungen lang auf „101". `tests/test_23_stand.py` lässt
 # die Gegenprobe scheitern, wenn sie hinterherhinkt.
-APP_STAND       = "Fassung 137 · 10.11.2026"
+APP_STAND       = "Fassung 138 · 11.11.2026"
 ADMIN_GEBUEHR   = CONFIG["admin_gebuehr"]
 QR_LINK         = CONFIG["wellpass_qr_link"]
 COURTS_GESAMT   = CONFIG["courts_double"] + CONFIG["courts_single"]
@@ -1610,6 +1610,7 @@ ABGELEITETE_CACHES = ("tages_kennzahlen", "verfuegbare_tage", "monats_kennzahlen
                       # Buchungsexport; nach einem Import muss die
                       # Wochenkurve die neue Woche zeigen, nicht die von
                       # vor 15 Minuten.
+                      "jahres_bilanz",
                       "_spieler_belegungen", "spieler_je_monat",
                       "spieler_je_woche", "spieler_entwicklung",
                       "spieler_wachstum_wochen", "besuchsklassen",
@@ -3350,23 +3351,41 @@ def vergleichs_urteil(jetzt: dict, frueher: list,
                  if m["tage_mit_daten"] >= m["tage_moeglich"] - 1
                  and m.get(feld, 0) > 0]
     if not brauchbar:
-        return {"schnitt": 0.0, "bestes": 0.0, "abstand": 0.0,
-                "prozent": 0.0, "hochrechnung": 0.0, "verlaesslich": False}
+        return {"schnitt": 0.0, "schnitt_brutto": 0.0, "bestes": 0.0,
+                "abstand": 0.0, "abstand_brutto": 0.0, "prozent": 0.0,
+                "hochrechnung": 0.0, "hochrechnung_brutto": 0.0,
+                "hochrechnung_ust": 0.0, "verlaesslich": False}
     schnitt = sum(m[feld] for m in brauchbar) / len(brauchbar)
     bestes = max(m[feld] for m in brauchbar)
-    tage = max(1, jetzt["tage_mit_daten"])
-    jahr, mon = int(jetzt["monat"][:4]), int(jetzt["monat"][5:7])
+
+    # Dieselbe Rechnung noch einmal brutto. Marcel am 11.11.2026:
+    # „auch wie viel ist im Brutto sein wird zum Monatsende". Eine
+    # eigene Mechanik braucht es dafür nicht: Das Wochentagsmuster ist
+    # dasselbe, nur der Pegel ist ein anderer — und den gleicht der
+    # `faktor` in monats_hochrechnung() von selbst aus.
+    jetzt_brutto = float(jetzt.get("gesamt_effektiv", 0.0))
+    schnitt_brutto = (sum(float(m.get("gesamt_effektiv", 0.0))
+                          for m in brauchbar) / len(brauchbar))
+
+    # Einmal rechnen, nicht zweimal: `monats_hochrechnung` lief hier
+    # für denselben Wert doppelt, und jeder Lauf geht über alle Tage
+    # des Bestands.
+    hr = monats_hochrechnung(jetzt["monat"], jetzt["tage_moeglich"], jetzt[feld])
+    hr_brutto = monats_hochrechnung(jetzt["monat"], jetzt["tage_moeglich"],
+                                    jetzt_brutto)
     return {
         "schnitt": round(schnitt, 2),
+        "schnitt_brutto": round(schnitt_brutto, 2),
         "bestes": round(bestes, 2),
         "abstand": round(jetzt[feld] - schnitt, 2),
+        "abstand_brutto": round(jetzt_brutto - schnitt_brutto, 2),
         "prozent": round((jetzt[feld] / schnitt - 1) * 100, 1) if schnitt else 0.0,
         # Hochgerechnet mit den Wochentagen, die noch kommen — nicht
         # „Schnitt mal Anzahl Tage". Siehe monats_hochrechnung().
-        "hochrechnung": monats_hochrechnung(
-            jetzt["monat"], jetzt["tage_moeglich"], jetzt[feld])["wert"],
-        "hochrechnung_teile": monats_hochrechnung(
-            jetzt["monat"], jetzt["tage_moeglich"], jetzt[feld]),
+        "hochrechnung": hr["wert"],
+        "hochrechnung_brutto": hr_brutto["wert"],
+        "hochrechnung_ust": round(hr_brutto["wert"] - hr["wert"], 2),
+        "hochrechnung_teile": hr,
         "verlaesslich": len(brauchbar) >= 2,
     }
 
@@ -6135,20 +6154,177 @@ def prognose_monat(monat: str) -> dict:
         vergangen = tage_im_monat
 
     tage_mit_daten = len(tage) or 1
-    # Netto als Grundlage: Playtomic rechnet netto ab, EGYM zahlt
-    # brutto. Nur netto sind die Monate untereinander vergleichbar —
-    # und nur so bedeutet das Monatsziel in jedem Monat dasselbe.
+    # Netto als Grundlage: Beide Quellen kommen brutto herein, der
+    # Kunde bei Playtomic und EGYM je Check-in. Nur netto sind die
+    # Monate untereinander vergleichbar — und nur so bedeutet das
+    # Monatsziel in jedem Monat dasselbe.
+    #
+    # Brutto läuft seit Fassung 138 überall daneben mit. Marcel am
+    # 11.11.2026: „Kannst du bei den ganzen Monatsstandeinnahmen immer
+    # brutto und netto ganz ausdrücklich dazuschreiben. Also auch wie
+    # viel ist im Brutto sein wird zum Monatsende."
     schnitt = k["gesamt_netto"] / tage_mit_daten
+    schnitt_brutto = k["gesamt_effektiv"] / tage_mit_daten
+    prognose = round(schnitt * tage_im_monat, 2)
+    prognose_brutto = round(schnitt_brutto * tage_im_monat, 2)
 
     return {
         "ist": k["gesamt_netto"],
-        "ist_konto": k["gesamt_effektiv"],
+        "ist_brutto": k["gesamt_effektiv"],
+        "ist_konto": k["gesamt_effektiv"],      # alter Name, gleiche Zahl
+        "ist_ust": k["ust"],
         "schnitt_pro_tag": round(schnitt, 2),
-        "prognose": round(schnitt * tage_im_monat, 2),
+        "schnitt_pro_tag_brutto": round(schnitt_brutto, 2),
+        "prognose": prognose,
+        "prognose_brutto": prognose_brutto,
+        "prognose_ust": round(prognose_brutto - prognose, 2),
         "tage_erfasst": tage_mit_daten,
         "tage_gesamt": tage_im_monat,
         "vergangen": vergangen,
         "ziel": monatsziel(monat),
+    }
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def jahres_bilanz(jahr: int = None) -> dict:
+    """
+    Was ein Monat im Schnitt einbringt, und wo das Jahr landet.
+
+    Marcel am 11.11.2026: „Ich möchte auch irgendwo sehen, was ich zum
+    Beispiel durchschnittlich in den letzten 3 Monaten brutto und netto
+    verdient habe mit den Plätzen und so weiter. Oder über das ganze
+    Jahr gerechnet … dann aber auch hochgerechnet."
+
+    → {jahr, monate, voll, schnitt3, schnitt_jahr, summe, hochrechnung,
+       laufender_monat, offene_monate, warnung}
+
+    Jeder Schnitt steht als eigenes Wörterbuch mit denselben Feldern:
+    brutto, ust, netto, playtomic_brutto, playtomic_netto,
+    wellpass_brutto, wellpass_netto, checkins.
+
+    **Gemittelt wird nur über VOLLE Monate.** Ein angefangener Monat
+    zöge jeden Schnitt nach unten, und der laufende ist immer
+    angefangen. Er steht deshalb getrennt, mit seiner eigenen
+    Hochrechnung.
+    """
+    tage = verfuegbare_tage()
+    if not tage:
+        return {}
+    jahr = int(jahr or max(t[:4] for t in tage))
+    monate = sorted({t[:7] for t in tage if t.startswith(str(jahr))})
+    if not monate:
+        return {}
+
+    heute = date.today()
+    laufend = f"{heute:%Y-%m}"
+
+    # Die EGYM-Check-ins kommen aus einer eigenen Datei und können
+    # fehlen, auch wenn die Zahlungen vollständig sind. Genau das
+    # passierte beim Gegenrechnen: Der August hatte alle Zahlungstage,
+    # aber nur 115 statt rund tausend Check-ins — die EGYM-Datei
+    # deckte vier Tage ab. Als „vollständiger Monat" hätte er den
+    # Schnitt um ein Fünftel nach unten gezogen.
+    ci = loadsheet("checkins")
+    ci_tage = {}
+    if not ci.empty and "analysis_date" in ci.columns:
+        for t in ci["analysis_date"].astype(str):
+            if len(t) >= 7:
+                ci_tage.setdefault(t[:7], set()).add(t[:10])
+
+    reihen = []
+    for m in monate:
+        k = monats_kennzahlen(m)
+        hatte = len({t for t in tage if t.startswith(m)})
+        moeglich = _spieltage_moeglich(m)
+        ci_hatte = len(ci_tage.get(m, ()))
+        zahlungen_da = moeglich > 0 and hatte >= moeglich - 1
+        # Ohne jede Check-in-Zeile im Bestand greift die Prüfung nicht —
+        # sonst gälte in einer Halle ohne Wellpass nie ein Monat als
+        # vollständig, und es gäbe nirgends einen Schnitt.
+        checkins_da = (not ci_tage) or ci_hatte >= hatte - 2
+        reihen.append({
+            "monat": m,
+            "brutto": k["gesamt_effektiv"], "ust": k["ust"],
+            "netto": k["gesamt_netto"],
+            "playtomic_brutto": k["umsatz"], "playtomic_netto": k["umsatz_netto"],
+            "wellpass_brutto": k["wellpass_wert"],
+            "wellpass_netto": k["wellpass_netto"],
+            "checkins": k["wellpass_anzahl"],
+            "tage": hatte, "tage_moeglich": moeglich,
+            "checkin_tage": ci_hatte, "checkins_da": checkins_da,
+            # Voll heisst: der Monat ist vorbei, und BEIDE Quellen sind
+            # da. Der Eröffnungsmonat Juli zählt mit — er hatte nur 27
+            # mögliche Tage, aber die sind vollständig.
+            "voll": m != laufend and zahlungen_da and checkins_da,
+            "grund": ("" if m != laufend and zahlungen_da and checkins_da
+                      else "läuft noch" if m == laufend
+                      else f"{hatte} von {moeglich} Zahlungstagen"
+                      if not zahlungen_da
+                      else f"EGYM nur an {ci_hatte} von {hatte} Tagen"),
+        })
+
+    felder = ("brutto", "ust", "netto", "playtomic_brutto", "playtomic_netto",
+              "wellpass_brutto", "wellpass_netto", "checkins")
+
+    def _mittel(auswahl):
+        if not auswahl:
+            return {f: 0.0 for f in felder} | {"monate": 0}
+        out = {f: round(sum(r[f] for r in auswahl) / len(auswahl), 2)
+               for f in felder}
+        out["checkins"] = int(round(out["checkins"]))
+        out["monate"] = len(auswahl)
+        return out
+
+    voll = [r for r in reihen if r["voll"]]
+    summe = {f: round(sum(r[f] for r in reihen), 2) for f in felder}
+    summe["checkins"] = int(summe["checkins"])
+    summe["monate"] = len(reihen)
+
+    # ── Hochrechnung Jahresende ─────────────────────────────────────────
+    # Drei Teile, bewusst getrennt, damit man sieht, was geschätzt ist:
+    #   1. was dieses Jahr schon da ist,
+    #   2. der Rest des laufenden Monats (Wochentagsmodell),
+    #   3. die Monate, die noch ganz kommen (Schnitt der letzten drei).
+    schnitt3 = _mittel(voll[-3:])
+    rest_monat = {"brutto": 0.0, "netto": 0.0}
+    laufender = next((r for r in reihen if r["monat"] == laufend), None)
+    if laufender:
+        reihen_v = monatsvergleich()
+        if reihen_v and reihen_v[0]["monat"] == laufend:
+            u = vergleichs_urteil(reihen_v[0], reihen_v[1:])
+            rest_monat = {
+                "brutto": max(0.0, round(u["hochrechnung_brutto"]
+                                         - laufender["brutto"], 2)),
+                "netto": max(0.0, round(u["hochrechnung"]
+                                        - laufender["netto"], 2)),
+            }
+
+    offene = 0
+    if int(str(jahr)) == heute.year:
+        offene = 12 - heute.month          # ganze Monate nach dem laufenden
+    hoch_brutto = round(summe["brutto"] + rest_monat["brutto"]
+                        + offene * schnitt3["brutto"], 2)
+    hoch_netto = round(summe["netto"] + rest_monat["netto"]
+                       + offene * schnitt3["netto"], 2)
+
+    return {
+        "jahr": jahr,
+        "monate": reihen,
+        "voll": [r["monat"] for r in voll],
+        "schnitt3": schnitt3,
+        "schnitt_jahr": _mittel(voll),
+        "summe": summe,
+        "laufender_monat": laufender,
+        "rest_laufender_monat": rest_monat,
+        "offene_monate": offene,
+        "hochrechnung": {"brutto": hoch_brutto, "netto": hoch_netto,
+                         "ust": round(hoch_brutto - hoch_netto, 2)},
+        # Ohne Vorjahr ist die Jahreshochrechnung eine Fortschreibung,
+        # keine Prognose — das muss dabeistehen.
+        "warnung": (f"Hochgerechnet mit dem Schnitt der letzten "
+                    f"{schnitt3['monate']} vollen Monate. Ein Vorjahr zum "
+                    f"Abgleichen gibt es noch nicht, Saison ist also "
+                    f"nicht eingerechnet."),
     }
 
 
@@ -14672,7 +14848,8 @@ def _dash_tag():
             f"{geld(k['umsatz'])} brutto · {k['buchungen']} Buchungen")
     with c3:
         kpi("Wellpass", str(k["wellpass_anzahl"]),
-            f"{geld(k['wellpass_wert'])} brutto von EGYM")
+            f"{geld(k['wellpass_wert'])} brutto · "
+            f"{geld(k['wellpass_netto'])} netto")
     with c4:
         kpi("Spieler", str(k["spieler"]), "eindeutige Personen")
 
@@ -14680,11 +14857,11 @@ def _dash_tag():
         st.markdown("")
         c1, c2, c3 = st.columns(3)
         with c1:
-            kpi("Guthaben", geld(k["guthaben"]))
+            kpi("Guthaben brutto", geld(k["guthaben"]))
         with c2:
-            kpi("Leihschläger", geld(k["schlaeger"]))
+            kpi("Leihschläger brutto", geld(k["schlaeger"]))
         with c3:
-            kpi("Bälle", geld(k["baelle"]))
+            kpi("Bälle brutto", geld(k["baelle"]))
 
 
 def _dash_monat():
@@ -14713,8 +14890,9 @@ def _dash_monat():
             f"{k['wellpass_anzahl']} Check-ins · "
             f"{geld(k['wellpass_netto'])} netto")
     with c4:
-        kpi("Ø pro Tag", geld(pg["schnitt_pro_tag"]),
-            f"netto · {pg['tage_erfasst']} Tage erfasst")
+        kpi("Ø pro Tag netto", geld(pg["schnitt_pro_tag"]),
+            f"{geld(pg['schnitt_pro_tag_brutto'])} brutto · "
+            f"{pg['tage_erfasst']} Tage erfasst")
 
     st.caption(
         "Beide Quellen sind brutto — die Kundenzahlungen bei Playtomic "
@@ -14728,8 +14906,11 @@ def _dash_monat():
         st.markdown("")
         erreicht = prozent(k["gesamt_netto"], ziel)
         rest = max(0.0, ziel - k["gesamt_netto"])
-        prog_text = (f"Hochrechnung Monatsende: <b>{geld(pg['prognose'])}</b><br>"
-                     f"Ziel: {geld(ziel)} · "
+        prog_text = (f"Hochrechnung Monatsende: "
+                     f"<b>{geld(pg['prognose'])} netto</b> "
+                     f"({geld(pg['prognose_brutto'])} brutto, davon "
+                     f"{geld(pg['prognose_ust'])} Umsatzsteuer)<br>"
+                     f"Ziel (netto): {geld(ziel)} · "
                      + (f"noch {geld(rest)}" if rest > 0 else "Ziel erreicht 🎉"))
         fortschritts_ring(erreicht, f"{erreicht:.0f}%",
                           f"{MONATE_DE[int(monat[5:7])-1]} {monat[:4]}", prog_text)
@@ -15391,6 +15572,138 @@ def checkins_roh_und_verguetet(monat: str):
     return roh, verguetet, roh - verguetet
 
 
+def _einnahmen_jahr():
+    """
+    Was ein Monat im Schnitt bringt — und wo das Jahr landet.
+
+    Marcel am 11.11.2026: „was ich durchschnittlich in den letzten 3
+    Monaten brutto und netto verdient habe mit den Plätzen und so
+    weiter … über das ganze Jahr gerechnet, dann aber auch
+    hochgerechnet."
+
+    Drei Blöcke, in dieser Reihenfolge: der jüngste Schnitt, weil er
+    am meisten über das Jetzt sagt; das Jahr, wie es wirklich ist; und
+    die Hochrechnung getrennt davon, weil sie eine Schätzung ist und
+    nicht so aussehen darf wie die beiden anderen.
+    """
+    b = jahres_bilanz()
+    if not b:
+        box("Noch keine Daten.", "info")
+        return
+
+    s3, sj, summe = b["schnitt3"], b["schnitt_jahr"], b["summe"]
+
+    if not b["voll"]:
+        box("Noch kein abgeschlossener Monat — ein Schnitt bräuchte "
+            "mindestens einen.", "info")
+    else:
+        st.markdown("**Ø je Monat · "
+                    + ("letzter voller Monat" if s3["monate"] == 1
+                       else f"letzte {s3['monate']} volle Monate") + "**")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            kpi("Brutto je Monat", geld(s3["brutto"]), "kommt herein")
+        with c2:
+            kpi("Umsatzsteuer je Monat", geld(s3["ust"]),
+                f"{CONFIG['mwst']*100:.0f} % · ans Finanzamt")
+        with c3:
+            kpi("Netto je Monat", geld(s3["netto"]), "bleibt")
+
+        st.markdown("")
+        d1, d2, d3 = st.columns(3)
+        with d1:
+            kpi("davon Plätze", geld(s3["playtomic_netto"]),
+                f"netto · {geld(s3['playtomic_brutto'])} brutto")
+        with d2:
+            kpi("davon Wellpass", geld(s3["wellpass_netto"]),
+                f"netto · {geld(s3['wellpass_brutto'])} brutto "
+                f"· {s3['checkins']} Check-ins")
+        with d3:
+            anteil = (s3["wellpass_netto"] / s3["netto"] * 100
+                      if s3["netto"] else 0.0)
+            kpi("Wellpass-Anteil", f"{anteil:.0f} %".replace(".", ","),
+                "am Netto je Monat")
+        st.caption("„Plätze\" ist alles, was über Playtomic läuft — "
+                   "Platzmiete, Bälle, Leihschläger, Turniere. "
+                   "„Wellpass\" ist EGYMs Vergütung je Check-in.")
+
+        if sj["monate"] > s3["monate"]:
+            st.caption(
+                f"Über alle {sj['monate']} vollen Monate des Jahres sind "
+                f"es {geld(sj['brutto'])} brutto und {geld(sj['netto'])} "
+                f"netto je Monat — die letzten {s3['monate']} liegen "
+                + ("darüber." if s3["netto"] >= sj["netto"] else "darunter.")
+                + " Der jüngere Schnitt sagt mehr über das Jetzt, der "
+                  "längere ist ruhiger.")
+
+    # ── Das Jahr, wie es ist ────────────────────────────────────────────
+    st.markdown("")
+    st.markdown(f"**{b['jahr']} bisher** · {summe['monate']} Monate im Bestand")
+    j1, j2, j3 = st.columns(3)
+    with j1:
+        kpi("Brutto", geld(summe["brutto"]), "eingenommen")
+    with j2:
+        kpi("Umsatzsteuer", geld(summe["ust"]), "ans Finanzamt")
+    with j3:
+        kpi("Netto", geld(summe["netto"]),
+            f"{summe['checkins']} Wellpass-Check-ins")
+
+    # ── Das Jahr, wie es wird ───────────────────────────────────────────
+    hr = b["hochrechnung"]
+    if hr["brutto"] > summe["brutto"]:
+        st.markdown("")
+        st.markdown(f"**Hochrechnung Jahresende {b['jahr']}** · Schätzung")
+        h1, h2, h3 = st.columns(3)
+        with h1:
+            kpi("Brutto", geld(hr["brutto"]), "voraussichtlich")
+        with h2:
+            kpi("Umsatzsteuer", geld(hr["ust"]), "voraussichtlich")
+        with h3:
+            kpi("Netto", geld(hr["netto"]), "bleibt voraussichtlich")
+
+        teile = [f"<b>{geld(summe['netto'])}</b> sind da"]
+        if b["rest_laufender_monat"]["netto"]:
+            teile.append(f"<b>{geld(b['rest_laufender_monat']['netto'])}</b> "
+                         "kommen im laufenden Monat noch dazu")
+        if b["offene_monate"]:
+            teile.append(
+                f"<b>{b['offene_monate']}</b> volle "
+                + ("Monat" if b["offene_monate"] == 1 else "Monate")
+                + f" à {geld(b['schnitt3']['netto'])}")
+        box("So kommt die Zahl zustande (netto): " + " · ".join(teile)
+            + f".<br>{b['warnung']}", "info")
+
+    # ── Monat für Monat ─────────────────────────────────────────────────
+    st.markdown("")
+    st.markdown("**Monat für Monat**")
+    st.dataframe(pd.DataFrame([{
+        "Monat": monat_lang(r["monat"]),
+        "Brutto": geld(r["brutto"]),
+        "Umsatzsteuer": geld(r["ust"]),
+        "Netto": geld(r["netto"]),
+        "Plätze brutto": geld(r["playtomic_brutto"]),
+        "Plätze netto": geld(r["playtomic_netto"]),
+        "Wellpass brutto": geld(r["wellpass_brutto"]),
+        "Wellpass netto": geld(r["wellpass_netto"]),
+        "Check-ins": r["checkins"],
+        "Stand": "vollständig" if r["voll"] else r["grund"],
+    } for r in b["monate"][::-1]]), use_container_width=True, hide_index=True)
+    st.caption("Gemittelt wird nur über vollständige Monate — ein "
+               "angefangener zöge jeden Schnitt nach unten. Vollständig "
+               "heisst: Zahlungen UND EGYM-Check-ins sind da. Fehlt "
+               "eine EGYM-Datei, sieht der Monat sonst schwach aus, "
+               "obwohl nur die Daten fehlen.")
+
+    unvollstaendig = [r for r in b["monate"]
+                      if not r["voll"] and r["monat"] != f"{date.today():%Y-%m}"]
+    if unvollstaendig:
+        box("Nicht im Schnitt, weil Daten fehlen: "
+            + " · ".join(f"<b>{monat_lang(r['monat'])}</b> ({r['grund']})"
+                         for r in unvollstaendig)
+            + ". Die fehlenden Exporte nachladen, dann rechnen sie mit.",
+            "warn")
+
+
 def _dash_einnahmen():
     """
     Nur harte Fakten: was Playtomic abgerechnet hat und was EGYM zahlt.
@@ -15553,7 +15866,8 @@ def modul_dashboard():
     # Buchungsexport. Siehe belegte_slots().
     seiten = [("📅 Tag", _dash_tag), ("💰 Einnahmen", _dash_einnahmen),
               ("🏁 Monatsstand", _dash_monatsstand),
-              ("📈 Monat", _dash_monat)]
+              ("📈 Monat", _dash_monat),
+              ("🗓 Jahr & Schnitt", _einnahmen_jahr)]
     if auslastung_daten_da():
         seiten.append(("📊 Auslastung", _dash_auslastung))
     seiten += [("⚖️ Monatsabgleich", _dash_abgleich), ("🌦 Wetter", _dash_wetter)]
@@ -15585,38 +15899,70 @@ def _dash_monatsstand():
     tag = jetzt["tage_moeglich"]
     box(f"Verglichen werden die ersten <b>{tag} Tage</b> jedes Monats — "
         f"Stand {datum_kurz(str(jetzt['bis']))}. Ein halber Monat gegen "
-        "einen ganzen wäre kein Vergleich.<br>Gerechnet wird mit "
-        "<b>Platzeinnahmen plus EGYM-Vergütung, beides netto</b> — die "
-        "Wellpass-Check-ins sind echtes Geld und gehören dazu, aber EGYM "
-        "zahlt brutto, deshalb wird die Vergütung erst auf netto "
-        "umgerechnet.", "info")
+        "einen ganzen wäre kein Vergleich.<br><b>Brutto</b> ist, was "
+        "hereinkommt: Kundenzahlungen bei Playtomic plus EGYM-Vergütung. "
+        f"<b>Netto</b> ist, was nach {CONFIG['mwst']*100:.0f} % "
+        "Umsatzsteuer bleibt. Verglichen und hochgerechnet wird auf "
+        "beiden Böden; das Monatsziel steht auf netto.", "info")
 
     u = vergleichs_urteil(jetzt, frueher)
+
+    # ── Stand bis heute ─────────────────────────────────────────────────
+    st.markdown(f"**{monat_lesbar(jetzt['monat'])} · Tag 1–{tag}**")
     c1, c2, c3 = st.columns(3)
     with c1:
-        # Gesamt heisst Platz PLUS Wellpass, beides netto. Ohne die
-        # EGYM-Vergütung sähe ein Monat mit vielen Check-ins schlechter
-        # aus, als er war; mit ihrer Bruttozahl besser.
-        kpi(f"{monat_lesbar(jetzt['monat'])} · Tag 1–{tag}",
-            geld(jetzt["gesamt_netto"]),
-            f"{geld(jetzt['umsatz_netto'])} Platz + "
-            f"{geld(jetzt['wellpass_netto'])} Wellpass "
-            f"({jetzt['wellpass_anzahl']} Check-ins), beides netto")
+        kpi("Bisher brutto", geld(jetzt["gesamt_effektiv"]),
+            f"{geld(jetzt['umsatz'])} Playtomic + "
+            f"{geld(jetzt['wellpass_wert'])} Wellpass "
+            f"({jetzt['wellpass_anzahl']} Check-ins)")
     with c2:
-        if u["verlaesslich"]:
-            zeichen = "+" if u["abstand"] >= 0 else ""
-            kpi("gegen den Schnitt", f"{zeichen}{u['prozent']:.0f} %".replace(".", ","),
-                f"{zeichen}{geld(u['abstand'])} gegenüber {geld(u['schnitt'])}")
-        else:
-            kpi("gegen den Schnitt", "—", "zu wenig Vergleichsmonate")
+        kpi("Davon Umsatzsteuer", geld(jetzt["ust"]),
+            f"{CONFIG['mwst']*100:.0f} % · geht ans Finanzamt")
     with c3:
-        teile = u.get("hochrechnung_teile") or {}
-        rest = teile.get("rest_tage", 0)
-        kpi("Hochrechnung Monat", geld(u["hochrechnung"]),
-            f"noch {rest} " + ("Tag" if rest == 1 else "Tage")
-            + " · nach Wochentagen gerechnet")
+        kpi("Bisher netto", geld(jetzt["gesamt_netto"]),
+            f"{geld(jetzt['umsatz_netto'])} Playtomic + "
+            f"{geld(jetzt['wellpass_netto'])} Wellpass")
 
+    # ── Hochrechnung Monatsende ─────────────────────────────────────────
     teile = u.get("hochrechnung_teile") or {}
+    rest = teile.get("rest_tage", 0)
+    st.markdown("")
+    st.markdown(f"**Hochrechnung Monatsende** · noch {rest} "
+                + ("Tag" if rest == 1 else "Tage"))
+    h1, h2, h3 = st.columns(3)
+    with h1:
+        kpi("Monatsende brutto", geld(u["hochrechnung_brutto"]),
+            "so viel kommt herein")
+    with h2:
+        kpi("Davon Umsatzsteuer", geld(u["hochrechnung_ust"]),
+            "voraussichtlich")
+    with h3:
+        kpi("Monatsende netto", geld(u["hochrechnung"]),
+            "so viel bleibt")
+
+    # ── Gegen die Monate davor ──────────────────────────────────────────
+    st.markdown("")
+    st.markdown("**Gegen dieselben Tage der Vormonate**")
+    v1, v2, v3 = st.columns(3)
+    if u["verlaesslich"]:
+        with v1:
+            zeichen = "+" if u["abstand"] >= 0 else ""
+            kpi("gegen den Schnitt · netto",
+                f"{zeichen}{u['prozent']:.0f} %".replace(".", ","),
+                f"{zeichen}{geld(u['abstand'])} gegenüber "
+                f"{geld(u['schnitt'])} netto")
+        with v2:
+            zeichen_b = "+" if u["abstand_brutto"] >= 0 else ""
+            kpi("gegen den Schnitt · brutto",
+                f"{zeichen_b}{geld(abs(u['abstand_brutto']))}",
+                f"gegenüber {geld(u['schnitt_brutto'])} brutto")
+        with v3:
+            kpi("bester Monat · netto", geld(u["bestes"]),
+                f"Tag 1–{tag}, zum Vergleich")
+    else:
+        with v1:
+            kpi("gegen den Schnitt", "—", "zu wenig Vergleichsmonate")
+
     if teile.get("rest_verteilung"):
         wie = ", ".join(
             f"{anz} {WOCHENTAGE[wt] if anz == 1 else WOCHENTAGE_MEHRZAHL[wt]}"
@@ -15635,14 +15981,13 @@ def _dash_monatsstand():
             "Unterschied.")
 
     if u["verlaesslich"]:
-        if u["abstand"] >= 0:
-            box(f"Der {monat_lesbar(jetzt['monat']).split()[0]} liegt nach "
-                f"{tag} Tagen <b>{geld(abs(u['abstand']))}</b> über dem "
-                "Schnitt derselben Tage.", "ok")
-        else:
-            box(f"Der {monat_lesbar(jetzt['monat']).split()[0]} liegt nach "
-                f"{tag} Tagen <b>{geld(abs(u['abstand']))}</b> unter dem "
-                "Schnitt derselben Tage.", "warn")
+        name = monat_lesbar(jetzt["monat"]).split()[0]
+        wo = "über" if u["abstand"] >= 0 else "unter"
+        box(f"Der {name} liegt nach {tag} Tagen "
+            f"<b>{geld(abs(u['abstand']))} netto</b> "
+            f"({geld(abs(u['abstand_brutto']))} brutto) {wo} dem "
+            "Schnitt derselben Tage.",
+            "ok" if u["abstand"] >= 0 else "warn")
 
     _dash_warum(tag)
 
@@ -15652,21 +15997,27 @@ def _dash_monatsstand():
         luecke = m["tage_moeglich"] - m["tage_mit_daten"]
         zeilen.append({
             "Monat": monat_lesbar(m["monat"]),
+            f"Brutto Tag 1–{tag}": geld(m["gesamt_effektiv"]),
+            "Umsatzsteuer": geld(m["ust"]),
             f"Netto Tag 1–{tag}": geld(m["gesamt_netto"]),
-            "davon Platz netto": geld(m["umsatz_netto"]),
-            "davon Wellpass netto": geld(m["wellpass_netto"]),
+            "Playtomic brutto": geld(m["umsatz"]),
+            "Playtomic netto": geld(m["umsatz_netto"]),
+            "Wellpass brutto": geld(m["wellpass_wert"]),
+            "Wellpass netto": geld(m["wellpass_netto"]),
             "Buchungen": m["buchungen"],
             "Spieler": m["spieler"],
-            "je Tag": geld(m["gesamt_netto"] / max(1, m["tage_mit_daten"])),
+            "netto je Tag": geld(m["gesamt_netto"] / max(1, m["tage_mit_daten"])),
             # Ohne diese Spalte sähe ein Monat mit Datenlücken einfach
             # nur schwach aus, statt unvollständig.
             "Datenlage": "vollständig" if luecke <= 0
                          else f"{luecke} Tage fehlen"})
     st.dataframe(pd.DataFrame(zeilen), use_container_width=True,
                  hide_index=True)
-    st.caption("„je Tag“ rechnet nur mit den Tagen, für die wirklich Daten "
-               "da sind — ein fehlender Tag drückt den Schnitt sonst, "
-               "obwohl gar nichts passiert ist.")
+    st.caption("„netto je Tag“ rechnet nur mit den Tagen, für die "
+               "wirklich Daten da sind — ein fehlender Tag drückt den "
+               "Schnitt sonst, obwohl gar nichts passiert ist. Brutto "
+               "minus Umsatzsteuer ergibt in jeder Zeile genau die "
+               "Nettospalte.")
 
 
 def _dash_warum(tag: int):
